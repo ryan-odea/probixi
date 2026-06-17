@@ -103,7 +103,7 @@ def read_crystfel_cell(path: PathLike) -> CellParams:
     }
     values: dict[str, float] = {}
     meta: dict[str, str] = {}
-    with path.open("r") as fh:
+    with path.open("r", encoding="utf-8") as fh:
         for line in fh:
             line = line.split(";", 1)[0].strip()
             if not line or "=" not in line:

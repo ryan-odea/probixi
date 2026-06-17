@@ -152,7 +152,6 @@ def animate_noise_diagnostics(
     ax_rad = fig.add_subplot(gs[0, 1])
     ax_drift = fig.add_subplot(gs[1, :])
 
-    rows, cols = model.frame_size
     bc = model.rotational.beam_center
 
     cmap_obj = plt.get_cmap(cmap).copy()

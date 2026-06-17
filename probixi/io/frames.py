@@ -58,7 +58,7 @@ class DataLoader:
         if not self.list_file.is_file():
             raise FileNotFoundError(f"List file not found: {self.list_file}")
         paths: list[str] = []
-        with self.list_file.open("r") as fh:
+        with self.list_file.open("r", encoding="utf-8") as fh:
             for line in fh:
                 line = line.strip()
                 if not line or line.startswith(("#", ";")):

@@ -67,3 +67,9 @@ Repository = "https://github.com/ryan-odea/probixi"
 
 [tool.hatch.build.targets.wheel]
 packages = ["probixi_core"]
+
+[tool.pylint.typecheck]
+generated-members = ["torch.*"]
+
+[tool.pylint.messages_control]
+disable = ["abstract-method", "not-callable"]
