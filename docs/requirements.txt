@@ -1,0 +1,5 @@
+sphinx
+piccolo_theme
+sphinx-autodoc-typehints
+sphinx-copybutton
+myst-parser
