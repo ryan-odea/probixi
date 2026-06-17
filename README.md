@@ -31,7 +31,7 @@ Or the latest development version with
 pip install git+https://github.com/ryan-odea/probixi.git
 ```
 
-## Using `Probixi`
+## Using `probixi`
 
 `probixi` can be interacted with either via the command line interface, or through the python API. In it's current implementation, via python, the `Probixi` API returns iterables, which remain on a GPU tensor via pytorch up until collection - meaning that you can further pass information for any downstream processing. Through the CLI, this is currently a one-stop-shop for peakfinding and indexing. **This may change in the future**
 
