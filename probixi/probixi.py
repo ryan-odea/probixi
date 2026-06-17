@@ -47,6 +47,7 @@ class Probixi:
     ----------
     list_file, geometry_file, cell_file : path-like
         CrystFEL ``.lst`` list, ``.geom`` geometry and ``.cell`` unit-cell inputs.
+        ``cell_file`` may be omitted for peak-only use
     noise_mode : {"online", "per_frame"}, default "online"
         Whether the running noise model keeps updating per frame ("online",
         tracking slow drift) or resets each frame.
@@ -77,7 +78,7 @@ class Probixi:
 
     list_file: PathLike
     geometry_file: PathLike
-    cell_file: PathLike
+    cell_file: Optional[PathLike] = None
 
     noise_mode: Literal["per_frame", "online"] = "online"
     warmup_frames: int = 16
@@ -97,7 +98,7 @@ class Probixi:
     dtype: torch.dtype = torch.float32
 
     loader: DataLoader = field(init=False, repr=False)
-    indexer: Indexer = field(init=False, repr=False)
+    indexer: Optional[Indexer] = field(default=None, init=False, repr=False)
     threshold_calibration: Optional[ThresholdCalibration] = field(
         default=None, init=False, repr=False
     )
@@ -113,17 +114,18 @@ class Probixi:
         m = self.loader.metadata
         if m.geometry is None:
             raise ValueError(f"could not parse geometry from {self.geometry_file}")
-        if m.cell is None:
+        if self.cell_file is not None and m.cell is None:
             raise ValueError(f"could not parse cell from {self.cell_file}")
-        self.indexer = Indexer(
-            m.geometry.to_dict(),
-            m.cell,
-            seed=self.seed,
-            refine=self.refine,
-            cell_match=self.cell_match,
-            integrate=self.integrate,
-            device=self.device,
-        )
+        if m.cell is not None:
+            self.indexer = Indexer(
+                m.geometry.to_dict(),
+                m.cell,
+                seed=self.seed,
+                refine=self.refine,
+                cell_match=self.cell_match,
+                integrate=self.integrate,
+                device=self.device,
+            )
 
     @property
     def metadata(self) -> Metadata:
@@ -133,11 +135,17 @@ class Probixi:
     @property
     def geometry(self) -> dict:
         """Detector geometry dict (beam_center, clen, pixel_size, wavelength, ...)."""
-        return self.indexer.geometry
+        if self.indexer is not None:
+            return self.indexer.geometry
+        return self.loader.metadata.geometry.to_dict()
 
     @property
     def target_cell(self) -> CellParams:
         """Target unit cell that accepted orientations must match."""
+        if self.indexer is None:
+            raise RuntimeError(
+                "no target cell; construct Probixi with a cell_file to index"
+            )
         return self.indexer.target_cell
 
     @property
@@ -379,6 +387,7 @@ class Probixi:
         frames: Iterable[Tensor],
         start_index: int = 0,
         update_noise: bool = True,
+        estimate_scale: bool = True,
     ) -> PeakStream:
         """Open a lazy stream of per-frame peak results.
 
@@ -391,6 +400,11 @@ class Probixi:
             run indices when starting partway through).
         update_noise : bool, default True
             Fold each frame into the running noise model as it passes.
+        estimate_scale : bool, default True
+            Estimate the per-frame fluence scale (when a calibration reference
+            exists) so ``index_stream`` can attach it to each solution. Set
+            ``False`` for peak-only use to skip the per-frame regression and
+            avoid accumulating scales that are never consumed.
 
         Returns
         -------
@@ -404,7 +418,7 @@ class Probixi:
                 self._ensure_built(item)
                 if update_noise:
                     self._update_noise(item)
-                if self._scale_ref is not None:
+                if estimate_scale and self._scale_ref is not None:
                     subs = item if item.ndim == 3 else item.unsqueeze(0)
                     for sub in subs:
                         idx = start_index + offset
@@ -450,6 +464,11 @@ class Probixi:
         IndexStream
             Lazy stream of ``IndexResult``, one per indexed frame.
         """
+        if self.indexer is None:
+            raise RuntimeError(
+                "index_stream requires a target cell; construct Probixi with a "
+                "cell_file (omit it only for peak-only use via peak_stream)"
+            )
         self._frame_scales.clear()
         base = self.indexer.index_stream(
             self.peak_stream(

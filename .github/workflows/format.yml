@@ -1,0 +1,41 @@
+name: Auto-format Code
+
+on:
+  push:
+    branches: [main, devel*]
+  workflow_dispatch:
+
+jobs:
+  format:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+
+      - name: Install formatters
+        run: pip install black isort ruff
+
+      - name: Auto-fix lint issues with Ruff
+        run: ruff check --fix --exit-zero .
+
+      - name: Sort imports with isort
+        run: isort .
+
+      - name: Format with Black
+        run: black .
+
+      - name: Commit changes
+        run: |
+          git config --local user.email "github-actions[bot]@users.noreply.github.com"
+          git config --local user.name "github-actions[bot]"
+          git diff --quiet || (git add -A && git commit -m "Auto-format code (black, isort, ruff)")
+          git push
+
+      - name: Flag remaining lint issues with Ruff
+        run: ruff check --output-format=github .
