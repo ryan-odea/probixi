@@ -66,7 +66,7 @@ Repository = "https://github.com/ryan-odea/probixi"
 "Ryan O'Dea (ORCID)" = "https://orcid.org/0009-0000-0103-9546"
 
 [tool.hatch.build.targets.wheel]
-packages = ["probixi_core"]
+packages = ["probixi"]
 
 [tool.pylint.typecheck]
 generated-members = ["torch.*"]
