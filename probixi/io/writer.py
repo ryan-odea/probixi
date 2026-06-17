@@ -318,7 +318,7 @@ class DataOffloader(_StreamWriter):
             "   h    k    l          I   sigma(I)       peak background  "
             "fs/px  ss/px panel",
         ]
-        for (row, col), (h, k, l), intensity, sigma, peak, background in refl:
+        for (row, col), (h, k, l), intensity, sigma, peak, background in refl: # noqa: E741
             lines.append(
                 f"{int(h):4d} {int(k):4d} {int(l):4d} {intensity:10.2f} "
                 f"{sigma:10.2f} {peak:10.2f} {background:10.2f} "
