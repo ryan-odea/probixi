@@ -5,7 +5,7 @@ from typing import Literal, Optional, cast
 import click
 import torch
 
-from probixi.io import DataOffloader
+from probixi.io import DataOffloader, PeakOffloader
 from probixi.probixi import Probixi
 
 
@@ -16,12 +16,15 @@ from probixi.probixi import Probixi
 @click.option("-g", "--geometry", "geometry_file", required=True,
               type=click.Path(exists=True, dir_okay=False),
               help="CrystFEL geometry file (.geom).")
-@click.option("-p", "--cell", "cell_file", required=True,
+@click.option("-p", "--cell", "cell_file", default=None,
               type=click.Path(exists=True, dir_okay=False),
-              help="CrystFEL unit-cell file (.cell).")
+              help="CrystFEL unit-cell file (.cell). Required unless --peaks-only.")
 @click.option("-o", "--output", "output", required=True,
               type=click.Path(dir_okay=False, writable=True),
               help="Output CrystFEL-style .stream file.")
+@click.option("--peaks-only", is_flag=True,
+              help="Only run peak finding and export a peaks-only stream "
+              "Does not require a unit cell.")
 @click.option("--gif", "gif", default=None,
               type=click.Path(dir_okay=False, writable=True),
               help="Also write a noise-model diagnostic GIF over the seed frames.")
@@ -44,8 +47,9 @@ from probixi.probixi import Probixi
 def main(
     list_file: str,
     geometry_file: str,
-    cell_file: str,
+    cell_file: Optional[str],
     output: str,
+    peaks_only: bool,
     gif: Optional[str],
     start: Optional[int],
     stop: Optional[int],
@@ -58,7 +62,13 @@ def main(
     panel: str,
     quiet: bool,
 ) -> None:
-    """Run the probixi pipeline and write indexed frames to a CrystFEL stream."""
+    """Run the probixi pipeline and write indexed frames to a CrystFEL stream.
+
+    With --peaks-only, peak finding runs but indexing does not, and a
+    peaks-only stream is written instead.
+    """
+    if not peaks_only and cell_file is None:
+        raise click.UsageError("a unit cell (-p/--cell) is required unless --peaks-only")
     dev = torch.device(device) if device else None
     probixi = Probixi(
         list_file=list_file,
@@ -91,6 +101,29 @@ def main(
         click.echo(msg)
 
     frames = probixi.frames(start=start, stop=stop)
+
+    if peaks_only:
+        peaks = probixi.peak_stream(
+            frames, start_index=start or 0, estimate_scale=False
+        )
+        with PeakOffloader(
+            output,
+            geometry=probixi.geometry,
+            geometry_file=geometry_file,
+            files=meta.files,
+            panel=panel,
+        ) as off:
+            n = 0
+            for result in peaks:
+                if len(result) == 0:
+                    continue
+                off.write(result)
+                n += 1
+                if not quiet:
+                    click.echo(f"  frame {result.frame_index}: {len(result)} peaks")
+        click.echo(f"Wrote peaks for {n} frame(s) to {output}")
+        return
+
     stream = probixi.index_stream(frames, batch_size=batch_size, start_index=start or 0)
 
     with DataOffloader(

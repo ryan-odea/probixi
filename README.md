@@ -44,7 +44,40 @@ probixi -i files.lst -g myGeometry.geom -p myCell.cell -o stream.stream --device
 ```
 
 Or with python:
-#TODO a good example goes here
+
+```python
+import torch
+
+from probixi import Probixi
+from probixi.io import DataOffloader
+
+pipeline = Probixi(
+    list_file="files.lst",
+    geometry_file="myGeometry.geom",
+    cell_file="myCell.cell",
+    device=torch.device("cuda"),
+)
+
+pipeline.noise_diagnostics("myNoiseModel.gif", stop=32)
+cal = pipeline.calibrate(n_seed=1636)
+print(f"kappa={cal.kappa:.2f}  prior_peak={cal.prior_peak:.4f}  "
+      f"threshold={pipeline.threshold_calibration.threshold:.2f}")
+
+# Stream every frame through detect -> index -> predict + integrate. The stream
+# is lazy and each result stays on the GPU until you touch it, so you can branch
+# off any downstream processing with torch
+with DataOffloader(
+    "stream.stream",
+    geometry=pipeline.geometry,
+    cell=pipeline.target_cell,
+    geometry_file="myGeometry.geom",
+    files=pipeline.metadata.files,
+) as off:
+    for result in pipeline.index_stream(pipeline.frames(), batch_size=8):
+        off.write(result)  # or: pipeline.index_stream(...).to_stream(off)
+        print(f"frame {result.frame_index}: "
+              f"{result.n_indexed}/{result.n_peaks} indexed (rmsd {result.rmsd:.4f})")
+```
 
 ## Comparison with other works
 
@@ -71,11 +104,13 @@ Benchmarks were run on:
 | Randomly Dimmed Lysozyme-FEL          |                           |                     |                                     |                               |                   |
 | Randomly Dimmed BacterioRhodopsin-FEL |                           |                     |                                     |                               |                   |
 
-### (pyFAI + TORO)
+### pyFAI + TORO
 
-# TODO cite pyFAI and TORO
+Perhaps a more fair comparison, especially with respect to speed, is [pyFAI][pyfai] (azimuthal
+integration and peak picking) paired with the [TORO][toro] indexer, which both run on the GPU.
 
-Perhaps a more fair comparison, especially with respect to speed, is pyFAI and TORO, which both operate on the GPU
+[pyfai]: https://doi.org/10.1107/S1600576715004306
+[toro]: https://doi.org/10.1107/S1600576724003182
 
 
 | Dataset                               | Percent Indexed (`probixi`) | GPU time (`probixi`) | Percent Indexed (`pyFAI+TORO`) | GPU Time (`pyFAI+TORO`) [No-Tuning] | Percent Agreement |
@@ -90,10 +125,41 @@ Perhaps a more fair comparison, especially with respect to speed, is pyFAI and T
 
 ### Using `probixi` as only a peakfinder
 
-Of course, if you only want to use probixi as a peakfinder and prefer to use your own indexing regime, this is possible.
+Of course, if you only want to use probixi as a peakfinder and prefer to use your own indexing regime, this is possible -- through the CLI's `--peaks-only` flag or the Python API's `peak_stream`.
+
+Via the CLI:
+
+```bash
+probixi -i files.lst -g myGeometry.geom -o peaks.stream --peaks-only --device cuda
+```
+
+Or with python:
 
 ```python
-TODO: show how to only peakfind here with cli and other
+import torch
+
+from probixi import Probixi
+from probixi.io import PeakOffloader
+
+pipeline = Probixi(
+    list_file="files.lst",
+    geometry_file="myGeometry.geom",
+    device=torch.device("cuda"),
+)
+
+# Calibrate the noise model + detection threshold on the seed frames, as usual.
+pipeline.calibrate(n_seed=1636)
+
+peaks = pipeline.peak_stream(pipeline.frames(), estimate_scale=False)
+with PeakOffloader(
+    "peaks.stream",
+    geometry=pipeline.geometry,
+    geometry_file="myGeometry.geom",
+    files=pipeline.metadata.files,
+) as off:
+    for result in peaks:
+        if len(result):       # skip blanks; export only frames with peaks
+            off.write(result)
 ```
 
 ## Dependencies
@@ -116,4 +182,3 @@ If you would like to contribute actively by merging code, please open a PR with 
 1. Code is formatted with `isort`, then `black`, followed by a `ruff --check`. This will initiate on PR, so it might be best to check beforehand.
 2. Docstrings are minimally on user-facing functions in [`numpy` style](https://numpydoc.readthedocs.io/en/latest/format.html). 
 3. Comments, or some explanation (in PR) for the additions, limited to the scope of the project. If fixing a bug, comments should be included in the PR rather than the code itself.
-
