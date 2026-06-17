@@ -64,7 +64,7 @@ def fit_eigen_background(
         fit = coeffs @ U  # (F, P)
         resid = raw.flatten(1) - fit
         clipped = fit + torch.clamp(resid, min=-cap.flatten(), max=cap.flatten())
-        R = (clipped * m.flatten())
+        R = clipped * m.flatten()
         R = R - R.mean(dim=0, keepdim=True)
 
     modes = (modes.reshape(n_modes, *mu.shape) * m).contiguous()

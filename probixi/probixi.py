@@ -6,16 +6,29 @@ from pathlib import Path
 from typing import Iterable, Iterator, Literal, Optional, Union
 
 import torch
-from .peakfinding import PeakFinder, PeakStream
 from torch import Tensor
 
-from .indexer import (CellMatchConfig, Indexer, IndexStream, IntegrateConfig,
-                      RefineConfig, SeedConfig)
+from .indexer import (
+    CellMatchConfig,
+    Indexer,
+    IndexStream,
+    IntegrateConfig,
+    RefineConfig,
+    SeedConfig,
+)
 from .io import CellParams, DataLoader, Metadata, iter_frames
-from .peakfinding.noise import (CalibrationResult, FrameScale, NoiseModel,
-                                ScaleReference, ThresholdCalibration,
-                                calibrate_noise, calibrate_threshold,
-                                fit_eigen_background, fit_photon_transfer)
+from .peakfinding import PeakFinder, PeakStream
+from .peakfinding.noise import (
+    CalibrationResult,
+    FrameScale,
+    NoiseModel,
+    ScaleReference,
+    ThresholdCalibration,
+    calibrate_noise,
+    calibrate_threshold,
+    fit_eigen_background,
+    fit_photon_transfer,
+)
 
 PathLike = Union[str, Path]
 

@@ -8,8 +8,7 @@ import torch
 import torch.nn.functional as F
 from torch import Tensor
 
-from ..peaks.neighborhood import (gaussian_kernel_2d, local_mean_var,
-                                  matched_filter_z)
+from ..peaks.neighborhood import gaussian_kernel_2d, local_mean_var, matched_filter_z
 
 
 @dataclass
@@ -324,7 +323,9 @@ class ThresholdCalibration:
         device = finder.noise.valid_mask.device
         dtype = finder.noise.pixel.mean_.dtype
         finder._mf_kernels = [
-            gaussian_kernel_2d(2 * int(math.ceil(3.0 * s)) + 1, s, device=device, dtype=dtype)
+            gaussian_kernel_2d(
+                2 * int(math.ceil(3.0 * s)) + 1, s, device=device, dtype=dtype
+            )
             for s in finder.mf_scales
         ]
         finder._pred_key = None  # force MF denominator recompute
@@ -367,7 +368,7 @@ def calibrate_threshold(
     the multi-scale statistic ``T = max_k MF(z; PSF_k)`` is not: the scale-max
     biases the body's location/scale and spatial correlation fattens the right
     tail. This learns both from the seed frames, then picks the smallest T* whose
-    median quiet-frame noise-blob count is at or below ``target_noise_peaks`` which 
+    median quiet-frame noise-blob count is at or below ``target_noise_peaks`` which
     yields a tail-rate target rather than a hand-set sigma cut.
 
     Pre-req: ``noise_model`` is already calibrated (run :func:`calibrate_noise`
@@ -481,8 +482,12 @@ def calibrate_threshold(
         quiet_idx = order[: max(4, len(frames) // 2)]
         quiet_max_T = float(tmax_t[quiet_idx[-1]])
 
-    n_steps = int(round((threshold_grid_max - threshold_grid_min) / threshold_grid_step)) + 1
-    tgrid = torch.linspace(threshold_grid_min, threshold_grid_max, n_steps, device=device, dtype=dtype)
+    n_steps = (
+        int(round((threshold_grid_max - threshold_grid_min) / threshold_grid_step)) + 1
+    )
+    tgrid = torch.linspace(
+        threshold_grid_min, threshold_grid_max, n_steps, device=device, dtype=dtype
+    )
     # precompute local-max indicator per quiet frame once
     quiet_T = [t_maps[i] for i in quiet_idx]
     is_max_per_frame: list[Tensor] = []
@@ -499,10 +504,14 @@ def calibrate_threshold(
             peaks = is_max & above
             if size_min > 1:
                 Ab = above.unsqueeze(0).unsqueeze(0).to(dtype)
-                local_size = 9.0 * F.avg_pool2d(Ab, kernel_size=3, stride=1, padding=1).squeeze()
+                local_size = (
+                    9.0 * F.avg_pool2d(Ab, kernel_size=3, stride=1, padding=1).squeeze()
+                )
                 peaks = peaks & (local_size >= float(size_min))
             per_frame_counts.append(int(peaks.sum()))
-        median_counts.append(float(torch.tensor(per_frame_counts, dtype=torch.float32).median()))
+        median_counts.append(
+            float(torch.tensor(per_frame_counts, dtype=torch.float32).median())
+        )
     counts_t = torch.tensor(median_counts)
 
     ok = counts_t <= float(target_noise_peaks)

@@ -1,5 +1,11 @@
-from .indexer import (CellMatchConfig, Indexer, IndexStream, IntegrateConfig,
-                      RefineConfig, SeedConfig)
+from .indexer import (
+    CellMatchConfig,
+    Indexer,
+    IndexStream,
+    IntegrateConfig,
+    RefineConfig,
+    SeedConfig,
+)
 
 __all__ = [
     "Indexer",
@@ -7,5 +13,5 @@ __all__ = [
     "CellMatchConfig",
     "IntegrateConfig",
     "RefineConfig",
-    "SeedConfig"
+    "SeedConfig",
 ]

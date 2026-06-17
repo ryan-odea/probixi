@@ -288,7 +288,7 @@ class NoiseModel(nn.Module):
 
         Renders the running mean background, its radial profile, and the
         per-batch drift as an animation over batches.
-        
+
         Returns
         -------
         Path
