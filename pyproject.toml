@@ -41,7 +41,7 @@ dependencies = [
 ]
 
 [project.scripts]
-#todo
+probixi = "probixi.cli:main"
 
 [project.optional-dependencies]
 docs = [
