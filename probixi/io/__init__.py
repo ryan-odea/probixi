@@ -14,5 +14,5 @@ __all__ = [
     "iter_frames",
     "H5Info",
     "Metadata",
-    "scan_h5"
+    "scan_h5",
 ]

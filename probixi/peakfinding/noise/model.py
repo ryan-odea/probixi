@@ -101,6 +101,7 @@ class NoiseStats(nn.Module):
 
 # NOISE MODEL ====================================================
 
+
 class NoiseModel(nn.Module):
     """Composite noise model: pixel + radial + panel.
 
