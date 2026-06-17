@@ -35,7 +35,9 @@ dependencies = [
     "h5py",
     "hdf5plugin",
     "numpy",
-    "torch"
+    "torch",
+    "matplotlib",
+    "pillow"
 ]
 
 [project.scripts]
