@@ -7,12 +7,12 @@ from torch import Tensor
 
 from .refine import _axis_angle_to_rotation
 
-# TORO-style seeding over orientation with the cell fixed 
+# TORO-style seeding over orientation with the cell fixed
 # TORO: https://doi.org/10.1107/S1600576724003182
-# 
+#
 # A rotation has 3 DOF:
 # the rotated real a-axis is a known-length vector (2 DOF direction) plus a roll
-# about it (1 DOF) 
+# about it (1 DOF)
 # 1. Sample a-axis directions on a Fibonacci hemisphere,
 # 2. score each by the integer-projection fitness sum_i cos(2*pi t.q_i)
 # (maximal when t = La*dir is a true lattice vector)
@@ -51,7 +51,8 @@ def _rotations_mapping(a: Tensor, b: Tensor) -> Tensor:
     anti = c < -1.0 + 1e-6
     if bool(anti.any()):
         perp = torch.linalg.cross(
-            a_exp, torch.tensor([1.0, 0.0, 0.0], device=device, dtype=dtype).expand(M, 3)
+            a_exp,
+            torch.tensor([1.0, 0.0, 0.0], device=device, dtype=dtype).expand(M, 3),
         )
         small = torch.linalg.vector_norm(perp, dim=-1) < 1e-6
         if bool(small.any()):
@@ -96,8 +97,8 @@ def sphere_seed_candidates(
     weights: Tensor | None = None,
 ) -> Tensor:
     # Seed candidate A = U @ B_target by a Fibonacci-sphere search over the rotated
-    # a-axis direction plus a roll about it. 
-    # 
+    # a-axis direction plus a roll about it.
+    #
     # weights (N,) are per-peak detection confidences
     if q_obs.ndim != 2 or q_obs.shape[-1] != 3:
         raise ValueError("q_obs must be (N, 3)")

@@ -1,6 +1,10 @@
-from .peakfinder import PeakFinder, PeakResult
+from .blobs import BlobStats
+from .peakfinder import Peak, PeakFinder, PeakResult, PeakStream
 
 __all__ = [
     "PeakFinder",
-    "PeakResult"
+    "PeakResult",
+    "PeakStream",
+    "Peak",
+    "BlobStats",
 ]

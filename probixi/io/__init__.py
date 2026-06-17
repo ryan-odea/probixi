@@ -3,6 +3,7 @@ from .cell import CellParams, read_crystfel_cell
 from .frames import DataLoader, iter_frames
 from .geometry import BadRegion, Geometry, read_geometry
 from .metadata import H5Info, Metadata, scan_h5
+from .writer import DataOffloader
 
 __all__ = [
     "CellParams",
@@ -15,4 +16,5 @@ __all__ = [
     "H5Info",
     "Metadata",
     "scan_h5",
+    "DataOffloader",
 ]

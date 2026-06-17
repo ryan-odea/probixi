@@ -589,9 +589,9 @@ class Indexer:
     ) -> tuple[Tensor, Tensor, Tensor, Tensor]:
         # Pull kept peak-blob centroids and photometry off a PeakResult
         stats = r.kept_stats
-        positions = torch.stack(
-            [stats.row_centroid, stats.col_centroid], dim=-1
-        ).to(device=self.device, dtype=self.dtype)
+        positions = torch.stack([stats.row_centroid, stats.col_centroid], dim=-1).to(
+            device=self.device, dtype=self.dtype
+        )
         intensities = stats.intensity_sum.to(device=self.device, dtype=self.dtype)
         sigmas = stats.intensity_sigma.to(device=self.device, dtype=self.dtype)
         weights = stats.posterior_mean.to(device=self.device, dtype=self.dtype)

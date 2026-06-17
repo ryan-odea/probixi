@@ -8,7 +8,7 @@ from typing import Callable, Iterable, Iterator, Literal, Optional
 import torch
 from torch import Tensor
 
-from ..noise import NoiseModel
+from ..noise.model import NoiseModel
 from .blobs import (
     BlobStats,
     compute_blob_stats,

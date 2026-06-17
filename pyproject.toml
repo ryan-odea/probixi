@@ -35,11 +35,13 @@ dependencies = [
     "h5py",
     "hdf5plugin",
     "numpy",
-    "torch"
+    "torch",
+    "matplotlib",
+    "pillow"
 ]
 
 [project.scripts]
-#todo
+probixi = "probixi.cli:main"
 
 [project.optional-dependencies]
 docs = [
@@ -64,4 +66,10 @@ Repository = "https://github.com/ryan-odea/probixi"
 "Ryan O'Dea (ORCID)" = "https://orcid.org/0009-0000-0103-9546"
 
 [tool.hatch.build.targets.wheel]
-packages = ["probixi_core"]
+packages = ["probixi"]
+
+[tool.pylint.typecheck]
+generated-members = ["torch.*"]
+
+[tool.pylint.messages_control]
+disable = ["abstract-method", "not-callable"]
