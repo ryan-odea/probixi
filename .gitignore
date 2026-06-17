@@ -216,3 +216,9 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Other
+uv.lock
+.DS_Store
+test_data/
+testing.py
