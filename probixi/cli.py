@@ -10,39 +10,90 @@ from probixi.probixi import Probixi
 
 
 @click.command()
-@click.option("-i", "--input", "list_file", required=True,
-              type=click.Path(exists=True, dir_okay=False),
-              help="CrystFEL list file (.lst) of HDF5 inputs.")
-@click.option("-g", "--geometry", "geometry_file", required=True,
-              type=click.Path(exists=True, dir_okay=False),
-              help="CrystFEL geometry file (.geom).")
-@click.option("-p", "--cell", "cell_file", default=None,
-              type=click.Path(exists=True, dir_okay=False),
-              help="CrystFEL unit-cell file (.cell). Required unless --peaks-only.")
-@click.option("-o", "--output", "output", required=True,
-              type=click.Path(dir_okay=False, writable=True),
-              help="Output CrystFEL-style .stream file.")
-@click.option("--peaks-only", is_flag=True,
-              help="Only run peak finding and export a peaks-only stream "
-              "Does not require a unit cell.")
-@click.option("--gif", "gif", default=None,
-              type=click.Path(dir_okay=False, writable=True),
-              help="Also write a noise-model diagnostic GIF over the seed frames.")
+@click.option(
+    "-i",
+    "--input",
+    "list_file",
+    required=True,
+    type=click.Path(exists=True, dir_okay=False),
+    help="CrystFEL list file (.lst) of HDF5 inputs.",
+)
+@click.option(
+    "-g",
+    "--geometry",
+    "geometry_file",
+    required=True,
+    type=click.Path(exists=True, dir_okay=False),
+    help="CrystFEL geometry file (.geom).",
+)
+@click.option(
+    "-p",
+    "--cell",
+    "cell_file",
+    default=None,
+    type=click.Path(exists=True, dir_okay=False),
+    help="CrystFEL unit-cell file (.cell). Required unless --peaks-only.",
+)
+@click.option(
+    "-o",
+    "--output",
+    "output",
+    required=True,
+    type=click.Path(dir_okay=False, writable=True),
+    help="Output CrystFEL-style .stream file.",
+)
+@click.option(
+    "--peaks-only",
+    is_flag=True,
+    help="Only run peak finding and export a peaks-only stream "
+    "Does not require a unit cell.",
+)
+@click.option(
+    "--gif",
+    "gif",
+    default=None,
+    type=click.Path(dir_okay=False, writable=True),
+    help="Also write a noise-model diagnostic GIF over the seed frames.",
+)
 @click.option("--start", type=int, default=None, help="First frame index (inclusive).")
 @click.option("--stop", type=int, default=None, help="Stop frame index (exclusive).")
-@click.option("--batch-size", type=int, default=8, show_default=True,
-              help="Frames per batched refinement pass.")
+@click.option(
+    "--batch-size",
+    type=int,
+    default=8,
+    show_default=True,
+    help="Frames per batched refinement pass.",
+)
 @click.option("--device", default=None, help="Torch device (default: auto).")
-@click.option("--noise-mode", type=click.Choice(["online", "per_frame"]),
-              default="online", show_default=True, help="Noise-model update mode.")
+@click.option(
+    "--noise-mode",
+    type=click.Choice(["online", "per_frame"]),
+    default="online",
+    show_default=True,
+    help="Noise-model update mode.",
+)
 @click.option("--warmup-frames", type=int, default=16, show_default=True)
-@click.option("--seed-frames", type=int, default=32, show_default=True,
-              help="Frames used to calibrate the noise model and detection threshold.")
-@click.option("--target-noise-peaks", type=float, default=5.0, show_default=True,
-              help="Calibrate the detection threshold so a signal-free frame "
-              "yields at most this many noise blobs.")
-@click.option("--panel", default="0", show_default=True,
-              help="Fallback panel name for peaks outside all geometry panels.")
+@click.option(
+    "--seed-frames",
+    type=int,
+    default=32,
+    show_default=True,
+    help="Frames used to calibrate the noise model and detection threshold.",
+)
+@click.option(
+    "--target-noise-peaks",
+    type=float,
+    default=5.0,
+    show_default=True,
+    help="Calibrate the detection threshold so a signal-free frame "
+    "yields at most this many noise blobs.",
+)
+@click.option(
+    "--panel",
+    default="0",
+    show_default=True,
+    help="Fallback panel name for peaks outside all geometry panels.",
+)
 @click.option("-q", "--quiet", is_flag=True, help="Suppress per-frame progress.")
 def main(
     list_file: str,
@@ -68,7 +119,9 @@ def main(
     peaks-only stream is written instead.
     """
     if not peaks_only and cell_file is None:
-        raise click.UsageError("a unit cell (-p/--cell) is required unless --peaks-only")
+        raise click.UsageError(
+            "a unit cell (-p/--cell) is required unless --peaks-only"
+        )
     dev = torch.device(device) if device else None
     probixi = Probixi(
         list_file=list_file,
@@ -84,8 +137,9 @@ def main(
         click.echo(f"Loaded {meta.n_frames} frames from {meta.n_files} file(s).")
 
     if gif:
-        probixi.noise_diagnostics(gif, stop=seed_frames,
-                                  batch_size=max(2, seed_frames // 8))
+        probixi.noise_diagnostics(
+            gif, stop=seed_frames, batch_size=max(2, seed_frames // 8)
+        )
         if not quiet:
             click.echo(f"Wrote noise diagnostic GIF to {gif}")
 

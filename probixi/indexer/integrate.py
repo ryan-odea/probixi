@@ -31,7 +31,7 @@ def integrate_boxes(
 
     centre = torch.round(positions).to(torch.long)
     r0, c0 = centre[:, 0], centre[:, 1]
-    I = torch.zeros(M, dtype=excess.dtype, device=device) # noqa: E741
+    I = torch.zeros(M, dtype=excess.dtype, device=device)  # noqa: E741
     var_sum = torch.zeros(M, dtype=excess.dtype, device=device)
     peak = torch.full((M,), float("-inf"), dtype=excess.dtype, device=device)
     bg_sum = torch.zeros(M, dtype=excess.dtype, device=device)
@@ -49,7 +49,7 @@ def integrate_boxes(
             e = excess[rr_c, cc_c]
             v = var[rr_c, cc_c]
             zero = torch.zeros_like(e)
-            I = I + torch.where(valid, e, zero) # noqa: E741
+            I = I + torch.where(valid, e, zero)  # noqa: E741
             var_sum = var_sum + torch.where(valid, v, zero)
             peak = torch.where(valid, torch.maximum(peak, e), peak)
             if mean is not None:

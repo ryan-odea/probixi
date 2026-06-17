@@ -230,7 +230,11 @@ class DataOffloader(_StreamWriter):
         A = result.A.detach().cpu().tolist()
 
         out = self._peak_search_lines(
-            result.frame_index, positions, intensities, result.n_peaks, self.indexer_name
+            result.frame_index,
+            positions,
+            intensities,
+            result.n_peaks,
+            self.indexer_name,
         )
         out += self._format_crystal(
             result, A, hkl, indexed, positions, intensities, sigmas
