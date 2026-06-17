@@ -46,6 +46,56 @@ probixi -i files.lst -g myGeometry.geom -p myCell.cell -o stream.stream --device
 Or with python:
 #TODO a good example goes here
 
+## Comparison with other works
+
+Here, we provide a comparison with other peakfinding algorithms with real data. Using a randomly sampled 10,000 frames from experimentally collected data. 
+
+Notes:
+
+1. For wall time, because `probixi` handles optimizing internal hyperparameters automatically, I have included time used for loose manual hyperparameter tuning on 10% subsamples to find optimal SNR, threshold, and minimum pixels. CPU time for only peakfinding and indexing is bracketed.
+2. Percent agreement is calculated as the (set of crystals indexed by probixi) / (set of crystals indexed by the reference) * 100. Greater than 100 indicates that `probixi` was able to index more crystals.
+
+Benchmarks were run on:
+
+- GPU: A100
+- CPU: TODO which CPU do Ra nodes use?
+
+### `peakfinder8 + indexamajig`
+
+| Dataset                               | Percent Indexed (`probixi`) | GPU time (`probixi`) | Percent Indexed (`peakfinder8+indexamajig`) | CPU Time (`peakfinder8+indexamajig`) [No-Tuning] | Percent Agreement |
+|---------------------------------------|---------------------------|---------------------|-------------------------------------|-------------------------------|-------------------|
+| Lysozyme-Synchrotron                  |                           |                     |                                     |                               |                   |
+| Lysozyme-FEL                          |                           |                     |                                     |                               |                   |
+| BacterioRhodopsin-Synchrotron         |                           |                     |                                     |                               |                   |
+| BacterioRhodopsin-FEL                 |                           |                     |                                     |                               |                   |
+| Randomly Dimmed Lysozyme-FEL          |                           |                     |                                     |                               |                   |
+| Randomly Dimmed BacterioRhodopsin-FEL |                           |                     |                                     |                               |                   |
+
+### (pyFAI + TORO)
+
+# TODO cite pyFAI and TORO
+
+Perhaps a more fair comparison, especially with respect to speed, is pyFAI and TORO, which both operate on the GPU
+
+
+| Dataset                               | Percent Indexed (`probixi`) | GPU time (`probixi`) | Percent Indexed (`pyFAI+TORO`) | GPU Time (`pyFAI+TORO`) [No-Tuning] | Percent Agreement |
+|---------------------------------------|---------------------------|---------------------|-------------------------------------|-------------------------------|-------------------|
+| Lysozyme-Synchrotron                  |                           |                     |                                     |                               |                   |
+| Lysozyme-FEL                          |                           |                     |                                     |                               |                   |
+| BacterioRhodopsin-Synchrotron         |                           |                     |                                     |                               |                   |
+| BacterioRhodopsin-FEL                 |                           |                     |                                     |                               |                   |
+| Randomly Dimmed Lysozyme-FEL          |                           |                     |                                     |                               |                   |
+| Randomly Dimmed BacterioRhodopsin-FEL |                           |                     |                                     |                               |                   |
+
+
+### Using `probixi` as only a peakfinder
+
+Of course, if you only want to use probixi as a peakfinder and prefer to use your own indexing regime, this is possible.
+
+```python
+TODO: show how to only peakfind here with cli and other
+```
+
 ## Dependencies
 
 - python >= 3.9
