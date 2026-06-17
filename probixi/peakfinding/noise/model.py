@@ -5,11 +5,7 @@ from typing import Iterable, Literal, Optional
 import torch
 from torch import Tensor, nn
 
-# Ruff was mad these were lower :(
 from ._drift import DriftDiagnostics
-from ._panel import PanelNoise, PanelSpec
-from ._pixel import PixelNoise
-from ._radial import RotationalNoise
 
 
 # NOISE STATES MOTHER ===================================================
@@ -100,6 +96,10 @@ class NoiseStats(nn.Module):
 
 
 # NOISE MODEL ====================================================
+
+from ._panel import PanelNoise, PanelSpec  # noqa: E402
+from ._pixel import PixelNoise  # noqa: E402
+from ._radial import RotationalNoise  # noqa: E402
 
 
 class NoiseModel(nn.Module):
@@ -230,7 +230,7 @@ class NoiseModel(nn.Module):
         self.register_buffer("static_mask", static.clone())
         self.register_buffer("valid_mask", static.clone())
 
-        self.diagnostics = DriftDiagnostics()
+        self.drift = DriftDiagnostics()
         self._prev_mean: Optional[Tensor] = None
         self._prev_var: Optional[Tensor] = None
         self._mask_committed = False
@@ -282,6 +282,21 @@ class NoiseModel(nn.Module):
             else:
                 self.update(item)
         return self
+
+    def diagnostics(self, frames: Iterable[Tensor], path, **kwargs):
+        """Fit over ``frames`` in batches and write a diagnostic GIF.
+
+        Renders the running mean background, its radial profile, and the
+        per-batch drift as an animation over batches.
+        
+        Returns
+        -------
+        Path
+            The written ``.gif`` path.
+        """
+        from ._diagnostics import animate_noise_diagnostics
+
+        return animate_noise_diagnostics(self, frames, path, **kwargs)
 
     def _preset_weights(
         self,
@@ -406,7 +421,7 @@ class NoiseModel(nn.Module):
         self.panel.reset()
         self.n_frames.zero_()
         self.valid_mask.copy_(self.static_mask)
-        self.diagnostics = DriftDiagnostics()
+        self.drift = DriftDiagnostics()
         self._prev_mean = None
         self._prev_var = None
         self._mask_committed = False
@@ -444,14 +459,14 @@ class NoiseModel(nn.Module):
             )
             kl = (kl_map * valid).sum() / denom
 
-        self.diagnostics.step.append(step)
-        self.diagnostics.mean_shift.append(float(mean_shift))
-        self.diagnostics.var_ratio_log.append(float(var_ratio))
-        self.diagnostics.kl_gaussian.append(float(kl))
-        self.diagnostics.effective_n.append(
+        self.drift.step.append(step)
+        self.drift.mean_shift.append(float(mean_shift))
+        self.drift.var_ratio_log.append(float(var_ratio))
+        self.drift.kl_gaussian.append(float(kl))
+        self.drift.effective_n.append(
             float(step) if self.decay == 1.0 else 1.0 / self.decay
         )
-        self.diagnostics.n_masked.append(int((~self.valid_mask).sum().item()))
+        self.drift.n_masked.append(int((~self.valid_mask).sum().item()))
         self._prev_mean = mean.detach().clone()
         self._prev_var = var.detach().clone()
 
