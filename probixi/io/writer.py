@@ -320,7 +320,7 @@ class DataOffloader(_StreamWriter):
         ]
         for (
             (row, col),
-            (h, k, l), # noqa: E741
+            (h, k, l),  # noqa: E741
             intensity,
             sigma,
             peak,
