@@ -320,12 +320,12 @@ class DataOffloader(_StreamWriter):
         ]
         for (
             (row, col),
-            (h, k, l),
+            (h, k, l),  # noqa: E741
             intensity,
             sigma,
             peak,
             background,
-        ) in refl:  # noqa: E741
+        ) in refl:
             lines.append(
                 f"{int(h):4d} {int(k):4d} {int(l):4d} {intensity:10.2f} "
                 f"{sigma:10.2f} {peak:10.2f} {background:10.2f} "
