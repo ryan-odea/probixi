@@ -7,6 +7,7 @@
 # https://www.sphinx-doc.org/en/master/usage/configuration.html#project-information
 
 import importlib.metadata
+
 # -- Project information -----------------------------------------------------
 # https://www.sphinx-doc.org/en/master/usage/configuration.html#project-information
 import os
@@ -20,9 +21,7 @@ except importlib.metadata.PackageNotFoundError:
 sys.path.insert(0, os.path.abspath("../"))
 
 project = "probixi"
-copyright = (
-    f"{date.today().year}, Ryan O'Dea"
-)
+copyright = f"{date.today().year}, Ryan O'Dea"
 author = "Ryan O'Dea"
 release = version
 
