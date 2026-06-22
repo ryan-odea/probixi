@@ -234,7 +234,11 @@ def fit_photon_transfer(
     mean = pred["mean"][mask].flatten()
     var = pred["var"][mask].clamp_min(1e-12).flatten()
 
-    edges = torch.unique(torch.quantile(mean, torch.linspace(0, 1, n_bins + 1)))
+    edges = torch.unique(
+        torch.quantile(
+            mean, torch.linspace(0, 1, n_bins + 1, dtype=mean.dtype, device=mean.device)
+        )
+    )
     xs, ys = [], []
     for i in range(len(edges) - 1):
         lo, hi = edges[i], edges[i + 1]

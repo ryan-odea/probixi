@@ -222,3 +222,6 @@ uv.lock
 .DS_Store
 test_data/
 testing.py
+
+tests/test_data/
+tests/*.h5
