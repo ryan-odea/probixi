@@ -4,6 +4,7 @@ import math
 from pathlib import Path
 from typing import TYPE_CHECKING, Optional, Union
 
+from ..indexer.lattice import B_to_cell
 from .geometry import EV_ANGSTROM
 
 if TYPE_CHECKING:
@@ -179,8 +180,9 @@ class DataOffloader(_StreamWriter):
         Indexer geometry (``beam_center``, ``clen``, ``pixel_size``,
         ``wavelength``, and -- when available -- the parsed ``panels``).
     cell : CellParams, optional
-        Target unit cell; the source of truth for per-crystal parameters and
-        symmetry since indexing fixes the cell to this target.
+        Target unit cell; supplies the symmetry labels (lattice_type, centering,
+        unique_axis). Per-crystal cell parameters are recovered from each
+        solution's orientation matrix.
     geometry_file : str or Path, optional
         Geometry file embedded verbatim in the stream header when present.
     files : dict, optional
@@ -252,16 +254,15 @@ class DataOffloader(_StreamWriter):
         intensities: list,
         sigmas: list,
     ) -> list[str]:
-        # Indexing fixes the cell to the target, so prefer it over the recovered
-        # cell for parameters and lattice_type/centering/unique_axis.
+        recovered = B_to_cell(result.A)
         cell = self.cell or result.cell
-        a_nm = cell.a * A_TO_NM
-        b_nm = cell.b * A_TO_NM
-        c_nm = cell.c * A_TO_NM
+        a_nm = recovered.a * A_TO_NM
+        b_nm = recovered.b * A_TO_NM
+        c_nm = recovered.c * A_TO_NM
         al, be, ga = (
-            math.degrees(cell.alpha),
-            math.degrees(cell.beta),
-            math.degrees(cell.gamma),
+            math.degrees(recovered.alpha),
+            math.degrees(recovered.beta),
+            math.degrees(recovered.gamma),
         )
         # columns of A are reciprocal basis vectors a*/b*/c* (A^-1 -> nm^-1)
         astar = [A[r][0] * A_INV_TO_NM_INV for r in range(3)]

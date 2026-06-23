@@ -225,3 +225,4 @@ testing.py
 
 tests/test_data/
 tests/*.h5
+.stream
