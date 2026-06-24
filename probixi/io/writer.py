@@ -310,6 +310,10 @@ class DataOffloader(_StreamWriter):
             lines.append(
                 f"probixi/scale = {result.scale:.5f} {result.scale_sigma or 0.0:.5f}"
             )
+        if result.enrichment is not None:
+            lines.append(f"probixi/enrichment = {result.enrichment:.3f}")
+        if result.enrich_p is not None:
+            lines.append(f"probixi/enrich_p = {result.enrich_p:.3e}")
         lines += [
             f"diffraction_resolution_limit = {_resolution_line(max_recip)}",
             f"num_reflections = {len(refl)}",
