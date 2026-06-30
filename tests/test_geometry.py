@@ -3,7 +3,7 @@ from __future__ import annotations
 import pytest
 
 from probixi.io import Geometry, read_geometry
-from probixi.io.geometry import EV_ANGSTROM
+from probixi.io.geometry import EV_ANGSTROM, _parse_mask_bits
 
 
 def test_reads_real_eiger_geometry(geometry):
@@ -67,16 +67,64 @@ def test_clen_given_as_hdf5_path_is_not_a_distance(tmp_path):
     assert geom.distance is None
 
 
-def test_multi_panel_has_no_single_beam_center(tmp_path):
+def test_multi_panel_beam_center_is_shared_data_space_center(tmp_path):
+    # Two side-by-side panels sharing one beam at data-space (row=5, col=15):
+    # beam = (min_ss - corner_y, min_fs - corner_x) for each panel.
     path = tmp_path / "p.geom"
-    panel = (
-        "{n}/min_fs = 0\n{n}/max_fs = 9\n{n}/min_ss = 0\n{n}/max_ss = 9\n"
-        "{n}/corner_x = -5\n{n}/corner_y = -5\n"
+    path.write_text(
+        "res = 13333.3\nwavelength = 1.0\nclen = 0.1\n"
+        # p0 spans fs 0..9
+        "p0/min_fs = 0\np0/max_fs = 9\np0/min_ss = 0\np0/max_ss = 9\n"
+        "p0/corner_x = -15\np0/corner_y = -5\n"
+        # p1 spans fs 10..19, same beam
+        "p1/min_fs = 10\np1/max_fs = 19\np1/min_ss = 0\np1/max_ss = 9\n"
+        "p1/corner_x = -5\np1/corner_y = -5\n"
     )
-    path.write_text(panel.format(n="p0") + panel.format(n="p1"))
     geom = read_geometry(path)
     assert len(geom.panels) == 2
-    assert geom.beam_center is None
+    row, col = geom.beam_center
+    assert row == pytest.approx(5.0)
+    assert col == pytest.approx(15.0)
+    # the whole point: a multi-panel geom can now build the indexer dict
+    assert geom.to_dict()["beam_center"] == (pytest.approx(5.0), pytest.approx(15.0))
+
+
+def test_data_layout_parsed_from_eiger(geometry):
+    layout = geometry.data_layout
+    assert layout is not None
+    assert layout.data_path == "/entry/data/data"
+    assert layout.dims == ["%", "ss", "fs"]
+    assert (layout.event_axis, layout.ss_axis, layout.fs_axis) == (0, 1, 2)
+    assert layout.fixed == {}
+
+
+def test_mask_spec_parsed_from_eiger(geometry):
+    spec = geometry.mask_spec
+    assert spec is not None
+    assert spec.mask_path == "/pixel_mask"
+    assert spec.mask_file.endswith("mask.h5")
+    assert spec.mask_good == 0x0
+    assert spec.mask_bad == 0xFFFFFFFF
+
+
+def test_parse_mask_bits_handles_hex_and_int():
+    assert _parse_mask_bits("0xFFFFFFFF") == 0xFFFFFFFF
+    assert _parse_mask_bits("0x0") == 0
+    assert _parse_mask_bits(65535) == 65535
+    assert _parse_mask_bits(None, default=7) == 7
+
+
+def test_multipanel_layout_has_fixed_panel_selectors(multipanel_geom_file):
+    geom = read_geometry(multipanel_geom_file)
+    assert set(geom.panels) == {"0", "1"}
+    # top-level layout omits the panel axis; each panel pins it via dim1
+    assert geom.panel_layouts["0"].fixed == {1: 0}
+    assert geom.panel_layouts["1"].fixed == {1: 1}
+    assert geom.panel_layouts["0"].dims == ["%", 0, "ss", "fs"]
+    assert geom.panel_layouts["1"].event_axis == 0
+    # a multi-panel geometry now builds the indexer dict
+    assert geom.beam_center is not None
+    assert geom.to_dict()["beam_center"] is not None
 
 
 def test_missing_file_raises():
