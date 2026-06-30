@@ -4,7 +4,7 @@
 experimental](https://img.shields.io/badge/lifecycle-experimental-orange.svg)](https://lifecycle.r-lib.org/articles/stages.html#experimental)
 [![PyPI version](https://badge.fury.io/py/probixi.svg)](https://pypi.org/project/probixi) 
 ![PyPI - Python Version](https://img.shields.io/pypi/pyversions/probixi)
-[![PyTorch](https://img.shields.io/badge/PyTorch-2.4+-ee4c2c.svg)](https://pytorch.org/)
+[![PyTorch](https://img.shields.io/badge/PyTorch-ee4c2c.svg)](https://pytorch.org/)
 [![codecov](https://codecov.io/gh/ryan-odea/Probixi/graph/badge.svg?token=DMOVJJUWXP)](https://codecov.io/gh/ryan-odea/Probixi)
 [![CUDA](https://img.shields.io/badge/CUDA-supported-76b900.svg)](https://developer.nvidia.com/cuda-zone)
 [![Apple Silicon MPS](https://img.shields.io/badge/Apple%20Silicon-MPS-000000.svg?logo=apple)](https://developer.apple.com/metal/pytorch/)
@@ -33,7 +33,7 @@ pip install git+https://github.com/ryan-odea/probixi.git
 
 ## Using `probixi`
 
-`probixi` can be interacted with either via the command line interface, or through the python API. In it's current implementation, via python, the `Probixi` API returns iterables, which remain on a GPU tensor via pytorch up until collection - meaning that you can further pass information for any downstream processing. Through the CLI, this is currently a one-stop-shop for peakfinding and indexing. **This may change in the future**
+`probixi` can be interacted with either via the command line interface, or through the python API. In its current implementation, via python, the `Probixi` API returns iterables, which remain on a GPU tensor via pytorch up until collection - meaning that you can further pass information for any downstream processing. Through the CLI, this is currently a one-stop-shop for peakfinding and indexing. **This may change in the future**
 
 `probixi` also has a 'burn-in' phase, where the noise model reaches some stable point, this can be further interrogated with a handy gif.
 
