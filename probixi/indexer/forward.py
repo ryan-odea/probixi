@@ -7,6 +7,7 @@ from torch import Tensor
 
 from ..io.geometry import parse_axis_vector as _parse_axis_vector
 
+
 def _panel_bases(
     geometry: dict, device: Optional[torch.device], dtype: torch.dtype
 ) -> Optional[Tensor]:
@@ -71,7 +72,9 @@ def _geometry_constants(
     }
 
 
-def _lab_xy_pixels(positions: Tensor, geometry: dict, bases: Optional[Tensor]) -> Tensor:
+def _lab_xy_pixels(
+    positions: Tensor, geometry: dict, bases: Optional[Tensor]
+) -> Tensor:
     bc_row = float(geometry["beam_center"][0])
     bc_col = float(geometry["beam_center"][1])
     rows, cols = positions[:, 0], positions[:, 1]

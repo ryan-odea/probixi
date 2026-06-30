@@ -196,10 +196,16 @@ def _physical_bases(geometry: Geometry) -> Optional[list[tuple]]:
         try:
             bases.append(
                 (
-                    int(p["min_ss"]), int(p["max_ss"]),
-                    int(p["min_fs"]), int(p["max_fs"]),
-                    float(p["corner_x"]), float(p["corner_y"]),
-                    fs[0], fs[1], ss[0], ss[1],
+                    int(p["min_ss"]),
+                    int(p["max_ss"]),
+                    int(p["min_fs"]),
+                    int(p["max_fs"]),
+                    float(p["corner_x"]),
+                    float(p["corner_y"]),
+                    fs[0],
+                    fs[1],
+                    ss[0],
+                    ss[1],
                 )
             )
         except (KeyError, TypeError, ValueError):
@@ -233,7 +239,7 @@ def build_physical_assembler(geometry: Optional[Geometry]):
 
     xs: list[float] = []
     ys: list[float] = []
-    for (min_ss, max_ss, min_fs, max_fs, cx, cy, fsx, fsy, ssx, ssy) in bases:
+    for min_ss, max_ss, min_fs, max_fs, cx, cy, fsx, fsy, ssx, ssy in bases:
         fl, sl = max_fs - min_fs, max_ss - min_ss
         for fj in (0, fl):
             for si in (0, sl):
@@ -248,7 +254,7 @@ def build_physical_assembler(geometry: Optional[Geometry]):
     def assemble(raw: np.ndarray) -> np.ndarray:
         img = np.asarray(raw, dtype=float)
         out = np.full((height, width), np.nan, dtype=float)
-        for (min_ss, max_ss, min_fs, max_fs, cx, cy, fsx, fsy, ssx, ssy) in bases:
+        for min_ss, max_ss, min_fs, max_fs, cx, cy, fsx, fsy, ssx, ssy in bases:
             ss_i = np.arange(max_ss - min_ss + 1)[:, None]
             fs_j = np.arange(max_fs - min_fs + 1)[None, :]
             X = np.rint(cx + fs_j * fsx + ss_i * ssx - x_min).astype(int)

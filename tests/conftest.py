@@ -99,9 +99,7 @@ def real_cxi() -> Path:
 @pytest.fixture(scope="session")
 def real_optimised_geom() -> Path:
     """A local optimised CrystFEL ``.geom`` (repo root or ``PROBIXI_TEST_GEOM``), or skip."""
-    path = _resolve_local(
-        "PROBIXI_TEST_GEOM", "*optimised*.geom", "*optimized*.geom"
-    )
+    path = _resolve_local("PROBIXI_TEST_GEOM", "*optimised*.geom", "*optimized*.geom")
     if path is None:
         pytest.skip(
             "no optimised .geom found; set PROBIXI_TEST_GEOM or drop one at the "

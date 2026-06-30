@@ -670,7 +670,11 @@ class Indexer:
                     continue
                 if self.integrate.enabled and b["excess"] is not None:
                     self._integrate_result(
-                        res, b["excess"], b["var"], b["mask"], b["mean"],
+                        res,
+                        b["excess"],
+                        b["var"],
+                        b["mask"],
+                        b["mean"],
                         bright_threshold=bright_threshold,
                     )
                 yield res

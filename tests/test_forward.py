@@ -99,20 +99,33 @@ def _rotated_two_panel():
     # panel B sits right of A in data space but is physically rotated 90 deg (CSPAD-style)
     panels = {
         "A": {
-            "min_ss": 0, "max_ss": 9, "min_fs": 0, "max_fs": 9,
-            "corner_x": -20.0, "corner_y": -5.0,
-            "fs": "+1.0x +0.0y", "ss": "+0.0x +1.0y",
+            "min_ss": 0,
+            "max_ss": 9,
+            "min_fs": 0,
+            "max_fs": 9,
+            "corner_x": -20.0,
+            "corner_y": -5.0,
+            "fs": "+1.0x +0.0y",
+            "ss": "+0.0x +1.0y",
         },
         "B": {
-            "min_ss": 0, "max_ss": 9, "min_fs": 10, "max_fs": 19,
-            "corner_x": 5.0, "corner_y": -5.0,
-            "fs": "+0.0x +1.0y", "ss": "-1.0x +0.0y",
+            "min_ss": 0,
+            "max_ss": 9,
+            "min_fs": 10,
+            "max_fs": 19,
+            "corner_x": 5.0,
+            "corner_y": -5.0,
+            "fs": "+0.0x +1.0y",
+            "ss": "-1.0x +0.0y",
         },
     }
     # beam_center is a fallback only; panel pixels use corner + fs/ss
     return {
-        "beam_center": (5.0, 12.5), "clen": 0.1,
-        "pixel_size": 100e-6, "wavelength": 1.0, "panels": panels,
+        "beam_center": (5.0, 12.5),
+        "clen": 0.1,
+        "pixel_size": 100e-6,
+        "wavelength": 1.0,
+        "panels": panels,
     }
 
 
@@ -121,19 +134,32 @@ def _flat_two_panel():
     bc_row, bc_col = 5.0, 9.5
     panels = {
         "A": {
-            "min_ss": 0, "max_ss": 9, "min_fs": 0, "max_fs": 9,
-            "corner_x": 0 - bc_col, "corner_y": 0 - bc_row,
-            "fs": "+1.0x +0.0y", "ss": "+0.0x +1.0y",
+            "min_ss": 0,
+            "max_ss": 9,
+            "min_fs": 0,
+            "max_fs": 9,
+            "corner_x": 0 - bc_col,
+            "corner_y": 0 - bc_row,
+            "fs": "+1.0x +0.0y",
+            "ss": "+0.0x +1.0y",
         },
         "B": {
-            "min_ss": 0, "max_ss": 9, "min_fs": 10, "max_fs": 19,
-            "corner_x": 10 - bc_col, "corner_y": 0 - bc_row,
-            "fs": "+1.0x +0.0y", "ss": "+0.0x +1.0y",
+            "min_ss": 0,
+            "max_ss": 9,
+            "min_fs": 10,
+            "max_fs": 19,
+            "corner_x": 10 - bc_col,
+            "corner_y": 0 - bc_row,
+            "fs": "+1.0x +0.0y",
+            "ss": "+0.0x +1.0y",
         },
     }
     return {
-        "beam_center": (bc_row, bc_col), "clen": 0.1,
-        "pixel_size": 100e-6, "wavelength": 1.0, "panels": panels,
+        "beam_center": (bc_row, bc_col),
+        "clen": 0.1,
+        "pixel_size": 100e-6,
+        "wavelength": 1.0,
+        "panels": panels,
     }
 
 

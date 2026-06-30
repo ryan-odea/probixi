@@ -95,9 +95,9 @@ def _capture(
         prof = model.rotational.mean_.detach().cpu()
         ppb = model.rotational.pixels_per_bin.detach().cpu()
         keep = ppb > 0
-        radius = (
-            (torch.arange(prof.numel()) + 0.5) * model.rotational.bin_width
-        )[keep].numpy()
+        radius = ((torch.arange(prof.numel()) + 0.5) * model.rotational.bin_width)[
+            keep
+        ].numpy()
         profile = prof[keep].numpy()
 
     snap = _Snapshot(batch, frames_seen, mean_img, se_img, radius, profile, drift)
@@ -183,7 +183,9 @@ def animate_noise_diagnostics(
         fin = arr[np.isfinite(arr)]
         return float(np.percentile(fin, 99.0)) if fin.size else 1.0
 
-    prof_max = max((float(s.profile.max()) for s in snaps if s.profile.size), default=1.0)
+    prof_max = max(
+        (float(s.profile.max()) for s in snaps if s.profile.size), default=1.0
+    )
     mean_max = max((_robust_max(s.mean) for s in snaps), default=1.0)
     shared_vmax = max(mean_max, prof_max) or 1.0
     mean_norm = Normalize(vmin=0.0, vmax=shared_vmax)

@@ -148,7 +148,9 @@ def spot_enrichment(
     keep = valid[r, c]
     n_keep = max(int(keep.sum()), 1)
     n_bright = int((bright[r, c] & keep).sum())
-    enrichment = (n_bright / n_keep) / p if p > 0.0 else float(n_bright > 0) * float("inf")
+    enrichment = (
+        (n_bright / n_keep) / p if p > 0.0 else float(n_bright > 0) * float("inf")
+    )
 
     lam = n_keep * p
     if n_bright == 0:
@@ -157,5 +159,7 @@ def spot_enrichment(
         p_value = 0.0
     else:
         k = torch.tensor(float(n_bright), dtype=torch.float64)
-        p_value = float(torch.special.gammainc(k, torch.tensor(lam, dtype=torch.float64)))
+        p_value = float(
+            torch.special.gammainc(k, torch.tensor(lam, dtype=torch.float64))
+        )
     return n_bright, enrichment, p_value

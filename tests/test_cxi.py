@@ -113,7 +113,9 @@ def test_clen_path_naming_a_group_warns_not_crashes(tmp_path):
     with pytest.warns(UserWarning, match="not a dataset"):
         g = DataLoader(lst, geom).metadata.geometry
     assert g.distance is None  # group path -> unresolved, no crash
-    assert g.wavelength == pytest.approx(EV_ANGSTROM / 12398.0)  # the valid one still resolves
+    assert g.wavelength == pytest.approx(
+        EV_ANGSTROM / 12398.0
+    )  # the valid one still resolves
 
 
 # --- honoring the geom data= path over the first-3-D fallback ----------------

@@ -29,6 +29,7 @@ def parse_axis_vector(spec: object) -> Optional[tuple[float, float]]:
         return None
     return (comps.get("x", 0.0), comps.get("y", 0.0))
 
+
 EV_ANGSTROM = 12398.419843320026
 _CLEN_MM_THRESHOLD_M = 2.0
 
@@ -351,8 +352,7 @@ def _coerce(value: str):
 
 
 def resolve_dynamic_fields(geometry: Geometry, data_file: PathLike) -> Geometry:
-    """Fill in HDF5-path-valued ``clen``/``photon_energy`` from the data file.
-    """
+    """Fill in HDF5-path-valued ``clen``/``photon_energy`` from the data file."""
     clen_path = geometry.parameters.get("clen")
     pe_path = geometry.parameters.get("photon_energy")
     need_clen = geometry.distance is None and isinstance(clen_path, str)
@@ -391,9 +391,7 @@ def _dataset_mean(f: h5py.File, path: str) -> Optional[float]:
 
 
 def _mean_coffset(geometry: Geometry) -> float:
-    values = [
-        float(p["coffset"]) for p in geometry.panels.values() if "coffset" in p
-    ]
+    values = [float(p["coffset"]) for p in geometry.panels.values() if "coffset" in p]
     top = geometry.parameters.get("coffset")
     if not values and isinstance(top, (int, float)):
         return float(top)
