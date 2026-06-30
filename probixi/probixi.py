@@ -16,7 +16,15 @@ from .indexer import (
     RefineConfig,
     SeedConfig,
 )
-from .io import CellParams, DataLoader, Metadata, iter_frames, render_frame
+from .io import (
+    CellParams,
+    DataLoader,
+    Metadata,
+    build_physical_assembler,
+    iter_frames,
+    read_mask,
+    render_frame,
+)
 from .peakfinding import PeakFinder, PeakStream
 from .peakfinding.noise import (
     CalibrationResult,
@@ -106,6 +114,8 @@ class Probixi:
     _finder: Optional[PeakFinder] = field(default=None, init=False, repr=False)
     _scale_ref: Optional[ScaleReference] = field(default=None, init=False, repr=False)
     _frame_scales: dict = field(default_factory=dict, init=False, repr=False)
+    _h5_mask: Optional[Tensor] = field(default=None, init=False, repr=False)
+    _h5_mask_loaded: bool = field(default=False, init=False, repr=False)
 
     def __post_init__(self) -> None:
         self.loader = DataLoader(
@@ -326,7 +336,24 @@ class Probixi:
             c0, c1 = max(0, br.min_fs), min(frame_size[1] - 1, br.max_fs)
             if r0 <= r1 and c0 <= c1:
                 mask[r0 : r1 + 1, c0 : c1 + 1] = False
+        h5_mask = self._hdf5_valid_mask(frame_size)
+        if h5_mask is not None:
+            mask &= h5_mask.to(device=mask.device)
         return mask.to(self.device)
+
+    def _hdf5_valid_mask(self, frame_size: tuple[int, int]) -> Optional[Tensor]:
+        if self._h5_mask_loaded:
+            return self._h5_mask
+        self._h5_mask_loaded = True
+        geom = self.loader.metadata.geometry
+        files = self.loader.metadata.files
+        if geom is None or geom.mask_spec is None or not files:
+            return None
+        data_file = next(iter(files.values())).filename
+        good = read_mask(geom, data_file, tuple(frame_size))
+        if good is not None and tuple(good.shape) == tuple(frame_size):
+            self._h5_mask = torch.as_tensor(good, dtype=torch.bool)
+        return self._h5_mask
 
     def _update_noise(self, item: Tensor) -> None:
         if item.ndim == 3:
@@ -397,6 +424,14 @@ class Probixi:
         except StopIteration as exc:
             raise ValueError("no frames available to animate") from exc
         self._ensure_built(first)
+        # For a tiled/rotated detector (e.g. CSPAD) reassemble the mean image
+        # into physical detector space so rings render continuously; single-panel
+        # geometries return None and keep the raw image.
+        asm = build_physical_assembler(self.loader.metadata.geometry)
+        if asm is not None:
+            assemble_fn, beam_yx, _ = asm
+            kwargs.setdefault("assemble", assemble_fn)
+            kwargs.setdefault("assembled_beam", beam_yx)
         return self.noise.diagnostics(
             chain([first], it), path, batch_size=batch_size, **kwargs
         )
