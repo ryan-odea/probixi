@@ -16,6 +16,42 @@ from .predict import detector_q_max, predict_reflections
 from .refine import RefineResult, refine_multiframe_known_B
 from .seed import sphere_seed_candidates
 
+MIN_PEAKS_TO_INDEX = 3
+
+
+@dataclass
+class IndexStats:
+    """Running funnel tallies over an index stream.
+
+    Attributes
+    ----------
+    frames : int
+        Frames (peak results) seen.
+    hits : int
+        Frames with at least ``MIN_PEAKS_TO_INDEX`` peaks (indexing attempted).
+    indexed : int
+        Frames that yielded an accepted solution.
+    """
+
+    frames: int = 0
+    hits: int = 0
+    indexed: int = 0
+
+    @property
+    def hit_rate(self) -> float:
+        """Hits per frame seen (0 when no frames)."""
+        return self.hits / self.frames if self.frames else 0.0
+
+    @property
+    def index_rate(self) -> float:
+        """Indexed solutions per frame seen (0 when no frames)."""
+        return self.indexed / self.frames if self.frames else 0.0
+
+    @property
+    def index_rate_of_hits(self) -> float:
+        """Indexed solutions per hit (0 when no hits)."""
+        return self.indexed / self.hits if self.hits else 0.0
+
 
 @dataclass
 class IndexResult:
@@ -240,16 +276,22 @@ class IndexStream:
     A torch-iterable produced by :meth:`Indexer.index_stream`. Operators
     (``map``/``filter``/``tap``) compose lazily; terminals (``collect``,
     ``to_stream``, ``count``, ...) drive the underlying generator once.
+
+    The ``stats`` funnel (frames/hits/indexed) is shared across composed
+    operators, so counts stay live no matter how the stream is wrapped.
     """
 
-    def __init__(self, source: Iterable[IndexResult]):
+    def __init__(
+        self, source: Iterable[IndexResult], stats: Optional[IndexStats] = None
+    ):
         self._source: Iterator[IndexResult] = iter(source)
+        self.stats = stats if stats is not None else IndexStats()
 
     def map(self, fn: Callable[[IndexResult], IndexResult]) -> "IndexStream":
-        return IndexStream(fn(r) for r in self._source)
+        return IndexStream((fn(r) for r in self._source), stats=self.stats)
 
     def filter(self, predicate: Callable[[IndexResult], bool]) -> "IndexStream":
-        return IndexStream(r for r in self._source if predicate(r))
+        return IndexStream((r for r in self._source if predicate(r)), stats=self.stats)
 
     def tap(self, fn: Callable[[IndexResult], None]) -> "IndexStream":
         def _gen() -> Iterator[IndexResult]:
@@ -257,7 +299,7 @@ class IndexStream:
                 fn(r)
                 yield r
 
-        return IndexStream(_gen())
+        return IndexStream(_gen(), stats=self.stats)
 
     def enrich_gate(self, alpha: float = 1e-3) -> "IndexStream":
         """Drop solutions whose predicted spots are not backed by image signal.
@@ -656,6 +698,8 @@ class Indexer:
             excess/variance maps (a merge-ready chunk).
         """
 
+        stats = IndexStats()
+
         def _flush(buf: list[dict]) -> Iterator[IndexResult]:
             results = self.index_frames(
                 {b["idx"]: b["pos"] for b in buf},
@@ -677,13 +721,16 @@ class Indexer:
                         b["mean"],
                         bright_threshold=bright_threshold,
                     )
+                stats.indexed += 1
                 yield res
 
         def _gen() -> Iterator[IndexResult]:
             buf: list[dict] = []
             for r in peak_stream:
-                if len(r) < 4:
+                stats.frames += 1
+                if len(r) < MIN_PEAKS_TO_INDEX:
                     continue
+                stats.hits += 1
                 idx = r.frame_index if r.frame_index is not None else 0
                 positions, intensities, sigmas, weights = self._positions_from_frame(r)
                 buf.append(
@@ -705,7 +752,7 @@ class Indexer:
             if buf:
                 yield from _flush(buf)
 
-        return IndexStream(_gen())
+        return IndexStream(_gen(), stats=stats)
 
     def _integrate_result(
         self,

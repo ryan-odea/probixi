@@ -602,14 +602,12 @@ class Probixi:
             bright_threshold=bright_threshold,
         )
 
-        def _attach() -> Iterator:
-            for r in base:
-                fs = self._frame_scales.pop(r.frame_index, None)
-                if fs is not None:
-                    r.scale, r.scale_sigma = fs.scale, fs.sigma
-                yield r
+        def _attach(r) -> None:
+            fs = self._frame_scales.pop(r.frame_index, None)
+            if fs is not None:
+                r.scale, r.scale_sigma = fs.scale, fs.sigma
 
-        return type(base)(_attach())
+        return base.tap(_attach)
 
     def scale_stream(
         self,

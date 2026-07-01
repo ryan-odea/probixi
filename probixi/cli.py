@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 from pathlib import Path
 from typing import Literal, Optional, cast
 
@@ -10,6 +11,11 @@ from probixi.io import DataOffloader, PeakOffloader
 from probixi.probixi import Probixi
 
 _IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".pdf", ".svg"}
+_PROGRESS_INTERVAL_S = 60.0
+
+
+def _pct(num: int, denom: int) -> str:
+    return f"{(100.0 * num / denom) if denom else 0.0:.1f}%"
 
 
 @click.command()
@@ -125,7 +131,12 @@ _IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".pdf", ".svg"}
     type=click.Path(),
     help="Render destination: an image file (single --render) or a directory.",
 )
-@click.option("-q", "--quiet", is_flag=True, help="Suppress per-frame progress.")
+@click.option(
+    "-q",
+    "--quiet",
+    is_flag=True,
+    help="Suppress progress: the periodic frames/hits/indexed rate line",
+)
 def main(
     list_file: str,
     geometry_file: str,
@@ -232,7 +243,8 @@ def main(
     stream = probixi.index_stream(frames, batch_size=batch_size, start_index=start or 0)
     if enrich_gate:
         stream = stream.enrich_gate(enrich_alpha)
-
+    stats = stream.stats
+    last_log = time.monotonic() - _PROGRESS_INTERVAL_S
     with DataOffloader(
         output,
         geometry=probixi.geometry,
@@ -245,13 +257,22 @@ def main(
         for result in stream:
             off.write(result)
             n += 1
-            if not quiet:
+            now = time.monotonic()
+            if not quiet and now - last_log >= _PROGRESS_INTERVAL_S:
+                last_log = now
                 click.echo(
-                    f"  frame {result.frame_index}: "
-                    f"{result.n_indexed}/{result.n_peaks} peaks indexed "
-                    f"(rmsd {result.rmsd:.4f})"
+                    f"  {stats.frames} frames | "
+                    f"{stats.hits} hits ({_pct(stats.hits, stats.frames)}) | "
+                    f"{n} indexed ({_pct(n, stats.frames)})"
                 )
 
+    if not quiet:
+        click.echo(
+            f"Completed {stats.frames} frame(s): "
+            f"{stats.hits} hits ({_pct(stats.hits, stats.frames)}), "
+            f"{n} indexed ({_pct(n, stats.frames)}, "
+            f"{_pct(n, stats.hits)} of hits)"
+        )
     click.echo(f"Wrote {n} indexed frame(s) to {output}")
 
 
