@@ -219,7 +219,12 @@ def animate_noise_diagnostics(
 
     # Right: radial profile
     ax_rad.set_title("Radial Background Profile")
-    (rad_line,) = ax_rad.plot(snaps[0].radius, snaps[0].profile, color="black", lw=1.6)
+    ghost_lines = [
+        ax_rad.plot([], [], color="0.8", lw=0.8, zorder=1)[0] for _ in range(n_batches)
+    ]
+    (rad_line,) = ax_rad.plot(
+        snaps[0].radius, snaps[0].profile, color="black", lw=1.6, zorder=3
+    )
     ax_rad.set_xlabel("Radius (Pixels from Beam Center)")
     rad_xmax = max_radius if max_radius is not None else float(snaps[-1].radius.max())
     ax_rad.set_xlim(0, rad_xmax)
@@ -248,6 +253,11 @@ def animate_noise_diagnostics(
         im_se.set_data(s.se)
         im_mean.set_data(s.mean)
         rad_line.set_data(s.radius, s.profile)
+        for j, ghost in enumerate(ghost_lines):
+            if j < i:  # past batches trail behind the current (black) profile
+                ghost.set_data(snaps[j].radius, snaps[j].profile)
+            else:
+                ghost.set_data([], [])
         xs = [snaps[j].batch for j in range(i + 1)]
         ys = [snaps[j].drift for j in range(i + 1)]
         drift_line.set_data(xs, ys)
@@ -255,7 +265,7 @@ def animate_noise_diagnostics(
             f"Running Mean: Batch {s.batch} / {n_batches}; "
             f"Frames Seen: {s.frames_seen}"
         )
-        return im_se, im_mean, rad_line, drift_line, suptitle
+        return im_se, im_mean, rad_line, *ghost_lines, drift_line, suptitle
 
     anim = FuncAnimation(fig, _draw, frames=n_batches, blit=False)
     out.parent.mkdir(parents=True, exist_ok=True)
