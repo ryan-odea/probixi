@@ -16,7 +16,15 @@ from .indexer import (
     RefineConfig,
     SeedConfig,
 )
-from .io import CellParams, DataLoader, Metadata, iter_frames
+from .io import (
+    CellParams,
+    DataLoader,
+    Metadata,
+    build_physical_assembler,
+    iter_frames,
+    read_mask,
+    render_frame,
+)
 from .peakfinding import PeakFinder, PeakStream
 from .peakfinding.noise import (
     CalibrationResult,
@@ -106,6 +114,8 @@ class Probixi:
     _finder: Optional[PeakFinder] = field(default=None, init=False, repr=False)
     _scale_ref: Optional[ScaleReference] = field(default=None, init=False, repr=False)
     _frame_scales: dict = field(default_factory=dict, init=False, repr=False)
+    _h5_mask: Optional[Tensor] = field(default=None, init=False, repr=False)
+    _h5_mask_loaded: bool = field(default=False, init=False, repr=False)
 
     def __post_init__(self) -> None:
         self.loader = DataLoader(
@@ -201,6 +211,93 @@ class Probixi:
             prefetch=prefetch,
         )
 
+    def _resolve_frame_index(self, frame: Union[int, str, tuple]) -> int:
+        # int -> absolute index; "file//event" or (file, event) -> cumulative index
+        if isinstance(frame, int):
+            return frame
+        if isinstance(frame, str):
+            name, _, ev = frame.partition("//")
+            filename, event = name.strip(), ev
+        else:
+            filename, event = frame
+        # CrystFEL event strings carry a "//" prefix (e.g. "//136")
+        event = int(str(event).strip().lstrip("/") or 0)
+        base = Path(filename).name
+        offset = 0
+        for info in self.metadata.files.values():
+            if str(info.filename) == filename or Path(info.filename).name == base:
+                return offset + event
+            offset += int(info.n_frames)
+        raise KeyError(f"frame source not found: {filename}")
+
+    def show_frame(
+        self,
+        frame: Union[int, str, tuple],
+        *,
+        path: PathLike,
+        peaks: bool = True,
+        predictions: bool = True,
+        update_noise: bool = False,
+        **render_kwargs,
+    ) -> Path:
+        """Render one frame with its detected peaks and indexed reflections.
+
+        Resolves ``frame`` to an absolute index, reads it off disk, runs peak
+        finding (and indexing, when a target cell is configured) on that single
+        frame, and writes an overlay image. Call :meth:`calibrate` first for
+        production-quality detection.
+
+        Parameters
+        ----------
+        frame : int or str or tuple
+            Absolute frame index, an ``"image_filename//event"`` string, or a
+            ``(filename, event)`` pair.
+        path : str or Path
+            Output image path.
+        peaks : bool, default True
+            Overlay detected peaks.
+        predictions : bool, default True
+            Overlay the predicted lattice when the frame indexes.
+        update_noise : bool, default False
+            Fold this frame into the live noise model (off by default so
+            recalling a frame does not perturb pipeline state).
+        **render_kwargs
+            Forwarded to :func:`probixi.io.render_frame` (``title``, ``cmap``,
+            ``vmax_pct``, ...).
+
+        Returns
+        -------
+        Path
+            The written image path.
+        """
+        idx = self._resolve_frame_index(frame)
+        image = next(iter(self.frames(start=idx, stop=idx + 1)))
+        pk = None
+        refl = None
+        if predictions and self.indexer is not None:
+            indexed = self.index_stream(
+                [image], start_index=idx, update_noise=update_noise
+            ).collect()
+            if indexed:
+                r = indexed[0]
+                pk = r.positions if peaks else None
+                refl = r.predicted_positions
+        if peaks and pk is None and refl is None:
+            for res in self.peak_stream(
+                [image],
+                start_index=idx,
+                update_noise=update_noise,
+                estimate_scale=False,
+            ):
+                ks = res.kept_stats
+                pk = torch.stack([ks.row_centroid, ks.col_centroid], dim=-1)
+                break
+        mask = self._noise.valid_mask if self._noise is not None else None
+        render_kwargs.setdefault("title", f"frame {idx}")
+        return render_frame(
+            image, path=path, peaks=pk, reflections=refl, mask=mask, **render_kwargs
+        )
+
     def _ensure_built(self, item: Tensor) -> None:
         if self._noise is not None:
             return
@@ -239,7 +336,24 @@ class Probixi:
             c0, c1 = max(0, br.min_fs), min(frame_size[1] - 1, br.max_fs)
             if r0 <= r1 and c0 <= c1:
                 mask[r0 : r1 + 1, c0 : c1 + 1] = False
+        h5_mask = self._hdf5_valid_mask(frame_size)
+        if h5_mask is not None:
+            mask &= h5_mask.to(device=mask.device)
         return mask.to(self.device)
+
+    def _hdf5_valid_mask(self, frame_size: tuple[int, int]) -> Optional[Tensor]:
+        if self._h5_mask_loaded:
+            return self._h5_mask
+        self._h5_mask_loaded = True
+        geom = self.loader.metadata.geometry
+        files = self.loader.metadata.files
+        if geom is None or geom.mask_spec is None or not files:
+            return None
+        data_file = next(iter(files.values())).filename
+        good = read_mask(geom, data_file, tuple(frame_size))
+        if good is not None and tuple(good.shape) == tuple(frame_size):
+            self._h5_mask = torch.as_tensor(good, dtype=torch.bool)
+        return self._h5_mask
 
     def _update_noise(self, item: Tensor) -> None:
         if item.ndim == 3:
@@ -310,6 +424,14 @@ class Probixi:
         except StopIteration as exc:
             raise ValueError("no frames available to animate") from exc
         self._ensure_built(first)
+        # For a tiled/rotated detector (e.g. CSPAD) reassemble the mean image
+        # into physical detector space so rings render continuously; single-panel
+        # geometries return None and keep the raw image.
+        asm = build_physical_assembler(self.loader.metadata.geometry)
+        if asm is not None:
+            assemble_fn, beam_yx, _ = asm
+            kwargs.setdefault("assemble", assemble_fn)
+            kwargs.setdefault("assembled_beam", beam_yx)
         return self.noise.diagnostics(
             chain([first], it), path, batch_size=batch_size, **kwargs
         )
@@ -470,11 +592,14 @@ class Probixi:
                 "cell_file (omit it only for peak-only use via peak_stream)"
             )
         self._frame_scales.clear()
+        tc = self.threshold_calibration
+        bright_threshold = tc.threshold if tc is not None else self.mf_threshold
         base = self.indexer.index_stream(
             self.peak_stream(
                 frames, start_index=start_index, update_noise=update_noise
             ),
             batch_size=batch_size,
+            bright_threshold=bright_threshold,
         )
 
         def _attach() -> Iterator:

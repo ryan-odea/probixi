@@ -10,7 +10,7 @@ from torch import Tensor
 from ..io.cell import CellParams
 from ..peakfinding.peaks import PeakResult
 from .forward import detector_to_q
-from .integrate import integrate_predicted
+from .integrate import integrate_predicted, spot_enrichment
 from .lattice import cell_to_B, decompose_A
 from .predict import detector_q_max, predict_reflections
 from .refine import RefineResult, refine_multiframe_known_B
@@ -67,6 +67,15 @@ class IndexResult:
     predicted_background : Tensor, optional
         (M,) mean per-pixel noise background under each box (the CrystFEL
         stream's ``background`` column; informational only).
+    enrichment : float, optional
+        Bright-rate of predicted spots over the background bright-rate (see
+        ``spot_enrichment``); ~1 is a noise indexing, >>1 a real lattice.
+    n_bright : int, optional
+        Predicted spots landing on above-threshold image signal.
+    enrich_p : float, optional
+        Chance probability of this many bright predicted spots under the
+        noise-null (``spot_enrichment``); the gate keeps frames with small
+        ``enrich_p``. Self-calibrating: no enrichment cut to choose.
     scale : float, optional
         Per-frame relative intensity scale (background fluence vs the
         calibration reference), if inferred; an initialization for downstream
@@ -95,6 +104,9 @@ class IndexResult:
     predicted_sigmas: Optional[Tensor] = None
     predicted_peak: Optional[Tensor] = None
     predicted_background: Optional[Tensor] = None
+    enrichment: Optional[float] = None
+    n_bright: Optional[int] = None
+    enrich_p: Optional[float] = None
     scale: Optional[float] = None
     scale_sigma: Optional[float] = None
 
@@ -246,6 +258,22 @@ class IndexStream:
                 yield r
 
         return IndexStream(_gen())
+
+    def enrich_gate(self, alpha: float = 1e-3) -> "IndexStream":
+        """Drop solutions whose predicted spots are not backed by image signal.
+
+        Parameters
+        ----------
+        alpha : float, default 1e-3
+            Max chance probability to accept a frame (a per-frame false-discovery
+            level). Smaller is stricter.
+
+        Returns
+        -------
+        IndexStream
+            Filtered stream.
+        """
+        return self.filter(lambda r: r.enrich_p is not None and r.enrich_p <= alpha)
 
     def to_stream(self, writer: Callable[[IndexResult], None]) -> int:
         n = 0
@@ -602,6 +630,7 @@ class Indexer:
         peak_stream: Iterable[PeakResult],
         batch_size: int = 8,
         frame_rotations: Optional[dict[int, Tensor]] = None,
+        bright_threshold: float = 5.0,
     ) -> IndexStream:
         """Lazily index a peakfinder stream.
 
@@ -614,6 +643,9 @@ class Indexer:
             pixel maps are held, then released).
         frame_rotations : dict of int -> Tensor, optional
             Per-frame (3, 3) lab->crystal rotations.
+        bright_threshold : float, default 5.0
+            Detection threshold (whitened significance) used to score each
+            solution's predicted spots
 
         Returns
         -------
@@ -638,7 +670,12 @@ class Indexer:
                     continue
                 if self.integrate.enabled and b["excess"] is not None:
                     self._integrate_result(
-                        res, b["excess"], b["var"], b["mask"], b["mean"]
+                        res,
+                        b["excess"],
+                        b["var"],
+                        b["mask"],
+                        b["mean"],
+                        bright_threshold=bright_threshold,
                     )
                 yield res
 
@@ -677,6 +714,7 @@ class Indexer:
         var: Tensor,
         valid_mask: Optional[Tensor],
         mean: Optional[Tensor] = None,
+        bright_threshold: float = 5.0,
     ) -> None:
         # Predict the full lattice for result.A and box-integrate it.
         frame_shape = (int(excess.shape[-2]), int(excess.shape[-1]))
@@ -710,3 +748,6 @@ class Indexer:
         result.predicted_sigmas = sigma
         result.predicted_peak = peak
         result.predicted_background = background
+        result.n_bright, result.enrichment, result.enrich_p = spot_enrichment(
+            positions, excess, var, bright_threshold, pixel_valid=valid_mask
+        )

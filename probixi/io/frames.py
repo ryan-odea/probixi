@@ -11,8 +11,9 @@ import numpy as np
 import torch
 from torch import Tensor
 
+from .assemble import assemble_batch
 from .cell import CellParams, read_crystfel_cell
-from .geometry import Geometry, read_geometry
+from .geometry import Geometry, read_geometry, resolve_dynamic_fields
 from .metadata import H5Info, Metadata, scan_h5
 
 PathLike = Union[str, Path]
@@ -66,12 +67,14 @@ class DataLoader:
                 paths.append(line)
         return paths
 
-    def _scan_files(self) -> tuple[dict, Optional[tuple], int]:
+    def _scan_files(
+        self, geometry: Optional[Geometry] = None
+    ) -> tuple[dict, Optional[tuple], int]:
         files: dict[str, H5Info] = {}
         frame_size: Optional[tuple] = None
         total_frames = 0
         for path in self._read_list():
-            info = scan_h5(path)
+            info = scan_h5(path, geometry)
             if frame_size is None:
                 frame_size = info.frame_shape
             elif frame_size != info.frame_shape:
@@ -94,10 +97,14 @@ class DataLoader:
         return read_crystfel_cell(self.cell_file)
 
     def _build_metadata(self) -> Metadata:
-        files, frame_size, total_frames = self._scan_files()
+        geometry = self._parse_geometry()
+        files, frame_size, total_frames = self._scan_files(geometry)
+        if geometry is not None and files:
+            data_file = next(iter(files.values())).filename
+            resolve_dynamic_fields(geometry, data_file)
         return Metadata(
             files=files,
-            geometry=self._parse_geometry(),
+            geometry=geometry,
             cell=self._parse_cell(),
             frame_size=frame_size,
             n_files=len(files),
@@ -140,16 +147,25 @@ def _prefetch_worker(
             f_hi = min(n, hi - offset)
             if f_lo < f_hi:
                 with h5py.File(info.filename, "r") as f:
-                    node = f[info.dataset]
-                    if not isinstance(node, h5py.Dataset):
-                        raise TypeError(
-                            f"{info.dataset!r} in {info.filename} is not an HDF5 dataset"
-                        )
-                    dset = node
+                    dset = None
+                    if info.placements is None:
+                        node = f[info.dataset]
+                        if not isinstance(node, h5py.Dataset):
+                            raise TypeError(
+                                f"{info.dataset!r} in {info.filename} is not an HDF5 dataset"
+                            )
+                        dset = node
                     i = f_lo
                     while i < f_hi and not stop.is_set():
                         end = min(i + batch_size - len(buf), f_hi)
-                        buf.extend(dset[i:end])
+                        if dset is not None:
+                            buf.extend(dset[i:end])
+                        else:
+                            buf.extend(
+                                assemble_batch(
+                                    f, i, end, info.placements, info.frame_shape
+                                )
+                            )
                         i = end
                         if len(buf) >= batch_size:
                             if not _put(buf[:batch_size]):

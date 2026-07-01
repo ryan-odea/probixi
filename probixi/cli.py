@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Literal, Optional, cast
 
 import click
@@ -7,6 +8,8 @@ import torch
 
 from probixi.io import DataOffloader, PeakOffloader
 from probixi.probixi import Probixi
+
+_IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".pdf", ".svg"}
 
 
 @click.command()
@@ -38,9 +41,10 @@ from probixi.probixi import Probixi
     "-o",
     "--output",
     "output",
-    required=True,
+    required=False,
+    default=None,
     type=click.Path(dir_okay=False, writable=True),
-    help="Output CrystFEL-style .stream file.",
+    help="Output CrystFEL-style .stream file. Optional when only --render is used.",
 )
 @click.option(
     "--peaks-only",
@@ -94,6 +98,33 @@ from probixi.probixi import Probixi
     show_default=True,
     help="Fallback panel name for peaks outside all geometry panels.",
 )
+@click.option(
+    "--enrich-gate",
+    is_flag=True,
+    help="Drop indexed frames whose predicted spots are not backed by image signal beyond chance.",
+)
+@click.option(
+    "--enrich-alpha",
+    type=float,
+    default=1e-3,
+    show_default=True,
+    help="Max chance probability to accept a frame under --enrich-gate.",
+)
+@click.option(
+    "--render",
+    "render",
+    multiple=True,
+    metavar="FRAME",
+    help="Recall a frame and write a peaks/index overlay image. An absolute "
+    "index or 'image_filename//event'. Repeatable; renders before any run.",
+)
+@click.option(
+    "--render-out",
+    "render_out",
+    default=None,
+    type=click.Path(),
+    help="Render destination: an image file (single --render) or a directory.",
+)
 @click.option("-q", "--quiet", is_flag=True, help="Suppress per-frame progress.")
 def main(
     list_file: str,
@@ -111,6 +142,10 @@ def main(
     seed_frames: int,
     target_noise_peaks: float,
     panel: str,
+    enrich_gate: bool,
+    enrich_alpha: float,
+    render: tuple,
+    render_out: Optional[str],
     quiet: bool,
 ) -> None:
     """Run the probixi pipeline and write indexed frames to a CrystFEL stream.
@@ -118,10 +153,12 @@ def main(
     With --peaks-only, peak finding runs but indexing does not, and a
     peaks-only stream is written instead.
     """
-    if not peaks_only and cell_file is None:
+    if not peaks_only and not render and cell_file is None:
         raise click.UsageError(
-            "a unit cell (-p/--cell) is required unless --peaks-only"
+            "a unit cell (-p/--cell) is required unless --peaks-only or --render"
         )
+    if output is None and not render:
+        raise click.UsageError("-o/--output is required unless only --render is used")
     dev = torch.device(device) if device else None
     probixi = Probixi(
         list_file=list_file,
@@ -154,6 +191,20 @@ def main(
             msg += f" mf_threshold={tc.threshold:.2f}"
         click.echo(msg)
 
+    if render:
+        out = Path(render_out) if render_out else Path(".")
+        as_file = len(render) == 1 and out.suffix.lower() in _IMAGE_SUFFIXES
+        if not as_file:
+            out.mkdir(parents=True, exist_ok=True)
+        for spec in render:
+            frame_id = int(spec) if spec.lstrip("-").isdigit() else spec
+            dest = out if as_file else out / f"render_{spec.replace('/', '_')}.png"
+            probixi.show_frame(frame_id, path=dest)
+            if not quiet:
+                click.echo(f"Wrote {dest}")
+        if output is None:
+            return
+
     frames = probixi.frames(start=start, stop=stop)
 
     if peaks_only:
@@ -179,6 +230,8 @@ def main(
         return
 
     stream = probixi.index_stream(frames, batch_size=batch_size, start_index=start or 0)
+    if enrich_gate:
+        stream = stream.enrich_gate(enrich_alpha)
 
     with DataOffloader(
         output,

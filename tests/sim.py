@@ -330,6 +330,132 @@ def write_run(
     return h5_path, lst_path
 
 
+def write_cxi_run(
+    dirpath: PathLike,
+    frames: np.ndarray,
+    *,
+    data_path: str = "/entry/data/data",
+    decoy: bool = False,
+    decoy_path: str = "/aaa_decoy/data",
+    mask: Optional[np.ndarray] = None,
+    mask_path: str = "/entry/data/mask",
+    extra_datasets: Optional[dict] = None,
+) -> tuple[Path, Path]:
+    """Write a single-panel CXI-style run plus a ``.lst`` listing it.
+
+    Mirrors a Cheetah/CrystFEL CXI file: the frame stack lives at ``data_path``.
+    With ``decoy=True`` a second 3-D dataset is written first and at a path that
+    sorts ahead of ``data_path``, so the legacy "first 3-D dataset" discovery
+    would grab the decoy -- proving a geometry-aware reader honors ``data =``.
+
+    Parameters
+    ----------
+    dirpath : str or Path
+        Output directory (created if missing).
+    frames : np.ndarray
+        ``(N, H, W)`` frame stack.
+    data_path : str
+        Internal HDF5 path for the real frame stack.
+    decoy : bool
+        Also write a competing 3-D dataset that would win the first-3-D fallback.
+    decoy_path : str
+        Path for the decoy dataset (chosen to sort before ``data_path``).
+    mask : np.ndarray, optional
+        Bad-pixel mask array to write at ``mask_path``. May be 2-D (static) or
+        ``(N, H, W)`` (per-event, the LCLS/Cheetah layout).
+    mask_path : str
+        Internal HDF5 path for the mask.
+    extra_datasets : dict, optional
+        Extra ``{hdf5_path: array}`` to write -- e.g. the per-event
+        ``/LCLS/detector_1/EncoderValue`` and ``/LCLS/photon_energy_eV`` arrays a
+        CrystFEL geom may reference for ``clen``/``photon_energy``.
+
+    Returns
+    -------
+    tuple[Path, Path]
+        ``(cxi_path, lst_path)``.
+    """
+    dirpath = Path(dirpath)
+    dirpath.mkdir(parents=True, exist_ok=True)
+    arr = np.asarray(frames, dtype=np.float32)
+    if arr.ndim != 3:
+        raise ValueError("frames must be (N, H, W)")
+    cxi_path = dirpath / "cxi_run.cxi"
+    lst_path = dirpath / "cxi_run.lst"
+    with h5py.File(cxi_path, "w") as f:
+        if decoy:
+            decoy_arr = np.zeros((1, arr.shape[1], arr.shape[2]), dtype=np.float32)
+            f.create_dataset(decoy_path, data=decoy_arr)
+        f.create_dataset(data_path, data=arr)
+        if mask is not None:
+            f.create_dataset(mask_path, data=np.asarray(mask))
+        for path, values in (extra_datasets or {}).items():
+            f.create_dataset(path, data=np.asarray(values))
+    lst_path.write_text(f"{cxi_path}\n", encoding="utf-8")
+    return cxi_path, lst_path
+
+
+def write_multipanel_run(
+    dirpath: PathLike,
+    data4d: np.ndarray,
+    *,
+    data_path: str = "/entry/data/data",
+    mask: Optional[np.ndarray] = None,
+    mask_path: str = "/entry/data/mask",
+) -> tuple[Path, Path]:
+    """Write a multi-panel / 4-D ``(N, panel, ss, fs)`` run plus its ``.lst``.
+
+    The panels live in a single array indexed by a fixed selector dim (the layout
+    a CrystFEL ``dimN = <int>`` geometry describes), so the reader must slice and
+    re-place each panel into the assembled data-space image.
+
+    Parameters
+    ----------
+    dirpath : str or Path
+        Output directory (created if missing).
+    data4d : np.ndarray
+        ``(N, n_panels, ss, fs)`` stack.
+    data_path : str
+        Internal HDF5 path for the stack.
+    mask : np.ndarray, optional
+        ``(n_panels, ss, fs)`` static mask written at ``mask_path``.
+    mask_path : str
+        Internal HDF5 path for the mask.
+
+    Returns
+    -------
+    tuple[Path, Path]
+        ``(cxi_path, lst_path)``.
+    """
+    dirpath = Path(dirpath)
+    dirpath.mkdir(parents=True, exist_ok=True)
+    arr = np.asarray(data4d, dtype=np.float32)
+    if arr.ndim != 4:
+        raise ValueError("data4d must be (N, panel, ss, fs)")
+    cxi_path = dirpath / "mp_run.cxi"
+    lst_path = dirpath / "mp_run.lst"
+    with h5py.File(cxi_path, "w") as f:
+        f.create_dataset(data_path, data=arr)
+        if mask is not None:
+            f.create_dataset(mask_path, data=np.asarray(mask))
+    lst_path.write_text(f"{cxi_path}\n", encoding="utf-8")
+    return cxi_path, lst_path
+
+
+def write_external_mask(
+    path: PathLike,
+    mask_array: np.ndarray,
+    *,
+    mask_path: str = "/pixel_mask",
+) -> Path:
+    """Write a standalone HDF5 mask file (a CrystFEL ``mask_file`` target)."""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with h5py.File(path, "w") as f:
+        f.create_dataset(mask_path, data=np.asarray(mask_array))
+    return path
+
+
 def proper_rotation(seed: int, max_angle_deg: Optional[float] = None) -> Tensor:
     """Deterministic proper rotation (``det == +1``), (3, 3) float64.
 

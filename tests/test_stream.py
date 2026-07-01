@@ -6,6 +6,7 @@ import pytest
 import torch
 
 from probixi.indexer.indexer import IndexResult
+from probixi.indexer.lattice import B_to_cell
 from probixi.io.writer import DataOffloader, PeakOffloader
 from probixi.peakfinding.peaks.blobs import BlobStats
 from probixi.peakfinding.peaks.peakfinder import PeakResult
@@ -143,25 +144,28 @@ def test_chunk_reports_peak_count(tmp_path, geometry_dict, cell):
 
 def test_crystal_block_has_cell_and_reflections(tmp_path, geometry_dict, cell):
     out = tmp_path / "indexed.stream"
+    result = _make_index_result(cell)
     with DataOffloader(out, geometry=geometry_dict, cell=cell) as off:
-        off.write(_make_index_result(cell))
+        off.write(result)
 
     lines = out.read_text().splitlines()
     crystal = _section(lines, "--- Begin crystal", "--- End crystal")
 
-    # cell parameters: writer emits nm (A / 10) -> 62.23 A -> 6.22300 nm, etc.
+    expected = B_to_cell(result.A)
     cell_line = next(line for line in crystal if line.startswith("Cell parameters"))
     parsed = cell_line.split()
     a_nm, b_nm, c_nm = float(parsed[2]), float(parsed[3]), float(parsed[4])
     assert parsed[5] == "nm,"
-    assert a_nm == pytest.approx(cell.a * 0.1, abs=1e-4)
-    assert b_nm == pytest.approx(cell.b * 0.1, abs=1e-4)
-    assert c_nm == pytest.approx(cell.c * 0.1, abs=1e-4)
+    assert a_nm == pytest.approx(expected.a * 0.1, abs=1e-4)
+    assert b_nm == pytest.approx(expected.b * 0.1, abs=1e-4)
+    assert c_nm == pytest.approx(expected.c * 0.1, abs=1e-4)
     al, be, ga = float(parsed[6]), float(parsed[7]), float(parsed[8])
     assert parsed[9] == "deg"
-    assert al == pytest.approx(math.degrees(cell.alpha), abs=1e-2)
-    assert be == pytest.approx(math.degrees(cell.beta), abs=1e-2)
-    assert ga == pytest.approx(math.degrees(cell.gamma), abs=1e-2)
+    assert al == pytest.approx(math.degrees(expected.alpha), abs=1e-2)
+    assert be == pytest.approx(math.degrees(expected.beta), abs=1e-2)
+    assert ga == pytest.approx(math.degrees(expected.gamma), abs=1e-2)
+    # recovered, not echoed: this fixture's A does not encode the target cell
+    assert a_nm != pytest.approx(cell.a * 0.1, abs=1e-4)
 
     # reciprocal basis lines present and parse to the A columns (A^-1 -> nm^-1)
     astar = next(line for line in crystal if line.startswith("astar = "))

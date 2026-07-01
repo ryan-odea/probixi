@@ -8,6 +8,7 @@ import pytest
 from probixi.io import CellParams, Geometry, read_crystfel_cell, read_geometry
 
 FIXTURES = Path(__file__).parent / "fixtures"
+REPO_ROOT = Path(__file__).parent.parent
 
 
 @pytest.fixture(scope="session")
@@ -20,6 +21,12 @@ def cell_file() -> Path:
 def geom_file() -> Path:
     """Path to the committed real Eiger 4M ``.geom`` fixture."""
     return FIXTURES / "Eiger4M.geom"
+
+
+@pytest.fixture(scope="session")
+def multipanel_geom_file() -> Path:
+    """Path to the tiny 2-panel / 4-D CXI test ``.geom`` fixture (64x64 image)."""
+    return FIXTURES / "MultiPanel.geom"
 
 
 @pytest.fixture
@@ -63,5 +70,39 @@ def real_frames() -> Path:
         pytest.skip(
             "no real frame stack found; set PROBIXI_TEST_DATA or drop an .h5 "
             "into tests/test_data/ to run real-data tests"
+        )
+    return path
+
+
+def _resolve_local(env_var: str, *globs: str) -> Path | None:
+    env = os.environ.get(env_var)
+    if env and Path(env).is_file():
+        return Path(env)
+    for pattern in globs:
+        for path in sorted(REPO_ROOT.glob(pattern)):
+            if path.is_file():
+                return path
+    return None
+
+
+@pytest.fixture(scope="session")
+def real_cxi() -> Path:
+    """A local ``.cxi`` run (repo root or ``PROBIXI_TEST_CXI``), or skip; never committed."""
+    path = _resolve_local("PROBIXI_TEST_CXI", "*.cxi")
+    if path is None:
+        pytest.skip(
+            "no real .cxi found; set PROBIXI_TEST_CXI or drop one at the repo root"
+        )
+    return path
+
+
+@pytest.fixture(scope="session")
+def real_optimised_geom() -> Path:
+    """A local optimised CrystFEL ``.geom`` (repo root or ``PROBIXI_TEST_GEOM``), or skip."""
+    path = _resolve_local("PROBIXI_TEST_GEOM", "*optimised*.geom", "*optimized*.geom")
+    if path is None:
+        pytest.skip(
+            "no optimised .geom found; set PROBIXI_TEST_GEOM or drop one at the "
+            "repo root"
         )
     return path
