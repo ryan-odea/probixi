@@ -82,7 +82,13 @@ def _pct(num: int, denom: int) -> str:
     show_default=True,
     help="Noise-model update mode.",
 )
-@click.option("--warmup-frames", type=int, default=16, show_default=True)
+@click.option(
+    "--warmup-frames",
+    type=int,
+    default=16,
+    show_default=True,
+    help="Frames observed before the dead-pixel mask is committed.",
+)
 @click.option(
     "--seed-frames",
     type=int,
