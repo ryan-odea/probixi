@@ -502,6 +502,8 @@ class Probixi:
                 **topts,
             )
         self._scale_ref = ScaleReference.from_noise_model(self.noise)
+        if getattr(self, "indexer", None) is not None and self.noise.gain is not None:
+            self.indexer._measured_gain = self.noise.gain
         return result
 
     def peak_stream(

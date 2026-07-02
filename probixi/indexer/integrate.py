@@ -3,6 +3,8 @@ from __future__ import annotations
 import torch
 from torch import Tensor
 
+A_INV_TO_NM_INV = 10.0
+
 # Box integration of background-subtracted intensity at predicted positions. The
 # excess map is already background-subtracted, so integrated intensity is the sum
 # of excess over a small box and its variance the sum of per-pixel noise
@@ -18,10 +20,11 @@ def integrate_boxes(
     radius: int = 4,
     mean: Tensor | None = None,
     pixel_valid: Tensor | None = None,
+    adu_per_photon: float = 1.0,
 ) -> tuple[Tensor, Tensor, Tensor, Tensor]:
-    # Integrate intensity (sum excess), sigma (sqrt sum var), peak (max excess)
-    # and background (mean per-pixel noise) in a (2*radius+1)^2 box at each
-    # centre
+    # Integrate intensity (sum excess), sigma (sqrt of summed background noise
+    # plus signal shot noise), peak (max excess) and background (mean per-pixel
+    # noise) in a (2*radius+1)^2 box at each centre
     H, W = excess.shape
     device = excess.device
     M = positions.shape[0]
@@ -59,7 +62,8 @@ def integrate_boxes(
     # boxes with no valid pixel
     peak = torch.where(torch.isfinite(peak), peak, torch.zeros_like(peak))
     background = bg_sum / bg_count.clamp_min(1.0)
-    return I, var_sum.clamp_min(0.0).sqrt(), peak, background
+    total_var = var_sum.clamp_min(0.0) + I.clamp_min(0.0) * adu_per_photon
+    return I, total_var.sqrt(), peak, background
 
 
 @torch.no_grad()
@@ -74,6 +78,7 @@ def integrate_predicted(
     box_radius: int = 3,
     mean: Tensor | None = None,
     pixel_valid: Tensor | None = None,
+    adu_per_photon: float = 1.0,
 ) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor, Tensor]:
     M = pred_positions.shape[0]
     positions = pred_positions
@@ -88,9 +93,71 @@ def integrate_predicted(
             pred_positions,
         )
     intensity, sigma, peak, background = integrate_boxes(
-        excess, var, positions, box_radius, mean=mean, pixel_valid=pixel_valid
+        excess,
+        var,
+        positions,
+        box_radius,
+        mean=mean,
+        pixel_valid=pixel_valid,
+        adu_per_photon=adu_per_photon,
     )
     return positions, intensity, sigma, snapped, peak, background
+
+
+@torch.no_grad()
+def resolution_limit(
+    resolution: Tensor,
+    intensity: Tensor,
+    sigma: Tensor,
+    snr: float,
+    bin_width: float,
+) -> float:
+    """Per-crystal diffraction limit from integrated I/sigma vs resolution.
+
+    Bins reflections by resolution and, scanning outward from low resolution,
+    returns the outer edge of the last shell whose mean I/sigma stays at or
+    above ``snr``. Empty shells are skipped; the scan stops at the first
+    populated shell that falls below ``snr``.
+
+    Parameters
+    ----------
+    resolution : Tensor
+        (M,) reflection resolution ``|q| = 1/d`` in the same unit as ``bin_width``.
+    intensity, sigma : Tensor
+        (M,) integrated intensity and its 1-sigma uncertainty.
+    snr : float
+        Mean-I/sigma threshold a shell must clear. ``<= 0`` disables the limit.
+    bin_width : float
+        Shell width in the unit of ``resolution``.
+
+    Returns
+    -------
+    float
+        Resolution limit in the unit of ``resolution``; ``inf`` when disabled or
+        no reflection carries a usable sigma.
+    """
+    if snr <= 0.0 or bin_width <= 0.0 or resolution.numel() == 0:
+        return float("inf")
+    valid = torch.isfinite(sigma) & (sigma > 0)
+    if not bool(valid.any()):
+        return float("inf")
+    res = resolution[valid]
+    ratio = intensity[valid] / sigma[valid]
+    b = torch.floor(res / bin_width).to(torch.long).clamp_min(0)
+    nbins = int(b.max().item()) + 1
+    sums = torch.zeros(nbins, dtype=ratio.dtype, device=ratio.device)
+    counts = torch.zeros(nbins, dtype=ratio.dtype, device=ratio.device)
+    sums.scatter_add_(0, b, ratio)
+    counts.scatter_add_(0, b, torch.ones_like(ratio))
+    limit = 0.0
+    for i in range(nbins):
+        if counts[i] <= 0:
+            continue
+        if (sums[i] / counts[i]) >= snr:
+            limit = (i + 1) * bin_width
+        else:
+            break
+    return limit if limit > 0.0 else bin_width
 
 
 @torch.no_grad()

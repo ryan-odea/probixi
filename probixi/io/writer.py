@@ -17,6 +17,7 @@ PathLike = Union[str, Path]
 STREAM_VERSION = "CrystFEL stream format 2.3"
 A_INV_TO_NM_INV = 10.0  # 1 A^-1 = 10 nm^-1
 A_TO_NM = 0.1  # 1 A = 0.1 nm
+DEFAULT_PROFILE_RADIUS_NM_INV = 0.002
 
 
 class _StreamWriter:
@@ -289,10 +290,14 @@ class DataOffloader(_StreamWriter):
                 if keep
             ]
 
+        refl = [r for r in refl if math.isfinite(r[3]) and r[3] > 0.0]
+
         max_recip = max(
             (self._resolution_nm_inv(row, col) for (row, col), *_ in refl),
             default=0.0,
         )
+        limit = result.diffraction_limit
+        drl_recip = limit if (limit is not None and math.isfinite(limit)) else max_recip
 
         lines = [
             "--- Begin crystal",
@@ -304,6 +309,7 @@ class DataOffloader(_StreamWriter):
             f"lattice_type = {cell.lattice_type or 'triclinic'}",
             f"centering = {cell.centering or 'P'}",
             f"unique_axis = {cell.unique_axis or '?'}",
+            f"profile_radius = {DEFAULT_PROFILE_RADIUS_NM_INV:.5f} nm^-1",
             # orientation-only refinement; detector position is never refined
             "predict_refine/det_shift x = 0.000000 y = 0.000000 mm",
             f"probixi/rmsd = {result.rmsd:.6f} A^-1",
@@ -317,7 +323,7 @@ class DataOffloader(_StreamWriter):
         if result.enrich_p is not None:
             lines.append(f"probixi/enrich_p = {result.enrich_p:.3e}")
         lines += [
-            f"diffraction_resolution_limit = {_resolution_line(max_recip)}",
+            f"diffraction_resolution_limit = {_resolution_line(drl_recip)}",
             f"num_reflections = {len(refl)}",
             "num_saturated_reflections = 0",
             "num_implausible_reflections = 0",

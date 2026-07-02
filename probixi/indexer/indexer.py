@@ -10,7 +10,12 @@ from torch import Tensor
 from ..io.cell import CellParams
 from ..peakfinding.peaks import PeakResult
 from .forward import detector_to_q
-from .integrate import integrate_predicted, spot_enrichment
+from .integrate import (
+    A_INV_TO_NM_INV,
+    integrate_predicted,
+    resolution_limit,
+    spot_enrichment,
+)
 from .lattice import cell_to_B, decompose_A
 from .predict import detector_q_max, predict_reflections
 from .refine import RefineResult, refine_multiframe_known_B
@@ -103,6 +108,10 @@ class IndexResult:
     predicted_background : Tensor, optional
         (M,) mean per-pixel noise background under each box (the CrystFEL
         stream's ``background`` column; informational only).
+    diffraction_limit : float, optional
+        Per-crystal resolution limit (nm^-1) from integrated I/sigma; reflections
+        beyond it are dropped and it is written as the stream's
+        ``diffraction_resolution_limit``.
     enrichment : float, optional
         Bright-rate of predicted spots over the background bright-rate (see
         ``spot_enrichment``); ~1 is a noise indexing, >>1 a real lattice.
@@ -140,6 +149,7 @@ class IndexResult:
     predicted_sigmas: Optional[Tensor] = None
     predicted_peak: Optional[Tensor] = None
     predicted_background: Optional[Tensor] = None
+    diffraction_limit: Optional[float] = None
     enrichment: Optional[float] = None
     n_bright: Optional[int] = None
     enrich_p: Optional[float] = None
@@ -242,12 +252,25 @@ class IntegrateConfig:
     snap_radius : float
         A predicted spot within this many px of an observed peak is recentred on
         that peak's centroid before integration.
+    resolution_snr : float
+        Mean-I/sigma a resolution shell must clear for the crystal's reflections
+        to be kept. Sets the per-crystal diffraction limit; reflections beyond it
+        are dropped and the limit is written to the stream. ``<= 0`` disables it.
+    resolution_bin : float
+        Shell width (nm^-1) for the per-crystal diffraction-limit scan.
+    adu_per_photon : float, optional
+        Detector gain used for the signal shot-noise term in sigma(I). ``None``
+        auto-detects it from the measured photon-transfer gain, else the
+        geometry (``adu_per_eV * photon_energy``), else 1.0.
     """
 
     enabled: bool = True
     partiality_threshold: float = 0.0005
     box_radius: int = 3
     snap_radius: float = 5.0
+    resolution_snr: float = 1.0
+    resolution_bin: float = 0.5
+    adu_per_photon: Optional[float] = None
 
 
 @dataclass
@@ -388,6 +411,8 @@ class Indexer:
         self.integrate = integrate or IntegrateConfig()
         self.dtype = dtype
         self.device = device
+        self._geometry_gain = geometry.get("adu_per_photon")
+        self._measured_gain: Optional[float] = None
         self._q_max: Optional[float] = None
         self.B_target = cell_to_B(target_cell, device=device, dtype=dtype)
 
@@ -754,6 +779,15 @@ class Indexer:
 
         return IndexStream(_gen(), stats=stats)
 
+    def _adu_per_photon(self) -> float:
+        if self.integrate.adu_per_photon is not None:
+            return float(self.integrate.adu_per_photon)
+        if self._measured_gain is not None and self._measured_gain > 0:
+            return float(self._measured_gain)
+        if self._geometry_gain is not None and self._geometry_gain > 0:
+            return float(self._geometry_gain)
+        return 1.0
+
     def _integrate_result(
         self,
         result: IndexResult,
@@ -788,13 +822,24 @@ class Indexer:
             box_radius=self.integrate.box_radius,
             mean=mean.to(excess.dtype) if mean is not None else None,
             pixel_valid=valid_mask,
+            adu_per_photon=self._adu_per_photon(),
         )
-        result.predicted_hkl = pred.hkl
-        result.predicted_positions = positions
-        result.predicted_intensities = intensity
-        result.predicted_sigmas = sigma
-        result.predicted_peak = peak
-        result.predicted_background = background
+        resolution_nm = pred.resolution * A_INV_TO_NM_INV
+        limit = resolution_limit(
+            resolution_nm,
+            intensity,
+            sigma,
+            self.integrate.resolution_snr,
+            self.integrate.resolution_bin,
+        )
+        keep = torch.isfinite(sigma) & (sigma > 0) & (resolution_nm <= limit)
+        result.diffraction_limit = limit
+        result.predicted_hkl = pred.hkl[keep]
+        result.predicted_positions = positions[keep]
+        result.predicted_intensities = intensity[keep]
+        result.predicted_sigmas = sigma[keep]
+        result.predicted_peak = peak[keep]
+        result.predicted_background = background[keep]
         result.n_bright, result.enrichment, result.enrich_p = spot_enrichment(
             positions, excess, var, bright_threshold, pixel_valid=valid_mask
         )
