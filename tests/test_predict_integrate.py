@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import numpy as np
 import pytest
 import sim
 import torch
@@ -163,9 +162,7 @@ def test_integrate_recovers_injected_intensity_and_background(cell):
     )
     assert bool(interior.any())
     box_pixels = (2 * box_radius + 1) ** 2
-    expected_sigma = torch.sqrt(
-        box_pixels * noise_sigma**2 + intensity.clamp_min(0.0)
-    )
+    expected_sigma = torch.sqrt(box_pixels * noise_sigma**2 + intensity.clamp_min(0.0))
     assert torch.allclose(sigma[interior], expected_sigma[interior])
 
 
