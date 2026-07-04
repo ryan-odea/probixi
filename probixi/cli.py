@@ -49,14 +49,16 @@ def _pct(num: int, denom: int) -> str:
     "output",
     required=False,
     default=None,
-    type=click.Path(dir_okay=False, writable=True),
-    help="Output CrystFEL-style .stream file. Optional when only --render is used.",
+    type=click.Path(writable=True),
+    help="Output CrystFEL-style .stream file (or, with --peaks-only, an output "
+    "directory for the CXI peak set). Optional when only --render is used.",
 )
 @click.option(
     "--peaks-only",
     is_flag=True,
-    help="Only run peak finding and export a peaks-only stream "
-    "Does not require a unit cell.",
+    help="Only run peak finding and export a CXI peak set (one .cxi per input "
+    "file with external-linked images, plus peaks.lst and a companion .geom) "
+    "for 'indexamajig --peaks=cxi'. -o is an output directory. No cell needed.",
 )
 @click.option(
     "--gif",
@@ -167,8 +169,9 @@ def main(
 ) -> None:
     """Run the probixi pipeline and write indexed frames to a CrystFEL stream.
 
-    With --peaks-only, peak finding runs but indexing does not, and a
-    peaks-only stream is written instead.
+    With --peaks-only, peak finding runs but indexing does not, and a CXI peak
+    set (readable by 'indexamajig --peaks=cxi') is written to the -o directory
+    instead.
     """
     if not peaks_only and not render and cell_file is None:
         raise click.UsageError(
@@ -230,10 +233,8 @@ def main(
         )
         with PeakOffloader(
             output,
-            geometry=probixi.geometry,
             geometry_file=geometry_file,
             files=meta.files,
-            panel=panel,
         ) as off:
             n = 0
             for result in peaks:

@@ -246,16 +246,29 @@ class IntegrateConfig:
         only observed-and-indexed peaks. Requires the streaming path.
     partiality_threshold : float
         Max ``|S| - 1`` (Ewald excitation error) for a reflection to count as
-        diffracting. Larger -> more (more partial) reflections predicted.
+        diffracting. Larger -> more (more partial) reflections predicted. When
+        ``partiality_rmsd_factor > 0`` this acts as a *floor*; the effective
+        per-crystal tolerance is the larger of this and the auto value.
+    partiality_rmsd_factor : float
+        Self-calibrate the Ewald-shell tolerance per crystal from its own peak
+        spread: ``tolerance = factor * wavelength * rmsd`` (``rmsd`` is the RMS
+        q-residual of the indexed peaks, a mosaicity+bandwidth proxy), clamped to
+        ``[partiality_threshold, partiality_max]``. ``<= 0`` disables auto and
+        uses the fixed ``partiality_threshold``.
+    partiality_max : float
+        Upper clamp for the auto per-crystal tolerance (guards runaway prediction
+        on badly-fit crystals).
     box_radius : int
         Half-width (px) of the integration box.
     snap_radius : float
         A predicted spot within this many px of an observed peak is recentred on
         that peak's centroid before integration.
     resolution_snr : float
-        Mean-I/sigma a resolution shell must clear for the crystal's reflections
-        to be kept. Sets the per-crystal diffraction limit; reflections beyond it
-        are dropped and the limit is written to the stream. ``<= 0`` disables it.
+        Mean-I/sigma a resolution shell must clear to set the per-crystal
+        diffraction limit written to the stream. ``<= 0`` disables the estimate.
+        The limit is only *reported*: all reflections are integrated to the
+        detector edge and the merge decides resolution (Monte-Carlo style;
+        avoids per-crystal positivity bias).
     resolution_bin : float
         Shell width (nm^-1) for the per-crystal diffraction-limit scan.
     adu_per_photon : float, optional
@@ -266,6 +279,8 @@ class IntegrateConfig:
 
     enabled: bool = True
     partiality_threshold: float = 0.0005
+    partiality_rmsd_factor: float = 2.0
+    partiality_max: float = 0.01
     box_radius: int = 3
     snap_radius: float = 5.0
     resolution_snr: float = 1.0
@@ -801,11 +816,20 @@ class Indexer:
         frame_shape = (int(excess.shape[-2]), int(excess.shape[-1]))
         if self._q_max is None:
             self._q_max = detector_q_max(self.geometry, frame_shape)
+        # |S|-1 ~ wavelength * (q-residual)
+        # scale the Ewald-shell tolerance to each crystal's own observed peak spread (mosaicity+bandwidth proxy).
+        threshold = self.integrate.partiality_threshold
+        if self.integrate.partiality_rmsd_factor > 0.0 and math.isfinite(
+            result.rmsd
+        ) and result.rmsd > 0.0:
+            wavelength = float(self.geometry["wavelength"])
+            auto = self.integrate.partiality_rmsd_factor * wavelength * result.rmsd
+            threshold = min(max(threshold, auto), self.integrate.partiality_max)
         pred = predict_reflections(
             result.A.to(excess.dtype),
             self.geometry,
             q_max=self._q_max,
-            partiality_threshold=self.integrate.partiality_threshold,
+            partiality_threshold=threshold,
             frame_shape=frame_shape,
         )
         if len(pred) == 0:
@@ -832,8 +856,8 @@ class Indexer:
             self.integrate.resolution_snr,
             self.integrate.resolution_bin,
         )
-        keep = torch.isfinite(sigma) & (sigma > 0) & (resolution_nm <= limit)
         result.diffraction_limit = limit
+        keep = torch.isfinite(sigma) & (sigma > 0)
         result.predicted_hkl = pred.hkl[keep]
         result.predicted_positions = positions[keep]
         result.predicted_intensities = intensity[keep]
