@@ -819,9 +819,11 @@ class Indexer:
         # |S|-1 ~ wavelength * (q-residual)
         # scale the Ewald-shell tolerance to each crystal's own observed peak spread (mosaicity+bandwidth proxy).
         threshold = self.integrate.partiality_threshold
-        if self.integrate.partiality_rmsd_factor > 0.0 and math.isfinite(
-            result.rmsd
-        ) and result.rmsd > 0.0:
+        if (
+            self.integrate.partiality_rmsd_factor > 0.0
+            and math.isfinite(result.rmsd)
+            and result.rmsd > 0.0
+        ):
             wavelength = float(self.geometry["wavelength"])
             auto = self.integrate.partiality_rmsd_factor * wavelength * result.rmsd
             threshold = min(max(threshold, auto), self.integrate.partiality_max)

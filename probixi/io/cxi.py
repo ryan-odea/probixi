@@ -14,7 +14,7 @@ PEAK_LIST_PATH = "/entry_1/result_1"
 class PeakOffloader:
     """Write peak-search results as CrystFEL-readable CXI files.
 
-    Exports peaks in the CXI layout so that ``indexamajig --peaks=cxi`` can 
+    Exports peaks in the CXI layout so that ``indexamajig --peaks=cxi`` can
     re-index probixi's peaks with its own engine. One ``.cxi`` is written per source HDF5 file; each external-links
     the raw image stack and stores the peak arrays under ``/entry_1/result_1`` indexed by event.
 

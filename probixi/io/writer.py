@@ -9,7 +9,6 @@ from .geometry import EV_ANGSTROM
 
 if TYPE_CHECKING:
     from ..indexer.indexer import IndexResult
-    from ..peakfinding.peaks import PeakResult
     from .cell import CellParams
 
 PathLike = Union[str, Path]
