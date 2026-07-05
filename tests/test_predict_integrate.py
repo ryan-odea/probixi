@@ -138,8 +138,6 @@ def test_integrate_recovers_injected_intensity_and_background(cell):
         excess,
         var,
         obs_positions=torch.empty(0, 2, dtype=torch.float64),
-        obs_intensity=torch.empty(0, dtype=torch.float64),
-        obs_sigma=torch.empty(0, dtype=torch.float64),
         box_radius=4,
         mean=mean,
     )
@@ -181,8 +179,6 @@ def test_integrate_snaps_predicted_to_nearby_observed_peak(cell):
         excess,
         var,
         obs_positions=obs_pos,
-        obs_intensity=torch.full((n,), 1.0, dtype=torch.float64),
-        obs_sigma=torch.full((n,), 1.0, dtype=torch.float64),
         snap_radius=5.0,
         box_radius=3,
     )
@@ -202,8 +198,6 @@ def test_integrate_does_not_snap_observed_peak_outside_snap_radius():
         excess,
         var,
         obs_positions=obs_pos,
-        obs_intensity=torch.tensor([1.0], dtype=torch.float64),
-        obs_sigma=torch.tensor([1.0], dtype=torch.float64),
         snap_radius=5.0,
         box_radius=2,
     )
@@ -222,8 +216,6 @@ def test_integrate_with_no_observed_peaks_keeps_predicted_positions():
         excess,
         var,
         obs_positions=torch.empty(0, 2, dtype=torch.float64),
-        obs_intensity=torch.empty(0, dtype=torch.float64),
-        obs_sigma=torch.empty(0, dtype=torch.float64),
         box_radius=2,
     )
     assert not bool(snapped.any())
@@ -241,8 +233,6 @@ def test_integrate_peak_is_box_maximum_of_excess():
         excess,
         var,
         obs_positions=torch.empty(0, 2, dtype=torch.float64),
-        obs_intensity=torch.empty(0, dtype=torch.float64),
-        obs_sigma=torch.empty(0, dtype=torch.float64),
         box_radius=2,
     )
     assert float(peak[0]) == pytest.approx(42.0)
