@@ -81,28 +81,30 @@ with DataOffloader(
 
 ## Comparison with other works
 
-Here, we provide a comparison with other peakfinding algorithms with real data. Using a randomly sampled 10,000 frames from experimentally collected data. 
+Here, we provide a comparison with other peakfinding algorithms with real data. Using a randomly sampled ~10,000 frames from experimentally collected data. Lysozyme and BacterioRhodopsin normally perform quite well. Our C1C2 crystals at the synchrotron diffracted barely above the noise floor.
 
 Notes:
 
 1. For wall time, because `probixi` handles optimizing internal hyperparameters automatically, I have included time used for loose manual hyperparameter tuning on 10% subsamples to find optimal SNR, threshold, and minimum pixels. CPU time for only peakfinding and indexing is bracketed.
-2. Percent agreement is calculated as the (set of crystals indexed by probixi) / (set of crystals indexed by the reference) * 100. Greater than 100 indicates that `probixi` was able to index more crystals.
+2. `probixi` uses a single NVIDIA 40gb A100, but is extendable to multiple GPUs at request.
+3. Rsplit Difference (CC*) indicates the difference (comparison - `probixi`). Reflections are currently merged via `partialator` for `.hkl` generation. Further work is planned to handle automerging. (CC*) indicates CC* difference (comparison - `probixi`)
 
 Benchmarks were run on:
 
-- GPU: A100
-- CPU: TODO which CPU do Ra nodes use?
+- GPU: NVIDIA 40gb A100
+- CPU: AMD EPYC 9335 using all 32 cores
 
 ### `peakfinder8 + indexamajig`
 
-| Dataset                               | Percent Indexed (`probixi`) | GPU time (`probixi`) | Percent Indexed (`peakfinder8+indexamajig`) | CPU Time (`peakfinder8+indexamajig`) [No-Tuning] | Percent Agreement |
+| Dataset                               | Percent Indexed (`probixi`) | Wall time (`probixi`) | Percent Indexed (`peakfinder8+ indexamajig`) | Wall Time (`peakfinder8+ indexamajig`) [No-Tuning] | Rsplit Difference (CC*) |
 |---------------------------------------|---------------------------|---------------------|-------------------------------------|-------------------------------|-------------------|
-| Lysozyme-Synchrotron                  |                           |                     |                                     |                               |                   |
-| Lysozyme-FEL                          |                           |                     |                                     |                               |                   |
-| BacterioRhodopsin-Synchrotron         |                           |                     |                                     |                               |                   |
-| BacterioRhodopsin-FEL                 |                           |                     |                                     |                               |                   |
-| Randomly Dimmed Lysozyme-FEL          |                           |                     |                                     |                               |                   |
-| Randomly Dimmed BacterioRhodopsin-FEL |                           |                     |                                     |                               |                   |
+| Lysozyme-Synchrotron                  ||||||
+| Lysozyme-FEL                          ||||||
+| BacterioRhodopsin-Synchrotron         | 18.0 || 19.6 || 0.03 (-0.01) |
+| BacterioRhodopsin-FEL                 ||||||
+| C1C2-Synchrotron                      | 1.9 || 1.09 || 147.18 (-0.07) |
+| Randomly Dimmed Lysozyme-FEL          ||||||
+| Randomly Dimmed BacterioRhodopsin-FEL ||||||
 
 ### pyFAI + TORO
 
@@ -113,14 +115,15 @@ integration and peak picking) paired with the [TORO][toro] indexer, which both r
 [toro]: https://doi.org/10.1107/S1600576724003182
 
 
-| Dataset                               | Percent Indexed (`probixi`) | GPU time (`probixi`) | Percent Indexed (`pyFAI+TORO`) | GPU Time (`pyFAI+TORO`) [No-Tuning] | Percent Agreement |
+| Dataset                               | Percent Indexed (`probixi`) | Wall time (`probixi`) | Percent Indexed (`pyFAI+TORO`) | Wall Time (`pyFAI+TORO`) [No-Tuning] | Total Rsplit (CC*) |
 |---------------------------------------|---------------------------|---------------------|-------------------------------------|-------------------------------|-------------------|
-| Lysozyme-Synchrotron                  |                           |                     |                                     |                               |                   |
-| Lysozyme-FEL                          |                           |                     |                                     |                               |                   |
-| BacterioRhodopsin-Synchrotron         |                           |                     |                                     |                               |                   |
-| BacterioRhodopsin-FEL                 |                           |                     |                                     |                               |                   |
-| Randomly Dimmed Lysozyme-FEL          |                           |                     |                                     |                               |                   |
-| Randomly Dimmed BacterioRhodopsin-FEL |                           |                     |                                     |                               |                   |
+| Lysozyme-Synchrotron                  ||||||
+| Lysozyme-FEL                          ||||||
+| BacterioRhodopsin-Synchrotron         | 18 |||||
+| BacterioRhodopsin-FEL                 ||||||
+| Randomly Dimmed Lysozyme-FEL          ||||||
+| C1C2-Synchrotron                      | 1.9 |||||
+| Randomly Dimmed BacterioRhodopsin-FEL ||||||
 
 
 ### Using `probixi` as only a peakfinder
