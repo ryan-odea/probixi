@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+from functools import lru_cache
 
 import torch
 from torch import Tensor
@@ -19,6 +20,7 @@ from .refine import _axis_angle_to_rotation
 # 3. spin the best directions and score each full orientation by induced-hkl inliers.
 
 
+@lru_cache(maxsize=None)
 def _fibonacci_hemisphere(n: int, device, dtype: torch.dtype) -> Tensor:
     i = torch.arange(n, device=device, dtype=dtype)
     z = (i + 0.5) / n

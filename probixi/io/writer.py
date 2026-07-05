@@ -4,6 +4,8 @@ import math
 from pathlib import Path
 from typing import TYPE_CHECKING, Optional, Union
 
+import torch
+
 from ..indexer.lattice import B_to_cell
 from .geometry import EV_ANGSTROM
 
@@ -285,10 +287,19 @@ class DataOffloader(_StreamWriter):
         if result.predicted_hkl is not None:
             p_pos = result.predicted_positions.detach().cpu().tolist()
             p_hkl = result.predicted_hkl.detach().cpu().tolist()
-            p_int = result.predicted_intensities.detach().cpu().tolist()
-            p_sig = result.predicted_sigmas.detach().cpu().tolist()
-            p_pk = result.predicted_peak.detach().cpu().tolist()
-            p_bg = result.predicted_background.detach().cpu().tolist()
+            p_int, p_sig, p_pk, p_bg = (
+                torch.stack(
+                    [
+                        result.predicted_intensities,
+                        result.predicted_sigmas,
+                        result.predicted_peak,
+                        result.predicted_background,
+                    ]
+                )
+                .detach()
+                .cpu()
+                .tolist()
+            )
             refl = list(zip(p_pos, p_hkl, p_int, p_sig, p_pk, p_bg))
         else:
             refl = [

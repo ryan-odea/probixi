@@ -50,6 +50,8 @@ class PanelNoise(NoiseStats):
         self.register_buffer("panel_map", panel_map)
         self.register_buffer("pixels_per_panel", pixels_per_panel)
         self.register_buffer("valid_mask", valid.to(device=device, dtype=torch.bool))
+        # per-pixel panel index; no-panel pixels fold to 0 and are zeroed by valid_f
+        self.register_buffer("_pid_flat", panel_map.clamp_min(0).flatten())
 
     def _build_panel_map(
         self, panels: Optional[PanelSpec], device: Optional[torch.device]
@@ -82,7 +84,7 @@ class PanelNoise(NoiseStats):
         if mask is not None:
             valid = valid & mask.to(device=valid.device, dtype=torch.bool)
         valid_f = valid.to(frame.dtype)
-        pid = self.panel_map.clamp_min(0).flatten()
+        pid = self._pid_flat
 
         sum_per_panel = torch.zeros_like(self.mean_)
         sum_per_panel.index_add_(0, pid, (frame * valid_f).flatten())

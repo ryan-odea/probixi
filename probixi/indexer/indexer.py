@@ -156,9 +156,6 @@ class IndexResult:
     scale: Optional[float] = None
     scale_sigma: Optional[float] = None
 
-    def cell_dict(self) -> dict:
-        return self.cell.as_dict_degrees()
-
 
 @dataclass
 class SeedConfig:
@@ -365,9 +362,6 @@ class IndexStream:
     def collect(self) -> list[IndexResult]:
         return list(self._source)
 
-    def collect_dict(self) -> dict[int, IndexResult]:
-        return {r.frame_index: r for r in self._source}
-
     def count(self) -> int:
         return sum(1 for _ in self._source)
 
@@ -436,46 +430,6 @@ class Indexer:
         else:
             min_spacing = float(torch.linalg.vector_norm(self.B_target, dim=0).min())
             self.q_tolerance = self.seed.q_tolerance_fraction * min_spacing
-
-    @classmethod
-    def fast(
-        cls,
-        geometry: dict,
-        target_cell: CellParams,
-        **overrides,
-    ) -> "Indexer":
-        # Fast preset: narrower search
-        overrides.setdefault(
-            "seed",
-            SeedConfig(
-                max_candidates=16,
-                n_directions=3000,
-                n_spin=72,
-                top_directions=16,
-            ),
-        )
-        overrides.setdefault("refine", RefineConfig(max_iters=80, reassign_every=20))
-        return cls(geometry, target_cell, **overrides)
-
-    @classmethod
-    def thorough(
-        cls,
-        geometry: dict,
-        target_cell: CellParams,
-        **overrides,
-    ) -> "Indexer":
-        # High-recall preset: wider search, more reassignments, takes a million years (not really, but long)
-        overrides.setdefault(
-            "seed",
-            SeedConfig(
-                max_candidates=128,
-                n_directions=12000,
-                n_spin=240,
-                top_directions=64,
-            ),
-        )
-        overrides.setdefault("refine", RefineConfig(max_iters=400, reassign_every=5))
-        return cls(geometry, target_cell, **overrides)
 
     def _cell_matches_target(self, cell: CellParams) -> bool:
         # Compare sorted edges/angles so the match is invariant to axis labelling.
@@ -665,9 +619,10 @@ class Indexer:
         rmsd = result.rmsd
         # rank by confidence-weighted inlier evidence breaking ties toward lower rmsd (scaled to stay below 1)
         score = soft - rmsd / (rmsd.max().clamp_min(1e-12) * 1e3)
-        ranking = torch.argsort(score, descending=True)
-        for cand in ranking.tolist():
-            if int(n_indexed[cand]) < self.refine.min_indexed:
+        ranking = torch.argsort(score, descending=True).tolist()
+        n_indexed_host = n_indexed.tolist()
+        for cand in ranking:
+            if n_indexed_host[cand] < self.refine.min_indexed:
                 continue
             A_cand = result.A[cand]
             try:
@@ -679,7 +634,7 @@ class Indexer:
             return IndexResult(
                 frame_index=frame_index,
                 n_peaks=n_peaks,
-                n_indexed=int(n_indexed[cand]),
+                n_indexed=n_indexed_host[cand],
                 rmsd=float(rmsd[cand]),
                 A=A_cand,
                 U=U,
@@ -842,8 +797,6 @@ class Indexer:
             excess,
             var,
             result.positions.to(excess.dtype),
-            result.intensities.to(excess.dtype),
-            result.sigmas.to(excess.dtype),
             snap_radius=self.integrate.snap_radius,
             box_radius=self.integrate.box_radius,
             mean=mean.to(excess.dtype) if mean is not None else None,

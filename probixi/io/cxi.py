@@ -3,6 +3,7 @@ from typing import Optional
 
 import h5py
 import numpy as np
+import torch
 
 from .writer import _build_frame_ranges
 
@@ -82,9 +83,12 @@ class PeakOffloader:
         if not self._active:
             raise RuntimeError("PeakOffloader must be used as a context manager")
         stats = result.kept_stats
-        rows = stats.row_centroid.detach().cpu().tolist()
-        cols = stats.col_centroid.detach().cpu().tolist()
-        intensities = stats.intensity_sum.detach().cpu().tolist()
+        rows, cols, intensities = (
+            torch.stack([stats.row_centroid, stats.col_centroid, stats.intensity_sum])
+            .detach()
+            .cpu()
+            .tolist()
+        )
         if not rows:
             return
         fname, event = self._locate(result.frame_index)

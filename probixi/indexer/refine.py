@@ -156,6 +156,8 @@ def refine_multiframe_known_B(
             obs_mask,
             q_tolerance=q_tolerance,
         )
+    # float view of the current hkl assignment
+    hkl_dt = hkl.to(dtype)
     cand_mask_f = cand_mask.to(dtype)
 
     best_loss = float("inf")
@@ -173,10 +175,11 @@ def refine_multiframe_known_B(
                     obs_mask,
                     q_tolerance=q_tolerance,
                 )
+            hkl_dt = hkl.to(dtype)
 
         R = _axis_angle_to_rotation(omega)
         A_eff = R @ A_anchor
-        q_pred = torch.einsum("fkij,fknj->fkni", A_eff, hkl.to(dtype))
+        q_pred = torch.einsum("fkij,fknj->fkni", A_eff, hkl_dt)
         residual = q_pred - q_pad.unsqueeze(1)
         sq = (residual * residual).sum(dim=-1)
         mask = indexed.to(dtype)

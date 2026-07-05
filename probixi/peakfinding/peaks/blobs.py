@@ -6,6 +6,42 @@ import torch
 import torch.nn.functional as F
 from torch import Tensor
 
+# cached frame-invariant index grids, keyed by (H, W, device[, dtype])
+_SEED_CACHE: dict = {}
+_COORD_CACHE: dict = {}
+
+
+def _seed_grid(H: int, W: int, device: torch.device) -> Tensor:
+    key = (H, W, device)
+    grid = _SEED_CACHE.get(key)
+    if grid is None:
+        grid = (torch.arange(H * W, dtype=torch.long, device=device) + 1).reshape(H, W)
+        _SEED_CACHE[key] = grid
+    return grid
+
+
+def _coord_grids(
+    H: int, W: int, device: torch.device, dtype: torch.dtype
+) -> tuple[Tensor, Tensor, Tensor, Tensor]:
+    key = (H, W, device, dtype)
+    got = _COORD_CACHE.get(key)
+    if got is None:
+        flat_rows = (
+            torch.arange(H, device=device, dtype=torch.long)
+            .view(-1, 1)
+            .expand(H, W)
+            .flatten()
+        )
+        flat_cols = (
+            torch.arange(W, device=device, dtype=torch.long)
+            .view(1, -1)
+            .expand(H, W)
+            .flatten()
+        )
+        got = (flat_rows, flat_cols, flat_rows.to(dtype), flat_cols.to(dtype))
+        _COORD_CACHE[key] = got
+    return got
+
 
 @dataclass
 class BlobStats:
@@ -58,7 +94,7 @@ def label_connected_components(
     # Seed each foreground pixel with a unique id, then iterate min over self +
     # neighbors until the per-component global minimum floods to convergence
     INF = H * W + 2
-    seeds = (torch.arange(H * W, dtype=torch.long, device=device) + 1).reshape(H, W)
+    seeds = _seed_grid(H, W, device)
     labels = seeds * mask
     offsets = (
         [(-1, 0), (1, 0), (0, -1), (0, 1)]
@@ -66,15 +102,16 @@ def label_connected_components(
         else [(-1, -1), (-1, 0), (-1, 1), (0, -1), (0, 1), (1, -1), (1, 0), (1, 1)]
     )
 
-    for _ in range(max_iters):
+    for it in range(max_iters):
         prev = labels
         cur = labels.masked_fill(~mask, INF)
         padded = F.pad(cur, (1, 1, 1, 1), value=INF)
         acc = cur
         for dy, dx in offsets:
             acc = torch.minimum(acc, padded[1 + dy : 1 + dy + H, 1 + dx : 1 + dx + W])
-        labels = torch.where(mask, acc, torch.zeros_like(acc))
-        if labels.equal(prev):
+        labels = torch.where(mask, acc, 0)
+        # poll for convergence every 8th iteration
+        if it % 8 == 7 and labels.equal(prev):
             break
 
     # Compress sparse surviving seed ids to a dense 1:n_blobs range
@@ -150,20 +187,7 @@ def compute_blob_stats(
     w_sum = torch.zeros(n_total, dtype=dtype, device=device)
     w_sum.scatter_add_(0, flat_labels, w)
 
-    flat_rows = (
-        torch.arange(H, device=device, dtype=torch.long)
-        .view(-1, 1)
-        .expand(H, W)
-        .flatten()
-    )
-    flat_cols = (
-        torch.arange(W, device=device, dtype=torch.long)
-        .view(1, -1)
-        .expand(H, W)
-        .flatten()
-    )
-    rows = flat_rows.to(dtype)
-    cols = flat_cols.to(dtype)
+    flat_rows, flat_cols, rows, cols = _coord_grids(H, W, device, dtype)
     w_row = torch.zeros(n_total, dtype=dtype, device=device)
     w_col = torch.zeros(n_total, dtype=dtype, device=device)
     g_row = torch.zeros(n_total, dtype=dtype, device=device)

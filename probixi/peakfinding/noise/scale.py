@@ -139,9 +139,10 @@ class ScaleReference:
         g = (sw * swty - swt * swy) / det
         a = (swtt * swy - swt * swty) / det
         var_g = (sw / det).clamp_min(0.0)
+        scale, sigma, offset = torch.stack([g, var_g.sqrt(), a]).tolist()
         return FrameScale(
             frame_index=frame_index,
-            scale=float(g),
-            sigma=float(var_g.sqrt()),
-            offset=float(a),
+            scale=scale,
+            sigma=sigma,
+            offset=offset,
         )

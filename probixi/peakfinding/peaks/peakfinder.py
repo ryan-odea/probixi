@@ -18,6 +18,7 @@ from .blobs import (
     select_blobs,
 )
 from .neighborhood import (
+    annulus_count,
     gaussian_kernel_2d,
     local_mean_var,
     mask_denominator,
@@ -116,11 +117,6 @@ class PeakResult:
     @cached_property
     def kept_stats(self) -> BlobStats:
         return select_blobs(self.stats, self.keep)
-
-    @cached_property
-    def peak_mask(self) -> Tensor:
-        # (H,W) bool: pixels belonging to kept peak-blobs
-        return torch.isin(self.labels, self.kept_stats.label_id)
 
     def to_peaks(self) -> list[Peak]:
         """Materialize ``Peak`` dataclasses; forces host sync via ``.tolist()``."""
@@ -341,24 +337,36 @@ class PeakFinder:
 
         self._pred_cache: Optional[dict[str, Tensor]] = None
         self._pred_key: Optional[int] = None
+        self._den_key: Optional[int] = None
         self._smooth_den: Optional[Tensor] = None
-        self._mf_den: Optional[Tensor] = None
         self._mf_bank_den: Optional[list[Tensor]] = None
+        self._annulus_count: Optional[Tensor] = None
 
     def _pred(self) -> dict[str, Tensor]:
-        key = int(self.noise.n_frames)
+        # prediction cache keyed on model updates
+        key = self.noise._n_host
         cache = self._pred_cache
         if self._pred_key != key or cache is None:
             cache = self.noise.predict(combination=self.combination)
             self._pred_cache = cache
+            self._pred_key = key
+        # denominators and annulus count depend only on the mask
+        mkey = self.noise._mask_version
+        if self._den_key != mkey or self._smooth_den is None:
             self._smooth_den = mask_denominator(cache["mask"], self._kernel)
-            self._mf_den = matched_filter_denominator(cache["mask"], self._kernel)
             if self.matched_filter:
                 self._mf_bank_den = [
                     matched_filter_denominator(cache["mask"], k)
                     for k in self._mf_kernels
                 ]
-            self._pred_key = key
+            if self.local_background:
+                self._annulus_count = annulus_count(
+                    cache["mask"],
+                    self.local_inner_radius,
+                    self.local_outer_radius,
+                    dtype=self._kernel.dtype,
+                )
+            self._den_key = mkey
         return cache
 
     @torch.no_grad()
@@ -398,6 +406,7 @@ class PeakFinder:
             pred["mask"],
             self.local_inner_radius,
             self.local_outer_radius,
+            count=self._annulus_count,
         )
         mean_eff = mean0 + local_mean
         if flux:
@@ -415,90 +424,6 @@ class PeakFinder:
             t = matched_filter_z(z, k, mask, den=den)
             stat = t if stat is None else torch.maximum(stat, t)
         return stat
-
-    @torch.no_grad()
-    def estimate_psf(
-        self,
-        frames: Iterable[Tensor],
-        radius: int = 6,
-        max_spots: int = 400,
-        snr_min: float = 8.0,
-        install_kernel: bool = False,
-    ) -> Optional[Tensor]:
-        """Estimate the spot point-spread function from strong spots.
-
-        Collects compact, high-SNR spots (``z_max > snr_min``), extracts a
-        background-subtracted ``(2*radius+1)^2`` patch around each, normalises so
-        bright and faint spots weigh equally, and averages. The result is the
-        data's own PSF, the optimal matched-filter kernel for low-SNR detection.
-        Please run after calibration so the noise model is seeded and z is meaningful!
-
-        Parameters
-        ----------
-        frames : iterable of Tensor
-            Frames to scan, (H,W) or (B,H,W).
-        radius : int, default 6
-            Half-width of the extracted patch.
-        max_spots : int, default 400
-            Stop after averaging this many spots.
-        snr_min : float, default 8.0
-            Minimum ``z_max`` for a spot to contribute.
-        install_kernel : bool, default False
-            If true, install the PSF as the matched-filter kernel.
-
-        Returns
-        -------
-        Tensor or None
-            The ``(2*radius+1, 2*radius+1)`` sum-normalised PSF, or None if too
-            few strong spots were found.
-        """
-        R = int(radius)
-        patches: list[Tensor] = []
-        for res in self.peak_stream(frames):
-            if len(res) == 0 or not res.scores:
-                continue
-            excess = res.scores.get("excess")
-            if excess is None:
-                continue
-            H, W = excess.shape
-            st = res.kept_stats
-            keep = st.z_max > snr_min
-            rows = torch.round(st.row_centroid).long()
-            cols = torch.round(st.col_centroid).long()
-            for i in torch.nonzero(keep, as_tuple=False).squeeze(-1).tolist():
-                rr, cc = int(rows[i]), int(cols[i])
-                if rr - R < 0 or rr + R >= H or cc - R < 0 or cc + R >= W:
-                    continue
-                patch = excess[rr - R : rr + R + 1, cc - R : cc + R + 1].clamp_min(0)
-                total = patch.sum()
-                if total > 0:
-                    patches.append(patch / total)
-                if len(patches) >= max_spots:
-                    break
-            if len(patches) >= max_spots:
-                break
-        if len(patches) < 10:
-            return None
-        psf = torch.stack(patches).mean(dim=0).clamp_min(0)
-        psf = psf / psf.sum().clamp_min(1e-12)
-        if install_kernel:
-            self.matched_filter = True
-            self._mf_kernels = [psf]
-            self._pred_key = None
-        return psf
-
-    @torch.no_grad()
-    def log_bayes_factor(self, frame: Tensor) -> Tensor:
-        pred = self._pred()
-        frame = frame.to(pred["mean"])
-        mean, var = self._effective_background(frame, pred)
-        z = (frame - mean) / var.sqrt()
-        log_bf = -math.log(self.kappa) + 0.5 * z * z * (
-            1.0 - 1.0 / (self.kappa * self.kappa)
-        )
-        return torch.where(
-            pred["mask"] & (frame > mean), log_bf, torch.zeros_like(log_bf)
-        )
 
     @torch.no_grad()
     def score(self, frame: Tensor) -> dict[str, Tensor]:
@@ -528,20 +453,12 @@ class PeakFinder:
         log_bf_raw = -math.log(self.kappa) + 0.5 * z * z * (
             1.0 - 1.0 / (self.kappa * self.kappa)
         )
-        log_bf = torch.where(
-            pred["mask"] & (frame > mean),
-            log_bf_raw,
-            torch.zeros_like(log_bf_raw),
-        )
+        log_bf = torch.where(pred["mask"] & (frame > mean), log_bf_raw, 0.0)
         logits = log_bf + self.log_prior_odds
         logits_smoothed = smooth_logits(
             logits, self._kernel, mask=pred["mask"], den=self._smooth_den
         )
-        posterior = torch.where(
-            pred["mask"],
-            torch.sigmoid(logits_smoothed),
-            torch.zeros_like(logits_smoothed),
-        )
+        posterior = torch.where(pred["mask"], torch.sigmoid(logits_smoothed), 0.0)
         out = {
             "excess": excess,
             "z": z,
@@ -568,15 +485,13 @@ class PeakFinder:
         log_bf_raw = -math.log(self.kappa) + 0.5 * z * z * (
             1.0 - 1.0 / (self.kappa * self.kappa)
         )
-        log_bf = torch.where(
-            mask & (batch > mean), log_bf_raw, torch.zeros_like(log_bf_raw)
-        )
+        log_bf = torch.where(mask & (batch > mean), log_bf_raw, 0.0)
         logits = log_bf + self.log_prior_odds
         logits_smoothed = smooth_logits_batch(
             logits, self._kernel, mask=pred["mask"], den=self._smooth_den
         )
         posterior = torch.sigmoid(logits_smoothed)
-        posterior = torch.where(mask, posterior, torch.zeros_like(posterior))
+        posterior = torch.where(mask, posterior, 0.0)
         out = {
             "excess": excess,
             "z": z,
@@ -646,7 +561,6 @@ class PeakFinder:
         frame_index: Optional[int],
         mask: Tensor,
     ) -> PeakResult:
-        H, W = mask.shape
         device = mask.device
         dtype = scores["excess"].dtype
         if self.matched_filter and "mf_max" in scores:
@@ -660,14 +574,6 @@ class PeakFinder:
                 else self.posterior_threshold
             )
             binary = (scores["posterior"] > thr) & mask
-        if not binary.any():
-            return PeakResult(
-                frame_index=frame_index,
-                scores=scores,
-                labels=torch.zeros(H, W, dtype=torch.long, device=device),
-                stats=empty_stats(device, dtype),
-                keep=torch.zeros(0, dtype=torch.bool, device=device),
-            )
         labels, n_blobs = label_connected_components(
             binary, connectivity=self.connectivity
         )

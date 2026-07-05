@@ -40,44 +40,47 @@ def _box_sum(x: Tensor, radius: int) -> Tensor:
 
 
 @torch.no_grad()
+def annulus_count(
+    mask: Tensor, inner_radius: int, outer_radius: int, dtype: torch.dtype
+) -> Tensor:
+    # per-pixel valid-pixel count over the (outer minus inner) box annulus
+    m = mask.to(dtype)
+    co = _box_sum(m, outer_radius)
+    ci = _box_sum(m, inner_radius) if inner_radius >= 1 else torch.zeros_like(co)
+    return (co - ci).clamp_min(1.0)
+
+
+@torch.no_grad()
 def local_mean_var(
     residual: Tensor,
     mask: Tensor,
     inner_radius: int,
     outer_radius: int,
+    count: Optional[Tensor] = None,
 ) -> tuple[Tensor, Tensor]:
     # Per-pixel mean and variance of residual over the masked annulus
     # inner_radius < |offset|_inf <= outer_radius (outer box minus inner box)
-    # Excluding the inner box keeps a peak from biasing its own background
+    # Excluding the inner box keeps a peak from biasing its own background.
+    # ``count`` (annulus valid-pixel count) may be supplied precomputed, else None.
     m = mask.to(residual.dtype)
     rm = residual * m
     rm2 = residual * rm
     so = _box_sum(rm, outer_radius)
     s2o = _box_sum(rm2, outer_radius)
-    co = _box_sum(m, outer_radius)
     if inner_radius >= 1:
         si = _box_sum(rm, inner_radius)
         s2i = _box_sum(rm2, inner_radius)
-        ci = _box_sum(m, inner_radius)
     else:
         si = torch.zeros_like(so)
         s2i = torch.zeros_like(s2o)
-        ci = torch.zeros_like(co)
-    cnt = (co - ci).clamp_min(1.0)
-    mean = (so - si) / cnt
-    ex2 = (s2o - s2i) / cnt
+    if count is None:
+        co = _box_sum(m, outer_radius)
+        ci = _box_sum(m, inner_radius) if inner_radius >= 1 else torch.zeros_like(co)
+        count = (co - ci).clamp_min(1.0)
+    mean = (so - si) / count
+    ex2 = (s2o - s2i) / count
     var = (ex2 - mean * mean).clamp_min(0.0)
     return mean, var
-
-
-@torch.no_grad()
-def local_background(
-    residual: Tensor,
-    mask: Tensor,
-    inner_radius: int,
-    outer_radius: int,
-) -> Tensor:
-    return local_mean_var(residual, mask, inner_radius, outer_radius)[0]
 
 
 @torch.no_grad()

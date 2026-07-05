@@ -50,9 +50,8 @@ class NoiseStats(nn.Module):
         self.n_ += 1
         if self.decay == 1.0:
             # Welford: mean += delta/n; M2 += delta*(x - mean_new). var divides by n-1.
-            n = int(self.n_)
             delta = x - self.mean_
-            self.mean_.add_(delta / n)
+            self.mean_.add_(delta / self.n_)
             self.M2_.add_(delta * (x - self.mean_))
         else:
             # EWMA with alpha = decay; M2 holds the variance estimate directly.
@@ -72,10 +71,12 @@ class NoiseStats(nn.Module):
 
     def var(self) -> Tensor:
         if self.decay == 1.0:
-            n = int(self.n_)
-            if n < 2:
-                return torch.zeros_like(self.mean_)
-            return self.M2_ / (n - 1)
+            # unbiased variance M2/(n-1); zero until two observations
+            return torch.where(
+                self.n_ >= 2,
+                self.M2_ / (self.n_ - 1).clamp_min(1),
+                torch.zeros_like(self.mean_),
+            )
         return self.M2_
 
     def std(self) -> Tensor:
@@ -234,6 +235,9 @@ class NoiseModel(nn.Module):
         self._prev_mean: Optional[Tensor] = None
         self._prev_var: Optional[Tensor] = None
         self._mask_committed = False
+        # host mirror of n_frames; version bumped whenever valid_mask changes
+        self._n_host = 0
+        self._mask_version = 0
         # Set by calibrate_noise().apply(); used by the "calibrated" combination.
         self.calibrated_weights: Optional[dict[str, float]] = None
         self.var_scale: float = 1.0
@@ -246,7 +250,7 @@ class NoiseModel(nn.Module):
         # Upper-clip at mean + k*sigma so peaks cannot poison the stats used to detect them.
         if not self.robust_update or self.mode != "online":
             return frame
-        if int(self.n_frames) < self.robust_min_frames:
+        if self._n_host < self.robust_min_frames:
             return frame
         frame = frame.to(self.pixel.mean_)
         std = self.pixel.std()
@@ -264,7 +268,8 @@ class NoiseModel(nn.Module):
         self.rotational.update(frame_for_stats, mask=feed_mask)
         self.panel.update(frame_for_stats, mask=feed_mask)
         self.n_frames += 1
-        n = int(self.n_frames)
+        self._n_host += 1
+        n = self._n_host
         if (
             self.mode == "online"
             and not self._mask_committed
@@ -312,7 +317,7 @@ class NoiseModel(nn.Module):
         if combination == "shrinkage":
             # Linear shrinkage from radial prior toward per-pixel as evidence
             # accrues: w = min(1, n/warmup); mean = w*pixel + (1-w)*rotational.
-            n = float(self.n_frames.item())
+            n = float(self._n_host)
             w = min(1.0, n / max(1.0, float(self.warmup_frames)))
             return {"pixel": w, "rotational": 1.0 - w}, "pixel"
         if combination == "calibrated":
@@ -369,31 +374,15 @@ class NoiseModel(nn.Module):
         contributions = [
             (w / total) * sources[k].mean() for k, w in weights.items() if w > 0
         ]
-        mean = torch.stack(contributions).sum(dim=0)
+        mean = (
+            contributions[0]
+            if len(contributions) == 1
+            else torch.stack(contributions).sum(dim=0)
+        )
         var = sources[chosen_var].var()
         if combination == "calibrated" and use_preset:
             var = var * (self.var_scale**2)
         return {"mean": mean, "var": var, "mask": self.valid_mask}
-
-    @torch.no_grad()
-    def log_prob(
-        self,
-        frame: Tensor,
-        combination: Literal[
-            "pixel", "rotational", "panel", "shrinkage", "calibrated"
-        ] = "shrinkage",
-        weights: Optional[dict[str, float]] = None,
-        var_source: Optional[str] = None,
-    ) -> Tensor:
-        frame = self._coerce(frame)
-        pred = self.predict(
-            combination=combination, weights=weights, var_source=var_source
-        )
-        # log N(x; mu, sigma^2) per pixel.
-        var = pred["var"].clamp_min(1e-12)
-        two_pi = torch.tensor(2.0 * torch.pi, dtype=var.dtype, device=var.device)
-        lp = -0.5 * (((frame - pred["mean"]) ** 2) / var + torch.log(two_pi * var))
-        return torch.where(self.valid_mask, lp, torch.zeros_like(lp))
 
     @torch.no_grad()
     def z_score(
@@ -411,16 +400,16 @@ class NoiseModel(nn.Module):
         )
         # z = (x - mu) / sigma
         std = pred["var"].clamp_min(1e-12).sqrt()
-        return torch.where(
-            self.valid_mask, (frame - pred["mean"]) / std, torch.zeros_like(frame)
-        )
+        return torch.where(self.valid_mask, (frame - pred["mean"]) / std, 0.0)
 
     def reset(self) -> None:
         self.pixel.reset()
         self.rotational.reset()
         self.panel.reset()
         self.n_frames.zero_()
+        self._n_host = 0
         self.valid_mask.copy_(self.static_mask)
+        self._mask_version += 1
         self.drift = DriftDiagnostics()
         self._prev_mean = None
         self._prev_var = None
@@ -431,20 +420,24 @@ class NoiseModel(nn.Module):
         self.rotational.reset()
         self.panel.reset()
         self.n_frames.zero_()
+        self._n_host = 0
 
     @torch.no_grad()
     def _commit_mask(self) -> None:
         # Combine the warmup dead-pixel mask with the static a-priori mask.
         self.pixel.commit_dead_pixel_mask(tol=0.0)
         self.valid_mask.copy_(self.pixel.valid_mask & self.static_mask)
+        self._mask_version += 1
         self._mask_committed = True
 
     @torch.no_grad()
     def _record_drift(self, step: int) -> None:
         mean = self.pixel.mean()
         var = self.pixel.var().clamp_min(1e-12)
+        n_masked_t = (~self.valid_mask).sum()
         if self._prev_mean is None or self._prev_var is None:
-            mean_shift = var_ratio = kl = 0.0
+            zero = mean.new_zeros(())
+            mean_shift = var_ratio = kl = zero
         else:
             prev_mean, prev_var = self._prev_mean, self._prev_var.clamp_min(1e-12)
             valid = self.valid_mask
@@ -459,14 +452,17 @@ class NoiseModel(nn.Module):
             )
             kl = (kl_map * valid).sum() / denom
 
+        ms, vr, klv, nm = torch.stack(
+            [mean_shift.double(), var_ratio.double(), kl.double(), n_masked_t.double()]
+        ).tolist()
         self.drift.step.append(step)
-        self.drift.mean_shift.append(float(mean_shift))
-        self.drift.var_ratio_log.append(float(var_ratio))
-        self.drift.kl_gaussian.append(float(kl))
+        self.drift.mean_shift.append(ms)
+        self.drift.var_ratio_log.append(vr)
+        self.drift.kl_gaussian.append(klv)
         self.drift.effective_n.append(
             float(step) if self.decay == 1.0 else 1.0 / self.decay
         )
-        self.drift.n_masked.append(int((~self.valid_mask).sum().item()))
+        self.drift.n_masked.append(int(nm))
         self._prev_mean = mean.detach().clone()
         self._prev_var = var.detach().clone()
 

@@ -72,8 +72,6 @@ def integrate_predicted(
     excess: Tensor,
     var: Tensor,
     obs_positions: Tensor,
-    obs_intensity: Tensor,
-    obs_sigma: Tensor,
     snap_radius: float = 5.0,
     box_radius: int = 3,
     mean: Tensor | None = None,
@@ -149,14 +147,20 @@ def resolution_limit(
     counts = torch.zeros(nbins, dtype=ratio.dtype, device=ratio.device)
     sums.scatter_add_(0, b, ratio)
     counts.scatter_add_(0, b, torch.ones_like(ratio))
-    limit = 0.0
-    for i in range(nbins):
-        if counts[i] <= 0:
-            continue
-        if (sums[i] / counts[i]) >= snr:
-            limit = (i + 1) * bin_width
-        else:
-            break
+    # largest populated bin with mean I/sigma >= snr before the first bin that
+    # drops below it; empty bins are skipped
+    idx = torch.arange(nbins, device=counts.device)
+    mean_ratio = sums / counts.clamp_min(1.0)
+    populated = counts > 0
+    first_fail = torch.where(
+        populated & (mean_ratio < snr), idx, torch.full_like(idx, nbins)
+    ).min()
+    elig = populated & (mean_ratio >= snr) & (idx < first_fail)
+    if bool(elig.any()):
+        last = int(torch.where(elig, idx, torch.full_like(idx, -1)).max())
+        limit = (last + 1) * bin_width
+    else:
+        limit = 0.0
     return limit if limit > 0.0 else bin_width
 
 
@@ -205,7 +209,6 @@ def spot_enrichment(
     )[0, 0]
     bright = zmax > z_threshold
     valid = pixel_valid if pixel_valid is not None else torch.ones_like(bright)
-    p = float(bright[valid].sum()) / max(int(valid.sum()), 1)  # background bright-rate
     M = positions.shape[0]
     if M == 0:
         return 0, 0.0, 1.0
@@ -213,8 +216,21 @@ def spot_enrichment(
     r = centre[:, 0].clamp(0, z.shape[0] - 1)
     c = centre[:, 1].clamp(0, z.shape[1] - 1)
     keep = valid[r, c]
-    n_keep = max(int(keep.sum()), 1)
-    n_bright = int((bright[r, c] & keep).sum())
+    bright_valid, valid_total, keep_total, bright_keep = (
+        torch.stack(
+            [
+                (bright & valid).sum(),
+                valid.sum(),
+                keep.sum(),
+                (bright[r, c] & keep).sum(),
+            ]
+        )
+        .to(torch.float64)
+        .tolist()
+    )
+    p = bright_valid / max(valid_total, 1.0)  # background bright-rate
+    n_keep = max(keep_total, 1.0)
+    n_bright = int(bright_keep)
     enrichment = (
         (n_bright / n_keep) / p if p > 0.0 else float(n_bright > 0) * float("inf")
     )

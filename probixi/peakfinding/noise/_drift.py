@@ -1,7 +1,5 @@
 from dataclasses import dataclass, field
 
-import torch
-
 
 @dataclass
 class DriftDiagnostics:
@@ -22,18 +20,3 @@ class DriftDiagnostics:
     kl_gaussian: list[float] = field(default_factory=list)
     effective_n: list[float] = field(default_factory=list)
     n_masked: list[int] = field(default_factory=list)
-
-    def latest(self) -> dict:
-        if not self.step:
-            return {}
-        return {
-            "step": self.step[-1],
-            "mean_shift": self.mean_shift[-1],
-            "var_ratio_log": self.var_ratio_log[-1],
-            "kl_gaussian": self.kl_gaussian[-1],
-            "effective_n": self.effective_n[-1],
-            "n_masked": self.n_masked[-1],
-        }
-
-    def as_arrays(self) -> dict:
-        return {k: torch.tensor(v) for k, v in self.__dict__.items()}
