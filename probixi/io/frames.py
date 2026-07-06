@@ -265,10 +265,7 @@ def iter_frames(
 
     A background worker reads HDF5 slices into a bounded queue (up to ``prefetch``
     batches ahead) so disk I/O overlaps compute. Bitshuffle-LZ4 chunked datasets
-    are read raw and decoded across a ``decode_workers`` thread pool (the codec
-    releases the GIL), and each batch is transferred to ``device`` in its native
-    integer dtype and cast to ``dtype`` there, keeping the conversion off the CPU
-    main thread.
+    are read raw and decoded across a ``decode_workers`` thread pool. 
 
     Parameters
     ----------

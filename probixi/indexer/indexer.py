@@ -13,7 +13,7 @@ from .forward import detector_to_q
 from .integrate import (
     A_INV_TO_NM_INV,
     integrate_predicted,
-    resolution_limit,
+    peak_resolution_limit,
     spot_enrichment,
 )
 from .lattice import cell_to_B, decompose_A
@@ -271,14 +271,14 @@ class IntegrateConfig:
     snap_radius : float
         A predicted spot within this many px of an observed peak is recentred on
         that peak's centroid before integration.
-    resolution_snr : float
-        Mean-I/sigma a resolution shell must clear to set the per-crystal
+    resolution_percentile : float
+        Quantile of the indexed peaks' resolution used as the per-crystal
         diffraction limit written to the stream. ``<= 0`` disables the estimate.
         The limit is only *reported*: all reflections are integrated to the
         detector edge and the merge decides resolution (Monte-Carlo style;
-        avoids per-crystal positivity bias).
-    resolution_bin : float
-        Shell width (nm^-1) for the per-crystal diffraction-limit scan.
+        avoids per-crystal positivity bias). Estimated from the observed peaks
+        (real signal), not the integrate-to-edge reflection set whose weak
+        partials would truncate a mean-I/sigma scan far short of the data.
     adu_per_photon : float, optional
         Detector gain used for the signal shot-noise term in sigma(I). ``None``
         auto-detects it from the measured photon-transfer gain, else the
@@ -291,8 +291,7 @@ class IntegrateConfig:
     partiality_max: float = 0.01
     box_radius: int = 3
     snap_radius: float = 5.0
-    resolution_snr: float = 1.0
-    resolution_bin: float = 0.5
+    resolution_percentile: float = 0.90
     adu_per_photon: Optional[float] = None
 
 
@@ -815,15 +814,14 @@ class Indexer:
             pixel_valid=valid_mask,
             adu_per_photon=self._adu_per_photon(),
         )
-        resolution_nm = pred.resolution * A_INV_TO_NM_INV
-        limit = resolution_limit(
-            resolution_nm,
-            intensity,
-            sigma,
-            self.integrate.resolution_snr,
-            self.integrate.resolution_bin,
-        )
-        result.diffraction_limit = limit
+        if result.positions.numel() > 0:
+            peak_q = detector_to_q(result.positions.to(excess.dtype), self.geometry)
+            peak_res_nm = peak_q.norm(dim=-1) * A_INV_TO_NM_INV
+            result.diffraction_limit = peak_resolution_limit(
+                peak_res_nm, self.integrate.resolution_percentile
+            )
+        else:
+            result.diffraction_limit = float("inf")
         keep = torch.isfinite(sigma) & (sigma > 0)
         result.predicted_hkl = pred.hkl[keep]
         result.predicted_positions = positions[keep]

@@ -101,65 +101,15 @@ def integrate_predicted(
 
 
 @torch.no_grad()
-def resolution_limit(
-    resolution: Tensor,
-    intensity: Tensor,
-    sigma: Tensor,
-    snr: float,
-    bin_width: float,
-) -> float:
-    """Per-crystal diffraction limit from integrated I/sigma vs resolution.
-
-    Bins reflections by resolution and, scanning outward from low resolution,
-    returns the outer edge of the last shell whose mean I/sigma stays at or
-    above ``snr``. Empty shells are skipped; the scan stops at the first
-    populated shell that falls below ``snr``.
-
-    Parameters
-    ----------
-    resolution : Tensor
-        (M,) reflection resolution ``|q| = 1/d`` in the same unit as ``bin_width``.
-    intensity, sigma : Tensor
-        (M,) integrated intensity and its 1-sigma uncertainty.
-    snr : float
-        Mean-I/sigma threshold a shell must clear. ``<= 0`` disables the limit.
-    bin_width : float
-        Shell width in the unit of ``resolution``.
-
-    Returns
-    -------
-    float
-        Resolution limit in the unit of ``resolution``; ``inf`` when disabled or
-        no reflection carries a usable sigma.
+def peak_resolution_limit(peak_resolution: Tensor, percentile: float) -> float:
+    """Per-crystal diffraction limit from the indexed peaks' resolution.
     """
-    if snr <= 0.0 or bin_width <= 0.0 or resolution.numel() == 0:
+    if percentile <= 0.0 or peak_resolution.numel() == 0:
         return float("inf")
-    valid = torch.isfinite(sigma) & (sigma > 0)
-    if not bool(valid.any()):
-        return float("inf")
-    res = resolution[valid]
-    ratio = intensity[valid] / sigma[valid]
-    b = torch.floor(res / bin_width).to(torch.long).clamp_min(0)
-    nbins = int(b.max().item()) + 1
-    sums = torch.zeros(nbins, dtype=ratio.dtype, device=ratio.device)
-    counts = torch.zeros(nbins, dtype=ratio.dtype, device=ratio.device)
-    sums.scatter_add_(0, b, ratio)
-    counts.scatter_add_(0, b, torch.ones_like(ratio))
-    # largest populated bin with mean I/sigma >= snr before the first bin that
-    # drops below it; empty bins are skipped
-    idx = torch.arange(nbins, device=counts.device)
-    mean_ratio = sums / counts.clamp_min(1.0)
-    populated = counts > 0
-    first_fail = torch.where(
-        populated & (mean_ratio < snr), idx, torch.full_like(idx, nbins)
-    ).min()
-    elig = populated & (mean_ratio >= snr) & (idx < first_fail)
-    if bool(elig.any()):
-        last = int(torch.where(elig, idx, torch.full_like(idx, -1)).max())
-        limit = (last + 1) * bin_width
-    else:
-        limit = 0.0
-    return limit if limit > 0.0 else bin_width
+    q = min(percentile, 1.0)
+    vals = torch.sort(peak_resolution).values
+    idx = min(int(vals.numel()) - 1, int(q * int(vals.numel())))
+    return float(vals[idx])
 
 
 @torch.no_grad()
