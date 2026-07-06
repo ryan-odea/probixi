@@ -2,10 +2,16 @@ from __future__ import annotations
 
 import math
 
+import pytest
 import sim
 import torch
 
-from probixi.indexer.indexer import Indexer, RefineConfig, SeedConfig
+from probixi.indexer.indexer import (
+    Indexer,
+    RefineConfig,
+    SeedConfig,
+    _resolve_lattice_dtype,
+)
 
 # seeding/refinement that sim.py verified as fast and reliable on CPU
 SEED = SeedConfig(n_directions=1500, n_spin=60, top_directions=12, max_candidates=32)
@@ -16,6 +22,37 @@ MAX_ANGLE_DEG = 8.0
 
 def _make_indexer(geometry_dict, cell):
     return Indexer(geometry_dict, cell, seed=SEED, refine=REFINE)
+
+
+def test_lattice_dtype_policy_is_device_aware():
+    # float64 on cpu/cuda, float32 on mps (no float64), explicit dtype always wins
+    assert _resolve_lattice_dtype(None, None) is torch.float64
+    assert _resolve_lattice_dtype(torch.device("cpu"), None) is torch.float64
+    assert _resolve_lattice_dtype(torch.device("cuda"), None) is torch.float64
+    assert _resolve_lattice_dtype(torch.device("mps"), None) is torch.float32
+    assert _resolve_lattice_dtype(torch.device("mps"), torch.float64) is torch.float64
+    assert _resolve_lattice_dtype(None, torch.float32) is torch.float32
+
+
+def test_indexer_uses_float32_on_mps(geometry_dict, cell):
+    idxr = Indexer(geometry_dict, cell, device=torch.device("mps"))
+    assert idxr.dtype is torch.float32
+    assert idxr.B_target.dtype is torch.float32
+
+
+@pytest.mark.mps
+def test_indexer_runs_on_mps_end_to_end(geometry_dict, cell):
+    if not torch.backends.mps.is_available():
+        pytest.skip("MPS device not available")
+    dev = torch.device("mps")
+    U = sim.proper_rotation(ROT_SEED, max_angle_deg=MAX_ANGLE_DEG)
+    positions, _ = sim.lattice_peaks(geometry_dict, cell, U)
+    idxr = Indexer(geometry_dict, cell, seed=SEED, refine=REFINE, device=dev)
+    # positions come from disk as CPU tensors; the indexer lifts them to its own
+    # (float32-on-MPS) device/dtype internally.
+    results = idxr.index_frames({0: positions.to(torch.float32)})
+    assert results  # solved without any float64-on-MPS crash
+    assert results[0].A.device.type == "mps"
 
 
 def test_index_frames_recovers_known_cell_and_orientation(geometry_dict, cell):

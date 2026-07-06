@@ -236,6 +236,101 @@ def test_gaussian_kernel_2d_rejects_even_size():
         gaussian_kernel_2d(4, 1.0)
 
 
+def test_gaussian_kernel_1d_is_outer_product_factor():
+    from probixi.peakfinding.peaks.neighborhood import gaussian_kernel_1d
+
+    for size, sigma in [(5, 1.0), (7, 1.4), (15, 2.4)]:
+        a = gaussian_kernel_1d(size, sigma, dtype=torch.float64)
+        k2 = gaussian_kernel_2d(size, sigma, dtype=torch.float64)
+        assert torch.allclose(torch.outer(a, a), k2, atol=1e-12)
+        assert float(a.sum()) == pytest.approx(1.0, abs=1e-12)
+
+
+def test_separable_convs_match_dense_conv2d():
+    # The separable (2x 1D) matched filter / smoothing must reproduce the dense
+    # 2D convolution they replaced, including reflect-padded corners.
+    import torch.nn.functional as F
+
+    from probixi.peakfinding.peaks.neighborhood import (
+        mask_denominator,
+        matched_filter_z,
+        smooth_logits,
+        smooth_logits_batch,
+    )
+
+    torch.manual_seed(0)
+    H, W = 137, 151
+    z = torch.randn(H, W, dtype=torch.float64)
+    mask = torch.rand(H, W) > 0.1
+    m = mask.to(torch.float64)
+
+    for size, sigma in [(7, 1.0), (11, 1.6), (15, 2.4)]:
+        k2 = gaussian_kernel_2d(size, sigma, dtype=torch.float64)
+        u = k2 / k2.norm()
+        pad = (size // 2,) * 4
+        num = F.conv2d(
+            F.pad((z * m).view(1, 1, H, W), pad), u.view(1, 1, size, size)
+        ).reshape(H, W)
+        den = F.conv2d(
+            F.pad(m.view(1, 1, H, W), pad), (u * u).view(1, 1, size, size)
+        ).reshape(H, W)
+        ref = num / den.clamp_min(1e-12).sqrt()
+        assert torch.allclose(ref, matched_filter_z(z, k2, mask, den=den), atol=1e-12)
+
+    k2 = gaussian_kernel_2d(5, 1.0, dtype=torch.float64)
+    den = mask_denominator(m, k2)
+    ref = (
+        F.conv2d(
+            F.pad((z * m).view(1, 1, H, W), (2, 2, 2, 2), mode="reflect"),
+            k2.view(1, 1, 5, 5),
+        ).reshape(H, W)
+        / den
+    )
+    assert torch.allclose(ref, smooth_logits(z, k2, mask=mask, den=den), atol=1e-12)
+    zb = torch.randn(3, H, W, dtype=torch.float64)
+    refb = torch.stack(
+        [
+            F.conv2d(
+                F.pad((zb[i] * m).view(1, 1, H, W), (2, 2, 2, 2), mode="reflect"),
+                k2.view(1, 1, 5, 5),
+            ).reshape(H, W)
+            / den
+            for i in range(3)
+        ]
+    )
+    assert torch.allclose(
+        refb, smooth_logits_batch(zb, k2, mask=mask, den=den), atol=1e-12
+    )
+
+
+def test_integral_box_sum_matches_conv_reference():
+    # The summed-area-table box sum must reproduce the zero-padded sliding-window
+    # sum it replaced, including clamped edge boxes, for both single and batched
+    # inputs and across a DC offset (which stresses float32 cumsum precision).
+    import torch.nn.functional as F
+
+    from probixi.peakfinding.peaks.neighborhood import _box_sum
+
+    def conv_box(x, radius):
+        if radius < 1:
+            return x.clone()
+        xb = x.view(1, 1, *x.shape)
+        k = 2 * radius + 1
+        xb = F.conv2d(F.pad(xb, (0, 0, radius, radius)), x.new_ones(1, 1, k, 1))
+        xb = F.conv2d(F.pad(xb, (radius, radius, 0, 0)), x.new_ones(1, 1, 1, k))
+        return xb.reshape(x.shape)
+
+    torch.manual_seed(1)
+    for offset in (0.0, 25.0):
+        x = torch.randn(97, 103) * 10.0 + offset
+        for radius in (1, 4, 9):
+            assert torch.allclose(_box_sum(x, radius), conv_box(x, radius), atol=5e-2)
+    xb = torch.randn(4, 60, 55) * 10.0 + 8.0
+    for radius in (2, 5):
+        ref = torch.stack([conv_box(xb[i], radius) for i in range(xb.shape[0])])
+        assert torch.allclose(_box_sum(xb, radius), ref, atol=5e-2)
+
+
 def test_blob_stats_centroid_recovers_isolated_spot_position():
     # a single connected blob: centroid lands on the injected sub-pixel position
     _, finder = _calibrated(size_max=80)
