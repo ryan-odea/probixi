@@ -1,6 +1,7 @@
 from .indexer import (
     CellMatchConfig,
     Indexer,
+    IndexResult,
     IndexStats,
     IndexStream,
     IntegrateConfig,
@@ -12,6 +13,7 @@ __all__ = [
     "Indexer",
     "IndexStream",
     "IndexStats",
+    "IndexResult",
     "CellMatchConfig",
     "IntegrateConfig",
     "RefineConfig",

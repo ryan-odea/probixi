@@ -24,6 +24,17 @@ from .seed import sphere_seed_candidates
 MIN_PEAKS_TO_INDEX = 3
 
 
+def _resolve_lattice_dtype(
+    device: Optional[torch.device], dtype: Optional[torch.dtype]
+) -> torch.dtype:
+    # float64 on cpu/cuda, float32 on mps (no float64); explicit dtype wins
+    if dtype is not None:
+        return dtype
+    if device is not None and torch.device(device).type == "mps":
+        return torch.float32
+    return torch.float64
+
+
 @dataclass
 class IndexStats:
     """Running funnel tallies over an index stream.
@@ -391,7 +402,8 @@ class Indexer:
     integrate : IntegrateConfig, optional
         Reflection prediction/integration settings (streaming path).
     dtype : torch.dtype, optional
-        Lattice-math dtype (default ``torch.float64``).
+        Lattice-math dtype. Default is device-aware: ``torch.float64`` on
+        CPU/CUDA, ``torch.float32`` on MPS (which has no float64 support).
     device : torch.device, optional
         Device for all tensors.
     """
@@ -404,7 +416,7 @@ class Indexer:
         refine: Optional[RefineConfig] = None,
         cell_match: Optional[CellMatchConfig] = None,
         integrate: Optional[IntegrateConfig] = None,
-        dtype: torch.dtype = torch.float64,
+        dtype: Optional[torch.dtype] = None,
         device: Optional[torch.device] = None,
     ):
         required = {"beam_center", "clen", "pixel_size", "wavelength"}
@@ -418,7 +430,7 @@ class Indexer:
         self.refine = refine or RefineConfig()
         self.cell_match = cell_match or CellMatchConfig()
         self.integrate = integrate or IntegrateConfig()
-        self.dtype = dtype
+        self.dtype = _resolve_lattice_dtype(device, dtype)
         self.device = device
         self._geometry_gain = geometry.get("adu_per_photon")
         self._measured_gain: Optional[float] = None

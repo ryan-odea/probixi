@@ -34,34 +34,32 @@ def integrate_boxes(
 
     centre = torch.round(positions).to(torch.long)
     r0, c0 = centre[:, 0], centre[:, 1]
-    I = torch.zeros(M, dtype=excess.dtype, device=device)  # noqa: E741
-    var_sum = torch.zeros(M, dtype=excess.dtype, device=device)
-    peak = torch.full((M,), float("-inf"), dtype=excess.dtype, device=device)
-    bg_sum = torch.zeros(M, dtype=excess.dtype, device=device)
-    bg_count = torch.zeros(M, dtype=excess.dtype, device=device)
-    for dr in range(-radius, radius + 1):
-        rr = r0 + dr
-        in_r = (rr >= 0) & (rr < H)
-        rr_c = rr.clamp(0, H - 1)
-        for dc in range(-radius, radius + 1):
-            cc = c0 + dc
-            valid = in_r & (cc >= 0) & (cc < W)
-            cc_c = cc.clamp(0, W - 1)
-            if pixel_valid is not None:
-                valid = valid & pixel_valid[rr_c, cc_c]
-            e = excess[rr_c, cc_c]
-            v = var[rr_c, cc_c]
-            zero = torch.zeros_like(e)
-            I = I + torch.where(valid, e, zero)  # noqa: E741
-            var_sum = var_sum + torch.where(valid, v, zero)
-            peak = torch.where(valid, torch.maximum(peak, e), peak)
-            if mean is not None:
-                m = mean[rr_c, cc_c]
-                bg_sum = bg_sum + torch.where(valid, m, zero)
-                bg_count = bg_count + valid.to(excess.dtype)
+    # gather the whole (2r+1)^2 box for every centre at once (M, K), vectorised
+    off = torch.arange(-radius, radius + 1, device=device)
+    off_r, off_c = torch.meshgrid(off, off, indexing="ij")
+    off_r = off_r.reshape(-1)
+    off_c = off_c.reshape(-1)
+    rr = r0[:, None] + off_r[None, :]
+    cc = c0[:, None] + off_c[None, :]
+    valid = (rr >= 0) & (rr < H) & (cc >= 0) & (cc < W)
+    flat = rr.clamp(0, H - 1) * W + cc.clamp(0, W - 1)
+    if pixel_valid is not None:
+        valid = valid & pixel_valid.reshape(-1)[flat]
+    e = excess.reshape(-1)[flat]
+    v = var.reshape(-1)[flat]
+    zero = torch.zeros_like(e)
+    I = torch.where(valid, e, zero).sum(dim=1)  # noqa: E741
+    var_sum = torch.where(valid, v, zero).sum(dim=1)
+    peak = torch.where(valid, e, torch.full_like(e, float("-inf"))).amax(dim=1)
     # boxes with no valid pixel
     peak = torch.where(torch.isfinite(peak), peak, torch.zeros_like(peak))
-    background = bg_sum / bg_count.clamp_min(1.0)
+    if mean is not None:
+        m = mean.reshape(-1)[flat]
+        bg_sum = torch.where(valid, m, zero).sum(dim=1)
+        bg_count = valid.to(excess.dtype).sum(dim=1)
+        background = bg_sum / bg_count.clamp_min(1.0)
+    else:
+        background = torch.zeros(M, dtype=excess.dtype, device=device)
     total_var = var_sum.clamp_min(0.0) + I.clamp_min(0.0) * adu_per_photon
     return I, total_var.sqrt(), peak, background
 
@@ -216,18 +214,15 @@ def spot_enrichment(
     r = centre[:, 0].clamp(0, z.shape[0] - 1)
     c = centre[:, 1].clamp(0, z.shape[1] - 1)
     keep = valid[r, c]
-    bright_valid, valid_total, keep_total, bright_keep = (
-        torch.stack(
-            [
-                (bright & valid).sum(),
-                valid.sum(),
-                keep.sum(),
-                (bright[r, c] & keep).sum(),
-            ]
-        )
-        .to(torch.float64)
-        .tolist()
-    )
+    # int64 counts -> Python ints
+    bright_valid, valid_total, keep_total, bright_keep = torch.stack(
+        [
+            (bright & valid).sum(),
+            valid.sum(),
+            keep.sum(),
+            (bright[r, c] & keep).sum(),
+        ]
+    ).tolist()
     p = bright_valid / max(valid_total, 1.0)  # background bright-rate
     n_keep = max(keep_total, 1.0)
     n_bright = int(bright_keep)

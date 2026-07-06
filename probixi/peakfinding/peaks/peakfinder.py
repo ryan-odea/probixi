@@ -441,9 +441,9 @@ class PeakFinder:
         Returns
         -------
         dict of str to Tensor
-            Score maps: ``excess``, ``z``, ``log_bf``, ``logits``,
-            ``logits_smoothed``, ``posterior``, ``mean_eff``, ``var_eff``, and
-            ``mf_max`` when the matched filter is enabled. Each is (H,W).
+            Score maps: ``excess``, ``z``, ``log_bf``, ``posterior``,
+            ``mean_eff``, ``var_eff``, and ``mf_max`` when the matched filter is
+            enabled. Each is (H,W).
         """
         pred = self._pred()
         frame = frame.to(pred["mean"])
@@ -463,8 +463,6 @@ class PeakFinder:
             "excess": excess,
             "z": z,
             "log_bf": log_bf,
-            "logits": logits,
-            "logits_smoothed": logits_smoothed,
             "posterior": posterior,
             "mean_eff": mean,
             "var_eff": var,
@@ -496,8 +494,6 @@ class PeakFinder:
             "excess": excess,
             "z": z,
             "log_bf": log_bf,
-            "logits": logits,
-            "logits_smoothed": logits_smoothed,
             "posterior": posterior,
             "mean_eff": mean,
             "var_eff": var,

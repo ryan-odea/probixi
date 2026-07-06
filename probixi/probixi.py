@@ -540,6 +540,7 @@ class Probixi:
             offset = 0
             for item in frames:
                 self._ensure_built(item)
+                self.noise.record_drift = False
                 if update_noise:
                     self._update_noise(item)
                 if estimate_scale and self._scale_ref is not None:

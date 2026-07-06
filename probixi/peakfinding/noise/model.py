@@ -232,6 +232,7 @@ class NoiseModel(nn.Module):
         self.register_buffer("valid_mask", static.clone())
 
         self.drift = DriftDiagnostics()
+        self.record_drift = True
         self._prev_mean: Optional[Tensor] = None
         self._prev_var: Optional[Tensor] = None
         self._mask_committed = False
@@ -276,7 +277,11 @@ class NoiseModel(nn.Module):
             and n >= self.warmup_frames
         ):
             self._commit_mask()
-        if self.mode == "online" and n % self.drift_log_every == 0:
+        if (
+            self.record_drift
+            and self.mode == "online"
+            and n % self.drift_log_every == 0
+        ):
             self._record_drift(n)
 
     def fit(self, frames: Iterable[Tensor]) -> "NoiseModel":
@@ -452,9 +457,12 @@ class NoiseModel(nn.Module):
             )
             kl = (kl_map * valid).sum() / denom
 
-        ms, vr, klv, nm = torch.stack(
-            [mean_shift.double(), var_ratio.double(), kl.double(), n_masked_t.double()]
-        ).tolist()
+        ms, vr, klv, nm = (
+            torch.stack([mean_shift, var_ratio, kl, n_masked_t.to(mean_shift.dtype)])
+            .cpu()
+            .to(torch.float64)
+            .tolist()
+        )
         self.drift.step.append(step)
         self.drift.mean_shift.append(ms)
         self.drift.var_ratio_log.append(vr)
