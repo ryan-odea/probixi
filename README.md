@@ -48,8 +48,7 @@ Or with python:
 ```python
 import torch
 
-from probixi import Probixi
-from probixi.io import DataOffloader
+from probixi import Probixi, DataOffloader
 
 pipeline = Probixi(
     list_file="files.lst",
@@ -141,8 +140,7 @@ Or with python:
 ```python
 import torch
 
-from probixi import Probixi
-from probixi.io import PeakOffloader
+from probixi import Probixi, PeakOffloader
 
 pipeline = Probixi(
     list_file="files.lst",
