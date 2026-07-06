@@ -18,6 +18,58 @@ def _pct(num: int, denom: int) -> str:
     return f"{(100.0 * num / denom) if denom else 0.0:.1f}%"
 
 
+def _resolve_cli_devices(
+    device: Optional[str], devices: Optional[str], gpus: Optional[int]
+) -> Optional[list]:
+    # Translate the --device / --devices / --gpus flags into a device list, or
+    # None to keep the single-device path. --devices/--gpus imply multi-GPU.
+    picked = [f for f in (bool(device), bool(devices), gpus) if f]
+    if len(picked) > 1:
+        raise click.UsageError("pass only one of --device / --devices / --gpus")
+    if devices:
+        return [torch.device(d.strip()) for d in devices.split(",") if d.strip()]
+    if gpus is not None:
+        if gpus < 1:
+            raise click.UsageError("--gpus must be >= 1")
+        return [torch.device(f"cuda:{i}") for i in range(gpus)]
+    if device:
+        return [torch.device(device)]
+    return None
+
+
+def _run_multi_gpu(device_list: list, **kw) -> None:
+    from probixi.multigpu import run_data_parallel
+
+    if kw["peaks_only"] or kw["render"] or kw["gif"]:
+        raise click.UsageError(
+            "--devices/--gpus supports the indexing path only "
+            "(not --peaks-only, --render, or --gif)"
+        )
+    if kw["cell_file"] is None:
+        raise click.UsageError("a unit cell (-p/--cell) is required for multi-GPU")
+    if kw["output"] is None:
+        raise click.UsageError("-o/--output is required for multi-GPU indexing")
+    run_data_parallel(
+        kw["list_file"],
+        kw["geometry_file"],
+        kw["cell_file"],
+        kw["output"],
+        devices=device_list,
+        start=kw["start"],
+        stop=kw["stop"],
+        batch_size=kw["batch_size"],
+        seed_frames=kw["seed_frames"],
+        target_noise_peaks=kw["target_noise_peaks"],
+        noise_mode=kw["noise_mode"],
+        warmup_frames=kw["warmup_frames"],
+        panel=kw["panel"],
+        enrich_gate=kw["enrich_gate"],
+        enrich_alpha=kw["enrich_alpha"],
+        threads_per_worker=kw["threads_per_worker"],
+        quiet=kw["quiet"],
+    )
+
+
 @click.command()
 @click.option(
     "-i",
@@ -77,6 +129,27 @@ def _pct(num: int, denom: int) -> str:
     help="Frames per batched refinement pass.",
 )
 @click.option("--device", default=None, help="Torch device (default: auto).")
+@click.option(
+    "--devices",
+    default=None,
+    help="Comma-separated device list for multi-GPU data-parallel indexing "
+    "(e.g. 'cuda:0,cuda:1'). Splits frames into blocks across devices and merges "
+    "the per-device streams. Indexing path only.",
+)
+@click.option(
+    "--gpus",
+    type=int,
+    default=None,
+    help="Multi-GPU data-parallel indexing across the first N CUDA devices "
+    "(shorthand for --devices cuda:0,...,cuda:N-1).",
+)
+@click.option(
+    "--threads-per-worker",
+    type=int,
+    default=None,
+    help="Torch CPU intra-op threads per multi-GPU worker (default: "
+    "cpu_count // n_workers, to avoid oversubscribing cores).",
+)
 @click.option(
     "--noise-mode",
     type=click.Choice(["online", "per_frame"]),
@@ -156,6 +229,9 @@ def main(
     stop: Optional[int],
     batch_size: int,
     device: Optional[str],
+    devices: Optional[str],
+    gpus: Optional[int],
+    threads_per_worker: Optional[int],
     noise_mode: str,
     warmup_frames: int,
     seed_frames: int,
@@ -179,7 +255,34 @@ def main(
         )
     if output is None and not render:
         raise click.UsageError("-o/--output is required unless only --render is used")
-    dev = torch.device(device) if device else None
+
+    device_list = _resolve_cli_devices(device, devices, gpus)
+    if device_list is not None and len(device_list) > 1:
+        _run_multi_gpu(
+            device_list,
+            list_file=list_file,
+            geometry_file=geometry_file,
+            cell_file=cell_file,
+            output=output,
+            peaks_only=peaks_only,
+            gif=gif,
+            render=render,
+            start=start,
+            stop=stop,
+            batch_size=batch_size,
+            seed_frames=seed_frames,
+            target_noise_peaks=target_noise_peaks,
+            noise_mode=noise_mode,
+            warmup_frames=warmup_frames,
+            panel=panel,
+            enrich_gate=enrich_gate,
+            enrich_alpha=enrich_alpha,
+            threads_per_worker=threads_per_worker,
+            quiet=quiet,
+        )
+        return
+
+    dev = device_list[0] if device_list else (torch.device(device) if device else None)
     probixi = Probixi(
         list_file=list_file,
         geometry_file=geometry_file,
