@@ -23,20 +23,97 @@ def gaussian_kernel_2d(
     return k / k.sum()
 
 
+def gaussian_kernel_1d(
+    size: int,
+    sigma: float,
+    device: Optional[torch.device] = None,
+    dtype: torch.dtype = torch.float32,
+) -> Tensor:
+    # 1D factor of the separable Gaussian; outer(a, a) == gaussian_kernel_2d
+    if size < 1 or size % 2 != 1:
+        raise ValueError("size must be a positive odd integer")
+    if sigma <= 0:
+        raise ValueError("sigma must be > 0")
+    ax = torch.arange(size, dtype=dtype, device=device) - (size - 1) / 2.0
+    g1 = torch.exp(-0.5 * (ax / sigma) ** 2)
+    return g1 / g1.sum()
+
+
+def _separable_1d(kernel: Tensor) -> Tensor:
+    # 1D factor of a separable kernel K = outer(a, a): a = K[:, c] / sqrt(K[c, c])
+    c = kernel.shape[0] // 2
+    center = kernel[c, c].clamp_min(1e-30)
+    return kernel[:, c] / center.sqrt()
+
+
+def _sep_correlate(x4d: Tensor, a: Tensor, pad_mode: str = "constant") -> Tensor:
+    # correlate (N,1,H,W) with outer(a, a) as two 1D convs (rows then cols)
+    k = int(a.numel())
+    p = k // 2
+    kr = a.view(1, 1, k, 1)
+    kc = a.view(1, 1, 1, k)
+    if pad_mode == "constant":
+        xr = F.pad(x4d, (0, 0, p, p))
+        t = F.conv2d(xr, kr)
+        tc = F.pad(t, (p, p, 0, 0))
+    else:
+        xr = F.pad(x4d, (0, 0, p, p), mode=pad_mode)
+        t = F.conv2d(xr, kr)
+        tc = F.pad(t, (p, p, 0, 0), mode=pad_mode)
+    return F.conv2d(tc, kc)
+
+
+# cached box-window corner indices + per-pixel box size, keyed (H, W, radius, device, dtype)
+_BOX_IDX_CACHE: dict = {}
+
+
+def _box_window_idx(H: int, W: int, radius: int, device: torch.device, dtype):
+    key = (H, W, radius, device, dtype)
+    got = _BOX_IDX_CACHE.get(key)
+    if got is None:
+        r = torch.arange(H, device=device)
+        c = torch.arange(W, device=device)
+        r_lo = (r - radius).clamp_min(0)
+        r_hi = (r + radius + 1).clamp_max(H)
+        c_lo = (c - radius).clamp_min(0)
+        c_hi = (c + radius + 1).clamp_max(W)
+        # per-pixel in-bounds box size (edge boxes clamped), (H, W)
+        count = (r_hi - r_lo).to(dtype).view(-1, 1) * (c_hi - c_lo).to(dtype).view(
+            1, -1
+        )
+        got = (r_lo, r_hi, c_lo, c_hi, count)
+        _BOX_IDX_CACHE[key] = got
+    return got
+
+
 @torch.no_grad()
 def _box_sum(x: Tensor, radius: int) -> Tensor:
-    # Sliding-window sum over a (2r+1)^2 box, (H,W) or (B,H,W)
-    # Zero-padded so an edge box sums only in-bounds pixels
+    # (2r+1)^2 box sum via summed-area table: O(H*W) regardless of radius.
+    # edge boxes sum only in-bounds pixels (zero-pad semantics). (H,W) or (B,H,W)
     if radius < 1:
         return x.clone()
-    squeeze = x.ndim == 2
-    xb = x.view(1, 1, *x.shape) if squeeze else x.unsqueeze(1)
-    k = 2 * radius + 1
-    kr = x.new_ones(1, 1, k, 1)
-    kc = x.new_ones(1, 1, 1, k)
-    xb = F.conv2d(F.pad(xb, (0, 0, radius, radius)), kr)
-    xb = F.conv2d(F.pad(xb, (radius, radius, 0, 0)), kc)
-    return xb.reshape(x.shape)
+    H, W = x.shape[-2], x.shape[-1]
+    r_lo, r_hi, c_lo, c_hi, count = _box_window_idx(H, W, radius, x.device, x.dtype)
+    # mean-centre before cumsum, add mean*count back (float32-stable summed area)
+    mean = x.mean(dim=(-2, -1), keepdim=True)
+    xc = x - mean
+    # integral image (zeroed top/left); box = I[hi,hi]-I[lo,hi]-I[hi,lo]+I[lo,lo]
+    integral = F.pad(xc.cumsum(-2).cumsum(-1), (1, 0, 1, 0))
+    top = integral[..., r_lo, :]
+    bot = integral[..., r_hi, :]
+    box = bot[..., c_hi] - bot[..., c_lo] - top[..., c_hi] + top[..., c_lo]
+    return box + mean * count
+
+
+@torch.no_grad()
+def annulus_count(
+    mask: Tensor, inner_radius: int, outer_radius: int, dtype: torch.dtype
+) -> Tensor:
+    # per-pixel valid-pixel count over the (outer minus inner) box annulus
+    m = mask.to(dtype)
+    co = _box_sum(m, outer_radius)
+    ci = _box_sum(m, inner_radius) if inner_radius >= 1 else torch.zeros_like(co)
+    return (co - ci).clamp_min(1.0)
 
 
 @torch.no_grad()
@@ -45,39 +122,31 @@ def local_mean_var(
     mask: Tensor,
     inner_radius: int,
     outer_radius: int,
+    count: Optional[Tensor] = None,
 ) -> tuple[Tensor, Tensor]:
     # Per-pixel mean and variance of residual over the masked annulus
     # inner_radius < |offset|_inf <= outer_radius (outer box minus inner box)
-    # Excluding the inner box keeps a peak from biasing its own background
+    # Excluding the inner box keeps a peak from biasing its own background.
+    # ``count`` (annulus valid-pixel count) may be supplied precomputed, else None.
     m = mask.to(residual.dtype)
     rm = residual * m
     rm2 = residual * rm
     so = _box_sum(rm, outer_radius)
     s2o = _box_sum(rm2, outer_radius)
-    co = _box_sum(m, outer_radius)
     if inner_radius >= 1:
         si = _box_sum(rm, inner_radius)
         s2i = _box_sum(rm2, inner_radius)
-        ci = _box_sum(m, inner_radius)
     else:
         si = torch.zeros_like(so)
         s2i = torch.zeros_like(s2o)
-        ci = torch.zeros_like(co)
-    cnt = (co - ci).clamp_min(1.0)
-    mean = (so - si) / cnt
-    ex2 = (s2o - s2i) / cnt
+    if count is None:
+        co = _box_sum(m, outer_radius)
+        ci = _box_sum(m, inner_radius) if inner_radius >= 1 else torch.zeros_like(co)
+        count = (co - ci).clamp_min(1.0)
+    mean = (so - si) / count
+    ex2 = (s2o - s2i) / count
     var = (ex2 - mean * mean).clamp_min(0.0)
     return mean, var
-
-
-@torch.no_grad()
-def local_background(
-    residual: Tensor,
-    mask: Tensor,
-    inner_radius: int,
-    outer_radius: int,
-) -> Tensor:
-    return local_mean_var(residual, mask, inner_radius, outer_radius)[0]
 
 
 @torch.no_grad()
@@ -87,16 +156,16 @@ def matched_filter_z(
     mask: Tensor,
     den: Optional[Tensor] = None,
 ) -> Tensor:
-    # Correlate z with the L2-norm
+    # u = K/||K|| = outer(uhat, uhat); numerator is two 1D convs
     u = (kernel / kernel.norm().clamp_min(1e-12)).to(z)
     kH, kW = u.shape
-    pad = (kW // 2, kW // 2, kH // 2, kH // 2)
-    uk = u.view(1, 1, kH, kW)
+    uhat = _separable_1d(u)
     squeeze = z.ndim == 2
     zb = z.view(1, 1, *z.shape) if squeeze else z.unsqueeze(1)
     m = mask.to(z)
-    num = F.conv2d(F.pad((zb * m.view(1, 1, *mask.shape)), pad), uk)
+    num = _sep_correlate(zb * m.view(1, 1, *mask.shape), uhat, "constant")
     if den is None:
+        pad = (kW // 2, kW // 2, kH // 2, kH // 2)
         den = F.conv2d(
             F.pad(m.view(1, 1, *mask.shape), pad), (u * u).view(1, 1, kH, kW)
         ).reshape(mask.shape)
@@ -134,21 +203,19 @@ def smooth_logits(
     mask: Optional[Tensor] = None,
     den: Optional[Tensor] = None,
 ) -> Tensor:
-    # Mask-weighted local average K*(x.mask)/(K*mask)
+    # mask-weighted local average, K separable (2x 1D conv)
     if logits.ndim != 2 or kernel.ndim != 2:
         raise ValueError("logits and kernel must be 2D")
-    kH, kW = kernel.shape
-    pad = (kW // 2, kW // 2, kH // 2, kH // 2)
-    k = kernel.to(logits).view(1, 1, kH, kW)
+    a = _separable_1d(kernel).to(logits)
     if mask is None:
-        return F.conv2d(
-            F.pad(logits.view(1, 1, *logits.shape), pad, mode="reflect"), k
-        ).reshape(logits.shape)
+        return _sep_correlate(logits.view(1, 1, *logits.shape), a, "reflect").reshape(
+            logits.shape
+        )
     m = mask.to(logits)
-    num = F.conv2d(
-        F.pad((logits * m).view(1, 1, *logits.shape), pad, mode="reflect"), k
-    ).reshape(logits.shape)
-    return num / (den if den is not None else mask_denominator(m, k.reshape(kH, kW)))
+    num = _sep_correlate((logits * m).view(1, 1, *logits.shape), a, "reflect").reshape(
+        logits.shape
+    )
+    return num / (den if den is not None else mask_denominator(m, kernel))
 
 
 @torch.no_grad()
@@ -161,11 +228,9 @@ def smooth_logits_batch(
     # Batched smooth_logits; logits (B,H,W), den (H,W) broadcasts over the batch
     if logits.ndim != 3 or kernel.ndim != 2:
         raise ValueError("logits must be 3D (B,H,W) and kernel must be 2D")
-    kH, kW = kernel.shape
-    pad = (kW // 2, kW // 2, kH // 2, kH // 2)
-    k = kernel.to(logits).view(1, 1, kH, kW)
+    a = _separable_1d(kernel).to(logits)
     if mask is None:
-        return F.conv2d(F.pad(logits.unsqueeze(1), pad, mode="reflect"), k).squeeze(1)
+        return _sep_correlate(logits.unsqueeze(1), a, "reflect").squeeze(1)
     m = mask.to(logits)
-    num = F.conv2d(F.pad((logits * m).unsqueeze(1), pad, mode="reflect"), k).squeeze(1)
-    return num / (den if den is not None else mask_denominator(mask, k.reshape(kH, kW)))
+    num = _sep_correlate((logits * m).unsqueeze(1), a, "reflect").squeeze(1)
+    return num / (den if den is not None else mask_denominator(mask, kernel))

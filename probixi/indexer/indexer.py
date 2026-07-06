@@ -10,11 +10,63 @@ from torch import Tensor
 from ..io.cell import CellParams
 from ..peakfinding.peaks import PeakResult
 from .forward import detector_to_q
-from .integrate import integrate_predicted, spot_enrichment
+from .integrate import (
+    A_INV_TO_NM_INV,
+    integrate_predicted,
+    resolution_limit,
+    spot_enrichment,
+)
 from .lattice import cell_to_B, decompose_A
 from .predict import detector_q_max, predict_reflections
 from .refine import RefineResult, refine_multiframe_known_B
 from .seed import sphere_seed_candidates
+
+MIN_PEAKS_TO_INDEX = 3
+
+
+def _resolve_lattice_dtype(
+    device: Optional[torch.device], dtype: Optional[torch.dtype]
+) -> torch.dtype:
+    # float64 on cpu/cuda, float32 on mps (no float64); explicit dtype wins
+    if dtype is not None:
+        return dtype
+    if device is not None and torch.device(device).type == "mps":
+        return torch.float32
+    return torch.float64
+
+
+@dataclass
+class IndexStats:
+    """Running funnel tallies over an index stream.
+
+    Attributes
+    ----------
+    frames : int
+        Frames (peak results) seen.
+    hits : int
+        Frames with at least ``MIN_PEAKS_TO_INDEX`` peaks (indexing attempted).
+    indexed : int
+        Frames that yielded an accepted solution.
+    """
+
+    frames: int = 0
+    hits: int = 0
+    indexed: int = 0
+
+    @property
+    def hit_rate(self) -> float:
+        """Hits per frame seen (0 when no frames)."""
+        return self.hits / self.frames if self.frames else 0.0
+
+    @property
+    def index_rate(self) -> float:
+        """Indexed solutions per frame seen (0 when no frames)."""
+        return self.indexed / self.frames if self.frames else 0.0
+
+    @property
+    def index_rate_of_hits(self) -> float:
+        """Indexed solutions per hit (0 when no hits)."""
+        return self.indexed / self.hits if self.hits else 0.0
 
 
 @dataclass
@@ -67,6 +119,10 @@ class IndexResult:
     predicted_background : Tensor, optional
         (M,) mean per-pixel noise background under each box (the CrystFEL
         stream's ``background`` column; informational only).
+    diffraction_limit : float, optional
+        Per-crystal resolution limit (nm^-1) from integrated I/sigma; reflections
+        beyond it are dropped and it is written as the stream's
+        ``diffraction_resolution_limit``.
     enrichment : float, optional
         Bright-rate of predicted spots over the background bright-rate (see
         ``spot_enrichment``); ~1 is a noise indexing, >>1 a real lattice.
@@ -104,14 +160,12 @@ class IndexResult:
     predicted_sigmas: Optional[Tensor] = None
     predicted_peak: Optional[Tensor] = None
     predicted_background: Optional[Tensor] = None
+    diffraction_limit: Optional[float] = None
     enrichment: Optional[float] = None
     n_bright: Optional[int] = None
     enrich_p: Optional[float] = None
     scale: Optional[float] = None
     scale_sigma: Optional[float] = None
-
-    def cell_dict(self) -> dict:
-        return self.cell.as_dict_degrees()
 
 
 @dataclass
@@ -200,18 +254,46 @@ class IntegrateConfig:
         only observed-and-indexed peaks. Requires the streaming path.
     partiality_threshold : float
         Max ``|S| - 1`` (Ewald excitation error) for a reflection to count as
-        diffracting. Larger -> more (more partial) reflections predicted.
+        diffracting. Larger -> more (more partial) reflections predicted. When
+        ``partiality_rmsd_factor > 0`` this acts as a *floor*; the effective
+        per-crystal tolerance is the larger of this and the auto value.
+    partiality_rmsd_factor : float
+        Self-calibrate the Ewald-shell tolerance per crystal from its own peak
+        spread: ``tolerance = factor * wavelength * rmsd`` (``rmsd`` is the RMS
+        q-residual of the indexed peaks, a mosaicity+bandwidth proxy), clamped to
+        ``[partiality_threshold, partiality_max]``. ``<= 0`` disables auto and
+        uses the fixed ``partiality_threshold``.
+    partiality_max : float
+        Upper clamp for the auto per-crystal tolerance (guards runaway prediction
+        on badly-fit crystals).
     box_radius : int
         Half-width (px) of the integration box.
     snap_radius : float
         A predicted spot within this many px of an observed peak is recentred on
         that peak's centroid before integration.
+    resolution_snr : float
+        Mean-I/sigma a resolution shell must clear to set the per-crystal
+        diffraction limit written to the stream. ``<= 0`` disables the estimate.
+        The limit is only *reported*: all reflections are integrated to the
+        detector edge and the merge decides resolution (Monte-Carlo style;
+        avoids per-crystal positivity bias).
+    resolution_bin : float
+        Shell width (nm^-1) for the per-crystal diffraction-limit scan.
+    adu_per_photon : float, optional
+        Detector gain used for the signal shot-noise term in sigma(I). ``None``
+        auto-detects it from the measured photon-transfer gain, else the
+        geometry (``adu_per_eV * photon_energy``), else 1.0.
     """
 
     enabled: bool = True
     partiality_threshold: float = 0.0005
+    partiality_rmsd_factor: float = 2.0
+    partiality_max: float = 0.01
     box_radius: int = 3
     snap_radius: float = 5.0
+    resolution_snr: float = 1.0
+    resolution_bin: float = 0.5
+    adu_per_photon: Optional[float] = None
 
 
 @dataclass
@@ -240,16 +322,22 @@ class IndexStream:
     A torch-iterable produced by :meth:`Indexer.index_stream`. Operators
     (``map``/``filter``/``tap``) compose lazily; terminals (``collect``,
     ``to_stream``, ``count``, ...) drive the underlying generator once.
+
+    The ``stats`` funnel (frames/hits/indexed) is shared across composed
+    operators, so counts stay live no matter how the stream is wrapped.
     """
 
-    def __init__(self, source: Iterable[IndexResult]):
+    def __init__(
+        self, source: Iterable[IndexResult], stats: Optional[IndexStats] = None
+    ):
         self._source: Iterator[IndexResult] = iter(source)
+        self.stats = stats if stats is not None else IndexStats()
 
     def map(self, fn: Callable[[IndexResult], IndexResult]) -> "IndexStream":
-        return IndexStream(fn(r) for r in self._source)
+        return IndexStream((fn(r) for r in self._source), stats=self.stats)
 
     def filter(self, predicate: Callable[[IndexResult], bool]) -> "IndexStream":
-        return IndexStream(r for r in self._source if predicate(r))
+        return IndexStream((r for r in self._source if predicate(r)), stats=self.stats)
 
     def tap(self, fn: Callable[[IndexResult], None]) -> "IndexStream":
         def _gen() -> Iterator[IndexResult]:
@@ -257,7 +345,7 @@ class IndexStream:
                 fn(r)
                 yield r
 
-        return IndexStream(_gen())
+        return IndexStream(_gen(), stats=self.stats)
 
     def enrich_gate(self, alpha: float = 1e-3) -> "IndexStream":
         """Drop solutions whose predicted spots are not backed by image signal.
@@ -284,9 +372,6 @@ class IndexStream:
 
     def collect(self) -> list[IndexResult]:
         return list(self._source)
-
-    def collect_dict(self) -> dict[int, IndexResult]:
-        return {r.frame_index: r for r in self._source}
 
     def count(self) -> int:
         return sum(1 for _ in self._source)
@@ -317,7 +402,8 @@ class Indexer:
     integrate : IntegrateConfig, optional
         Reflection prediction/integration settings (streaming path).
     dtype : torch.dtype, optional
-        Lattice-math dtype (default ``torch.float64``).
+        Lattice-math dtype. Default is device-aware: ``torch.float64`` on
+        CPU/CUDA, ``torch.float32`` on MPS (which has no float64 support).
     device : torch.device, optional
         Device for all tensors.
     """
@@ -330,7 +416,7 @@ class Indexer:
         refine: Optional[RefineConfig] = None,
         cell_match: Optional[CellMatchConfig] = None,
         integrate: Optional[IntegrateConfig] = None,
-        dtype: torch.dtype = torch.float64,
+        dtype: Optional[torch.dtype] = None,
         device: Optional[torch.device] = None,
     ):
         required = {"beam_center", "clen", "pixel_size", "wavelength"}
@@ -344,8 +430,10 @@ class Indexer:
         self.refine = refine or RefineConfig()
         self.cell_match = cell_match or CellMatchConfig()
         self.integrate = integrate or IntegrateConfig()
-        self.dtype = dtype
+        self.dtype = _resolve_lattice_dtype(device, dtype)
         self.device = device
+        self._geometry_gain = geometry.get("adu_per_photon")
+        self._measured_gain: Optional[float] = None
         self._q_max: Optional[float] = None
         self.B_target = cell_to_B(target_cell, device=device, dtype=dtype)
 
@@ -354,46 +442,6 @@ class Indexer:
         else:
             min_spacing = float(torch.linalg.vector_norm(self.B_target, dim=0).min())
             self.q_tolerance = self.seed.q_tolerance_fraction * min_spacing
-
-    @classmethod
-    def fast(
-        cls,
-        geometry: dict,
-        target_cell: CellParams,
-        **overrides,
-    ) -> "Indexer":
-        # Fast preset: narrower search
-        overrides.setdefault(
-            "seed",
-            SeedConfig(
-                max_candidates=16,
-                n_directions=3000,
-                n_spin=72,
-                top_directions=16,
-            ),
-        )
-        overrides.setdefault("refine", RefineConfig(max_iters=80, reassign_every=20))
-        return cls(geometry, target_cell, **overrides)
-
-    @classmethod
-    def thorough(
-        cls,
-        geometry: dict,
-        target_cell: CellParams,
-        **overrides,
-    ) -> "Indexer":
-        # High-recall preset: wider search, more reassignments, takes a million years (not really, but long)
-        overrides.setdefault(
-            "seed",
-            SeedConfig(
-                max_candidates=128,
-                n_directions=12000,
-                n_spin=240,
-                top_directions=64,
-            ),
-        )
-        overrides.setdefault("refine", RefineConfig(max_iters=400, reassign_every=5))
-        return cls(geometry, target_cell, **overrides)
 
     def _cell_matches_target(self, cell: CellParams) -> bool:
         # Compare sorted edges/angles so the match is invariant to axis labelling.
@@ -583,9 +631,10 @@ class Indexer:
         rmsd = result.rmsd
         # rank by confidence-weighted inlier evidence breaking ties toward lower rmsd (scaled to stay below 1)
         score = soft - rmsd / (rmsd.max().clamp_min(1e-12) * 1e3)
-        ranking = torch.argsort(score, descending=True)
-        for cand in ranking.tolist():
-            if int(n_indexed[cand]) < self.refine.min_indexed:
+        ranking = torch.argsort(score, descending=True).tolist()
+        n_indexed_host = n_indexed.tolist()
+        for cand in ranking:
+            if n_indexed_host[cand] < self.refine.min_indexed:
                 continue
             A_cand = result.A[cand]
             try:
@@ -597,7 +646,7 @@ class Indexer:
             return IndexResult(
                 frame_index=frame_index,
                 n_peaks=n_peaks,
-                n_indexed=int(n_indexed[cand]),
+                n_indexed=n_indexed_host[cand],
                 rmsd=float(rmsd[cand]),
                 A=A_cand,
                 U=U,
@@ -656,6 +705,8 @@ class Indexer:
             excess/variance maps (a merge-ready chunk).
         """
 
+        stats = IndexStats()
+
         def _flush(buf: list[dict]) -> Iterator[IndexResult]:
             results = self.index_frames(
                 {b["idx"]: b["pos"] for b in buf},
@@ -677,13 +728,16 @@ class Indexer:
                         b["mean"],
                         bright_threshold=bright_threshold,
                     )
+                stats.indexed += 1
                 yield res
 
         def _gen() -> Iterator[IndexResult]:
             buf: list[dict] = []
             for r in peak_stream:
-                if len(r) < 4:
+                stats.frames += 1
+                if len(r) < MIN_PEAKS_TO_INDEX:
                     continue
+                stats.hits += 1
                 idx = r.frame_index if r.frame_index is not None else 0
                 positions, intensities, sigmas, weights = self._positions_from_frame(r)
                 buf.append(
@@ -705,7 +759,16 @@ class Indexer:
             if buf:
                 yield from _flush(buf)
 
-        return IndexStream(_gen())
+        return IndexStream(_gen(), stats=stats)
+
+    def _adu_per_photon(self) -> float:
+        if self.integrate.adu_per_photon is not None:
+            return float(self.integrate.adu_per_photon)
+        if self._measured_gain is not None and self._measured_gain > 0:
+            return float(self._measured_gain)
+        if self._geometry_gain is not None and self._geometry_gain > 0:
+            return float(self._geometry_gain)
+        return 1.0
 
     def _integrate_result(
         self,
@@ -720,11 +783,22 @@ class Indexer:
         frame_shape = (int(excess.shape[-2]), int(excess.shape[-1]))
         if self._q_max is None:
             self._q_max = detector_q_max(self.geometry, frame_shape)
+        # |S|-1 ~ wavelength * (q-residual)
+        # scale the Ewald-shell tolerance to each crystal's own observed peak spread (mosaicity+bandwidth proxy).
+        threshold = self.integrate.partiality_threshold
+        if (
+            self.integrate.partiality_rmsd_factor > 0.0
+            and math.isfinite(result.rmsd)
+            and result.rmsd > 0.0
+        ):
+            wavelength = float(self.geometry["wavelength"])
+            auto = self.integrate.partiality_rmsd_factor * wavelength * result.rmsd
+            threshold = min(max(threshold, auto), self.integrate.partiality_max)
         pred = predict_reflections(
             result.A.to(excess.dtype),
             self.geometry,
             q_max=self._q_max,
-            partiality_threshold=self.integrate.partiality_threshold,
+            partiality_threshold=threshold,
             frame_shape=frame_shape,
         )
         if len(pred) == 0:
@@ -735,19 +809,28 @@ class Indexer:
             excess,
             var,
             result.positions.to(excess.dtype),
-            result.intensities.to(excess.dtype),
-            result.sigmas.to(excess.dtype),
             snap_radius=self.integrate.snap_radius,
             box_radius=self.integrate.box_radius,
             mean=mean.to(excess.dtype) if mean is not None else None,
             pixel_valid=valid_mask,
+            adu_per_photon=self._adu_per_photon(),
         )
-        result.predicted_hkl = pred.hkl
-        result.predicted_positions = positions
-        result.predicted_intensities = intensity
-        result.predicted_sigmas = sigma
-        result.predicted_peak = peak
-        result.predicted_background = background
+        resolution_nm = pred.resolution * A_INV_TO_NM_INV
+        limit = resolution_limit(
+            resolution_nm,
+            intensity,
+            sigma,
+            self.integrate.resolution_snr,
+            self.integrate.resolution_bin,
+        )
+        result.diffraction_limit = limit
+        keep = torch.isfinite(sigma) & (sigma > 0)
+        result.predicted_hkl = pred.hkl[keep]
+        result.predicted_positions = positions[keep]
+        result.predicted_intensities = intensity[keep]
+        result.predicted_sigmas = sigma[keep]
+        result.predicted_peak = peak[keep]
+        result.predicted_background = background[keep]
         result.n_bright, result.enrichment, result.enrich_p = spot_enrichment(
             positions, excess, var, bright_threshold, pixel_valid=valid_mask
         )

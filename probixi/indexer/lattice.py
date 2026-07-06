@@ -1,11 +1,28 @@
 from __future__ import annotations
 
 import math
+from functools import lru_cache
 
 import torch
 from torch import Tensor
 
 from ..io.cell import CellParams
+
+
+@lru_cache(maxsize=None)
+def _reduce_coefs(max_coef: int, device, dtype: torch.dtype) -> Tensor:
+    # integer (i,j,k) combination grid (origin excluded)
+    return torch.tensor(
+        [
+            [i, j, k]
+            for i in range(-max_coef, max_coef + 1)
+            for j in range(-max_coef, max_coef + 1)
+            for k in range(-max_coef, max_coef + 1)
+            if not (i == 0 and j == 0 and k == 0)
+        ],
+        dtype=dtype,
+        device=device,
+    )
 
 
 def cell_to_B(
@@ -70,17 +87,7 @@ def reduce_cell(B: Tensor, max_coef: int = 3) -> Tensor:
     device, dtype = B.device, B.dtype
     M = torch.linalg.inv(B.transpose(-1, -2))
 
-    coefs = torch.tensor(
-        [
-            [i, j, k]
-            for i in range(-max_coef, max_coef + 1)
-            for j in range(-max_coef, max_coef + 1)
-            for k in range(-max_coef, max_coef + 1)
-            if not (i == 0 and j == 0 and k == 0)
-        ],
-        dtype=dtype,
-        device=device,
-    )
+    coefs = _reduce_coefs(max_coef, device, dtype)
     vectors = coefs @ M.transpose(-1, -2)
     lengths = torch.linalg.vector_norm(vectors, dim=-1)
     order = torch.argsort(lengths)

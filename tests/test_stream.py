@@ -7,7 +7,9 @@ import torch
 
 from probixi.indexer.indexer import IndexResult
 from probixi.indexer.lattice import B_to_cell
-from probixi.io.writer import DataOffloader, PeakOffloader
+from probixi.io.cxi import PeakOffloader
+from probixi.io.metadata import H5Info
+from probixi.io.writer import DataOffloader
 from probixi.peakfinding.peaks.blobs import BlobStats
 from probixi.peakfinding.peaks.peakfinder import PeakResult
 
@@ -204,20 +206,41 @@ def test_data_offloader_uses_lattice_metadata_from_cell(tmp_path, geometry_dict,
     assert f"unique_axis = {cell.unique_axis}" in lines
 
 
-def test_peak_offloader_writes_peaks_only_chunk(tmp_path, geometry_dict):
-    out = tmp_path / "peaks.stream"
-    with PeakOffloader(out, geometry=geometry_dict) as off:
-        off.write(_make_peak_result())
+def test_peak_offloader_writes_cxi(tmp_path):
+    import h5py
+    import numpy as np
 
-    lines = out.read_text().splitlines()
-    assert "----- Begin chunk -----" in lines
-    assert "----- End chunk -----" in lines
-    assert "indexed_by = none" in lines
-    assert "num_peaks = 3" in lines
-    assert "Peaks from peak search" in lines
-    # peaks-only: no crystal block
-    assert "--- Begin crystal" not in lines
-    assert "num_reflections" not in "\n".join(lines)
+    raw = tmp_path / "raw.h5"
+    with h5py.File(raw, "w") as f:
+        f.create_dataset(
+            "/entry/data/data", data=np.zeros((2, 128, 128), dtype=np.uint16)
+        )
+    files = {
+        str(raw): H5Info(
+            filename=str(raw),
+            dataset="/entry/data/data",
+            n_frames=2,
+            frame_shape=(128, 128),
+        )
+    }
+
+    out = tmp_path / "cxi_out"
+    with PeakOffloader(out, files=files) as off:
+        off.write(_make_peak_result())  # frame_index=0 -> event 0
+
+    cxi = out / "raw.cxi"
+    assert cxi.exists()
+    assert (out / "peaks.lst").read_text().strip() == str(cxi.resolve())
+
+    with h5py.File(cxi, "r") as f:
+        base = "/entry_1/result_1"
+        assert int(f[f"{base}/nPeaks"][0]) == 3
+        assert int(f[f"{base}/nPeaks"][1]) == 0
+        # fs = column centroid, ss = row centroid
+        assert sorted(f[f"{base}/peakXPosRaw"][0, :3].tolist()) == [30.0, 55.0, 110.0]
+        assert sorted(f[f"{base}/peakYPosRaw"][0, :3].tolist()) == [40.0, 70.0, 90.0]
+        # external link resolves to the raw image stack (no pixel copy)
+        assert f["/entry/data/data"].shape == (2, 128, 128)
 
 
 def test_write_before_context_manager_raises(tmp_path, geometry_dict, cell):
@@ -226,7 +249,7 @@ def test_write_before_context_manager_raises(tmp_path, geometry_dict, cell):
         off.write(_make_index_result(cell))
 
 
-def test_peak_offloader_write_before_context_manager_raises(tmp_path, geometry_dict):
-    off = PeakOffloader(tmp_path / "x.stream", geometry=geometry_dict)
+def test_peak_offloader_write_before_context_manager_raises(tmp_path):
+    off = PeakOffloader(tmp_path / "x.stream")
     with pytest.raises(RuntimeError):
         off.write(_make_peak_result())

@@ -106,6 +106,9 @@ class Geometry:
         Wavelength in angstroms.
     pixel_size : float, optional
         Pixel size in meters.
+    adu_per_photon : float, optional
+        Detector gain (ADU per photon), from ``adu_per_photon`` or
+        ``adu_per_eV * photon_energy`` when both are given numerically.
     """
 
     parameters: dict
@@ -116,6 +119,7 @@ class Geometry:
     beam_center: Optional[tuple[float, float]] = None
     wavelength: Optional[float] = None
     pixel_size: Optional[float] = None
+    adu_per_photon: Optional[float] = None
     data_layout: Optional["DataLayout"] = None
     mask_spec: Optional["MaskSpec"] = None
     panel_layouts: dict[str, "DataLayout"] = field(default_factory=dict)
@@ -140,6 +144,7 @@ class Geometry:
             "pixel_size": self.pixel_size,
             "wavelength": self.wavelength,
             "panels": self.panels,
+            "adu_per_photon": self.adu_per_photon,
         }
 
 
@@ -216,6 +221,7 @@ def read_geometry(path: PathLike) -> Geometry:
         beam_center=_beam_center(panels),
         wavelength=_wavelength(parameters),
         pixel_size=_pixel_size(parameters),
+        adu_per_photon=_adu_per_photon(parameters),
         data_layout=data_layout,
         mask_spec=mask_spec,
         panel_layouts=panel_layouts,
@@ -339,6 +345,22 @@ def _pixel_size(parameters: dict) -> Optional[float]:
     res = parameters.get("res")
     if isinstance(res, (int, float)) and res > 0:
         return 1.0 / float(res)
+    return None
+
+
+def _adu_per_photon(parameters: dict) -> Optional[float]:
+    g = parameters.get("adu_per_photon")
+    if isinstance(g, (int, float)) and g > 0:
+        return float(g)
+    per_ev = parameters.get("adu_per_eV")
+    e = parameters.get("photon_energy")
+    if (
+        isinstance(per_ev, (int, float))
+        and isinstance(e, (int, float))
+        and per_ev > 0
+        and e > 0
+    ):
+        return float(per_ev) * float(e)
     return None
 
 

@@ -3,6 +3,8 @@ from __future__ import annotations
 import torch
 from torch import Tensor
 
+A_INV_TO_NM_INV = 10.0
+
 # Box integration of background-subtracted intensity at predicted positions. The
 # excess map is already background-subtracted, so integrated intensity is the sum
 # of excess over a small box and its variance the sum of per-pixel noise
@@ -18,10 +20,11 @@ def integrate_boxes(
     radius: int = 4,
     mean: Tensor | None = None,
     pixel_valid: Tensor | None = None,
+    adu_per_photon: float = 1.0,
 ) -> tuple[Tensor, Tensor, Tensor, Tensor]:
-    # Integrate intensity (sum excess), sigma (sqrt sum var), peak (max excess)
-    # and background (mean per-pixel noise) in a (2*radius+1)^2 box at each
-    # centre
+    # Integrate intensity (sum excess), sigma (sqrt of summed background noise
+    # plus signal shot noise), peak (max excess) and background (mean per-pixel
+    # noise) in a (2*radius+1)^2 box at each centre
     H, W = excess.shape
     device = excess.device
     M = positions.shape[0]
@@ -31,35 +34,34 @@ def integrate_boxes(
 
     centre = torch.round(positions).to(torch.long)
     r0, c0 = centre[:, 0], centre[:, 1]
-    I = torch.zeros(M, dtype=excess.dtype, device=device)  # noqa: E741
-    var_sum = torch.zeros(M, dtype=excess.dtype, device=device)
-    peak = torch.full((M,), float("-inf"), dtype=excess.dtype, device=device)
-    bg_sum = torch.zeros(M, dtype=excess.dtype, device=device)
-    bg_count = torch.zeros(M, dtype=excess.dtype, device=device)
-    for dr in range(-radius, radius + 1):
-        rr = r0 + dr
-        in_r = (rr >= 0) & (rr < H)
-        rr_c = rr.clamp(0, H - 1)
-        for dc in range(-radius, radius + 1):
-            cc = c0 + dc
-            valid = in_r & (cc >= 0) & (cc < W)
-            cc_c = cc.clamp(0, W - 1)
-            if pixel_valid is not None:
-                valid = valid & pixel_valid[rr_c, cc_c]
-            e = excess[rr_c, cc_c]
-            v = var[rr_c, cc_c]
-            zero = torch.zeros_like(e)
-            I = I + torch.where(valid, e, zero)  # noqa: E741
-            var_sum = var_sum + torch.where(valid, v, zero)
-            peak = torch.where(valid, torch.maximum(peak, e), peak)
-            if mean is not None:
-                m = mean[rr_c, cc_c]
-                bg_sum = bg_sum + torch.where(valid, m, zero)
-                bg_count = bg_count + valid.to(excess.dtype)
+    # gather the whole (2r+1)^2 box for every centre at once (M, K), vectorised
+    off = torch.arange(-radius, radius + 1, device=device)
+    off_r, off_c = torch.meshgrid(off, off, indexing="ij")
+    off_r = off_r.reshape(-1)
+    off_c = off_c.reshape(-1)
+    rr = r0[:, None] + off_r[None, :]
+    cc = c0[:, None] + off_c[None, :]
+    valid = (rr >= 0) & (rr < H) & (cc >= 0) & (cc < W)
+    flat = rr.clamp(0, H - 1) * W + cc.clamp(0, W - 1)
+    if pixel_valid is not None:
+        valid = valid & pixel_valid.reshape(-1)[flat]
+    e = excess.reshape(-1)[flat]
+    v = var.reshape(-1)[flat]
+    zero = torch.zeros_like(e)
+    I = torch.where(valid, e, zero).sum(dim=1)  # noqa: E741
+    var_sum = torch.where(valid, v, zero).sum(dim=1)
+    peak = torch.where(valid, e, torch.full_like(e, float("-inf"))).amax(dim=1)
     # boxes with no valid pixel
     peak = torch.where(torch.isfinite(peak), peak, torch.zeros_like(peak))
-    background = bg_sum / bg_count.clamp_min(1.0)
-    return I, var_sum.clamp_min(0.0).sqrt(), peak, background
+    if mean is not None:
+        m = mean.reshape(-1)[flat]
+        bg_sum = torch.where(valid, m, zero).sum(dim=1)
+        bg_count = valid.to(excess.dtype).sum(dim=1)
+        background = bg_sum / bg_count.clamp_min(1.0)
+    else:
+        background = torch.zeros(M, dtype=excess.dtype, device=device)
+    total_var = var_sum.clamp_min(0.0) + I.clamp_min(0.0) * adu_per_photon
+    return I, total_var.sqrt(), peak, background
 
 
 @torch.no_grad()
@@ -68,12 +70,11 @@ def integrate_predicted(
     excess: Tensor,
     var: Tensor,
     obs_positions: Tensor,
-    obs_intensity: Tensor,
-    obs_sigma: Tensor,
     snap_radius: float = 5.0,
     box_radius: int = 3,
     mean: Tensor | None = None,
     pixel_valid: Tensor | None = None,
+    adu_per_photon: float = 1.0,
 ) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor, Tensor]:
     M = pred_positions.shape[0]
     positions = pred_positions
@@ -88,9 +89,77 @@ def integrate_predicted(
             pred_positions,
         )
     intensity, sigma, peak, background = integrate_boxes(
-        excess, var, positions, box_radius, mean=mean, pixel_valid=pixel_valid
+        excess,
+        var,
+        positions,
+        box_radius,
+        mean=mean,
+        pixel_valid=pixel_valid,
+        adu_per_photon=adu_per_photon,
     )
     return positions, intensity, sigma, snapped, peak, background
+
+
+@torch.no_grad()
+def resolution_limit(
+    resolution: Tensor,
+    intensity: Tensor,
+    sigma: Tensor,
+    snr: float,
+    bin_width: float,
+) -> float:
+    """Per-crystal diffraction limit from integrated I/sigma vs resolution.
+
+    Bins reflections by resolution and, scanning outward from low resolution,
+    returns the outer edge of the last shell whose mean I/sigma stays at or
+    above ``snr``. Empty shells are skipped; the scan stops at the first
+    populated shell that falls below ``snr``.
+
+    Parameters
+    ----------
+    resolution : Tensor
+        (M,) reflection resolution ``|q| = 1/d`` in the same unit as ``bin_width``.
+    intensity, sigma : Tensor
+        (M,) integrated intensity and its 1-sigma uncertainty.
+    snr : float
+        Mean-I/sigma threshold a shell must clear. ``<= 0`` disables the limit.
+    bin_width : float
+        Shell width in the unit of ``resolution``.
+
+    Returns
+    -------
+    float
+        Resolution limit in the unit of ``resolution``; ``inf`` when disabled or
+        no reflection carries a usable sigma.
+    """
+    if snr <= 0.0 or bin_width <= 0.0 or resolution.numel() == 0:
+        return float("inf")
+    valid = torch.isfinite(sigma) & (sigma > 0)
+    if not bool(valid.any()):
+        return float("inf")
+    res = resolution[valid]
+    ratio = intensity[valid] / sigma[valid]
+    b = torch.floor(res / bin_width).to(torch.long).clamp_min(0)
+    nbins = int(b.max().item()) + 1
+    sums = torch.zeros(nbins, dtype=ratio.dtype, device=ratio.device)
+    counts = torch.zeros(nbins, dtype=ratio.dtype, device=ratio.device)
+    sums.scatter_add_(0, b, ratio)
+    counts.scatter_add_(0, b, torch.ones_like(ratio))
+    # largest populated bin with mean I/sigma >= snr before the first bin that
+    # drops below it; empty bins are skipped
+    idx = torch.arange(nbins, device=counts.device)
+    mean_ratio = sums / counts.clamp_min(1.0)
+    populated = counts > 0
+    first_fail = torch.where(
+        populated & (mean_ratio < snr), idx, torch.full_like(idx, nbins)
+    ).min()
+    elig = populated & (mean_ratio >= snr) & (idx < first_fail)
+    if bool(elig.any()):
+        last = int(torch.where(elig, idx, torch.full_like(idx, -1)).max())
+        limit = (last + 1) * bin_width
+    else:
+        limit = 0.0
+    return limit if limit > 0.0 else bin_width
 
 
 @torch.no_grad()
@@ -138,7 +207,6 @@ def spot_enrichment(
     )[0, 0]
     bright = zmax > z_threshold
     valid = pixel_valid if pixel_valid is not None else torch.ones_like(bright)
-    p = float(bright[valid].sum()) / max(int(valid.sum()), 1)  # background bright-rate
     M = positions.shape[0]
     if M == 0:
         return 0, 0.0, 1.0
@@ -146,8 +214,18 @@ def spot_enrichment(
     r = centre[:, 0].clamp(0, z.shape[0] - 1)
     c = centre[:, 1].clamp(0, z.shape[1] - 1)
     keep = valid[r, c]
-    n_keep = max(int(keep.sum()), 1)
-    n_bright = int((bright[r, c] & keep).sum())
+    # int64 counts -> Python ints
+    bright_valid, valid_total, keep_total, bright_keep = torch.stack(
+        [
+            (bright & valid).sum(),
+            valid.sum(),
+            keep.sum(),
+            (bright[r, c] & keep).sum(),
+        ]
+    ).tolist()
+    p = bright_valid / max(valid_total, 1.0)  # background bright-rate
+    n_keep = max(keep_total, 1.0)
+    n_bright = int(bright_keep)
     enrichment = (
         (n_bright / n_keep) / p if p > 0.0 else float(n_bright > 0) * float("inf")
     )

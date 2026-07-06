@@ -45,7 +45,14 @@ def test_scalar_coercion_keeps_strings(geometry):
 
 def test_to_dict_exposes_required_fields(geometry):
     d = geometry.to_dict()
-    assert set(d) == {"beam_center", "clen", "pixel_size", "wavelength", "panels"}
+    assert set(d) == {
+        "beam_center",
+        "clen",
+        "pixel_size",
+        "wavelength",
+        "panels",
+        "adu_per_photon",
+    }
     assert d["clen"] == pytest.approx(0.2007)
 
 

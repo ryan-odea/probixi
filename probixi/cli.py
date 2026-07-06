@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 from pathlib import Path
 from typing import Literal, Optional, cast
 
@@ -10,6 +11,63 @@ from probixi.io import DataOffloader, PeakOffloader
 from probixi.probixi import Probixi
 
 _IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".pdf", ".svg"}
+_PROGRESS_INTERVAL_S = 60.0
+
+
+def _pct(num: int, denom: int) -> str:
+    return f"{(100.0 * num / denom) if denom else 0.0:.1f}%"
+
+
+def _resolve_cli_devices(
+    device: Optional[str], devices: Optional[str], gpus: Optional[int]
+) -> Optional[list]:
+    # Translate the --device / --devices / --gpus flags into a device list, or
+    # None to keep the single-device path. --devices/--gpus imply multi-GPU.
+    picked = [f for f in (bool(device), bool(devices), gpus) if f]
+    if len(picked) > 1:
+        raise click.UsageError("pass only one of --device / --devices / --gpus")
+    if devices:
+        return [torch.device(d.strip()) for d in devices.split(",") if d.strip()]
+    if gpus is not None:
+        if gpus < 1:
+            raise click.UsageError("--gpus must be >= 1")
+        return [torch.device(f"cuda:{i}") for i in range(gpus)]
+    if device:
+        return [torch.device(device)]
+    return None
+
+
+def _run_multi_gpu(device_list: list, **kw) -> None:
+    from probixi.multigpu import run_data_parallel
+
+    if kw["peaks_only"] or kw["render"] or kw["gif"]:
+        raise click.UsageError(
+            "--devices/--gpus supports the indexing path only "
+            "(not --peaks-only, --render, or --gif)"
+        )
+    if kw["cell_file"] is None:
+        raise click.UsageError("a unit cell (-p/--cell) is required for multi-GPU")
+    if kw["output"] is None:
+        raise click.UsageError("-o/--output is required for multi-GPU indexing")
+    run_data_parallel(
+        kw["list_file"],
+        kw["geometry_file"],
+        kw["cell_file"],
+        kw["output"],
+        devices=device_list,
+        start=kw["start"],
+        stop=kw["stop"],
+        batch_size=kw["batch_size"],
+        seed_frames=kw["seed_frames"],
+        target_noise_peaks=kw["target_noise_peaks"],
+        noise_mode=kw["noise_mode"],
+        warmup_frames=kw["warmup_frames"],
+        panel=kw["panel"],
+        enrich_gate=kw["enrich_gate"],
+        enrich_alpha=kw["enrich_alpha"],
+        threads_per_worker=kw["threads_per_worker"],
+        quiet=kw["quiet"],
+    )
 
 
 @click.command()
@@ -43,14 +101,16 @@ _IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".pdf", ".svg"}
     "output",
     required=False,
     default=None,
-    type=click.Path(dir_okay=False, writable=True),
-    help="Output CrystFEL-style .stream file. Optional when only --render is used.",
+    type=click.Path(writable=True),
+    help="Output CrystFEL-style .stream file (or, with --peaks-only, an output "
+    "directory for the CXI peak set). Optional when only --render is used.",
 )
 @click.option(
     "--peaks-only",
     is_flag=True,
-    help="Only run peak finding and export a peaks-only stream "
-    "Does not require a unit cell.",
+    help="Only run peak finding and export a CXI peak set (one .cxi per input "
+    "file with external-linked images, plus peaks.lst and a companion .geom) "
+    "for 'indexamajig --peaks=cxi'. -o is an output directory. No cell needed.",
 )
 @click.option(
     "--gif",
@@ -70,13 +130,40 @@ _IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".pdf", ".svg"}
 )
 @click.option("--device", default=None, help="Torch device (default: auto).")
 @click.option(
+    "--devices",
+    default=None,
+    help="Comma-separated device list for multi-GPU data-parallel indexing "
+    "(e.g. 'cuda:0,cuda:1'). Splits frames into blocks across devices and merges "
+    "the per-device streams. Indexing path only.",
+)
+@click.option(
+    "--gpus",
+    type=int,
+    default=None,
+    help="Multi-GPU data-parallel indexing across the first N CUDA devices "
+    "(shorthand for --devices cuda:0,...,cuda:N-1).",
+)
+@click.option(
+    "--threads-per-worker",
+    type=int,
+    default=None,
+    help="Torch CPU intra-op threads per multi-GPU worker (default: "
+    "cpu_count // n_workers, to avoid oversubscribing cores).",
+)
+@click.option(
     "--noise-mode",
     type=click.Choice(["online", "per_frame"]),
     default="online",
     show_default=True,
     help="Noise-model update mode.",
 )
-@click.option("--warmup-frames", type=int, default=16, show_default=True)
+@click.option(
+    "--warmup-frames",
+    type=int,
+    default=16,
+    show_default=True,
+    help="Frames observed before the dead-pixel mask is committed.",
+)
 @click.option(
     "--seed-frames",
     type=int,
@@ -125,7 +212,12 @@ _IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".pdf", ".svg"}
     type=click.Path(),
     help="Render destination: an image file (single --render) or a directory.",
 )
-@click.option("-q", "--quiet", is_flag=True, help="Suppress per-frame progress.")
+@click.option(
+    "-q",
+    "--quiet",
+    is_flag=True,
+    help="Suppress progress: the periodic frames/hits/indexed rate line",
+)
 def main(
     list_file: str,
     geometry_file: str,
@@ -137,6 +229,9 @@ def main(
     stop: Optional[int],
     batch_size: int,
     device: Optional[str],
+    devices: Optional[str],
+    gpus: Optional[int],
+    threads_per_worker: Optional[int],
     noise_mode: str,
     warmup_frames: int,
     seed_frames: int,
@@ -150,8 +245,9 @@ def main(
 ) -> None:
     """Run the probixi pipeline and write indexed frames to a CrystFEL stream.
 
-    With --peaks-only, peak finding runs but indexing does not, and a
-    peaks-only stream is written instead.
+    With --peaks-only, peak finding runs but indexing does not, and a CXI peak
+    set (readable by 'indexamajig --peaks=cxi') is written to the -o directory
+    instead.
     """
     if not peaks_only and not render and cell_file is None:
         raise click.UsageError(
@@ -159,7 +255,34 @@ def main(
         )
     if output is None and not render:
         raise click.UsageError("-o/--output is required unless only --render is used")
-    dev = torch.device(device) if device else None
+
+    device_list = _resolve_cli_devices(device, devices, gpus)
+    if device_list is not None and len(device_list) > 1:
+        _run_multi_gpu(
+            device_list,
+            list_file=list_file,
+            geometry_file=geometry_file,
+            cell_file=cell_file,
+            output=output,
+            peaks_only=peaks_only,
+            gif=gif,
+            render=render,
+            start=start,
+            stop=stop,
+            batch_size=batch_size,
+            seed_frames=seed_frames,
+            target_noise_peaks=target_noise_peaks,
+            noise_mode=noise_mode,
+            warmup_frames=warmup_frames,
+            panel=panel,
+            enrich_gate=enrich_gate,
+            enrich_alpha=enrich_alpha,
+            threads_per_worker=threads_per_worker,
+            quiet=quiet,
+        )
+        return
+
+    dev = device_list[0] if device_list else (torch.device(device) if device else None)
     probixi = Probixi(
         list_file=list_file,
         geometry_file=geometry_file,
@@ -213,10 +336,8 @@ def main(
         )
         with PeakOffloader(
             output,
-            geometry=probixi.geometry,
             geometry_file=geometry_file,
             files=meta.files,
-            panel=panel,
         ) as off:
             n = 0
             for result in peaks:
@@ -232,7 +353,8 @@ def main(
     stream = probixi.index_stream(frames, batch_size=batch_size, start_index=start or 0)
     if enrich_gate:
         stream = stream.enrich_gate(enrich_alpha)
-
+    stats = stream.stats
+    last_log = time.monotonic() - _PROGRESS_INTERVAL_S
     with DataOffloader(
         output,
         geometry=probixi.geometry,
@@ -245,13 +367,22 @@ def main(
         for result in stream:
             off.write(result)
             n += 1
-            if not quiet:
+            now = time.monotonic()
+            if not quiet and now - last_log >= _PROGRESS_INTERVAL_S:
+                last_log = now
                 click.echo(
-                    f"  frame {result.frame_index}: "
-                    f"{result.n_indexed}/{result.n_peaks} peaks indexed "
-                    f"(rmsd {result.rmsd:.4f})"
+                    f"  {stats.frames} frames | "
+                    f"{stats.hits} hits ({_pct(stats.hits, stats.frames)}) | "
+                    f"{n} indexed ({_pct(n, stats.frames)})"
                 )
 
+    if not quiet:
+        click.echo(
+            f"Completed {stats.frames} frame(s): "
+            f"{stats.hits} hits ({_pct(stats.hits, stats.frames)}), "
+            f"{n} indexed ({_pct(n, stats.frames)}, "
+            f"{_pct(n, stats.hits)} of hits)"
+        )
     click.echo(f"Wrote {n} indexed frame(s) to {output}")
 
 

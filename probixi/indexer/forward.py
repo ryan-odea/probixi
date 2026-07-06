@@ -82,18 +82,24 @@ def _lab_xy_pixels(
     y = rows - bc_row
     if bases is None:
         return torch.stack([x, y], dim=-1)
-    x = x.clone()
-    y = y.clone()
-    for b in bases:
-        min_ss, max_ss, min_fs, max_fs = b[0], b[1], b[2], b[3]
-        cx, cy, fsx, fsy, ssx, ssy = b[4], b[5], b[6], b[7], b[8], b[9]
-        m = (rows >= min_ss) & (rows <= max_ss) & (cols >= min_fs) & (cols <= max_fs)
-        if not torch.any(m):
-            continue
-        fs_j = cols[m] - min_fs
-        ss_i = rows[m] - min_ss
-        x[m] = cx + fs_j * fsx + ss_i * ssx
-        y[m] = cy + fs_j * fsy + ss_i * ssy
+    min_ss, max_ss, min_fs, max_fs = bases[:, 0], bases[:, 1], bases[:, 2], bases[:, 3]
+    cx, cy = bases[:, 4], bases[:, 5]
+    fsx, fsy, ssx, ssy = bases[:, 6], bases[:, 7], bases[:, 8], bases[:, 9]
+    # each pixel takes the last panel whose ss/fs bounds contain it
+    inside = (
+        (rows[:, None] >= min_ss)
+        & (rows[:, None] <= max_ss)
+        & (cols[:, None] >= min_fs)
+        & (cols[:, None] <= max_fs)
+    )
+    pid = torch.arange(bases.shape[0], device=positions.device)
+    chosen = torch.where(inside, pid, -1).max(dim=1).values
+    on = chosen >= 0
+    sel = chosen.clamp_min(0)
+    fs_j = cols - min_fs[sel]
+    ss_i = rows - min_ss[sel]
+    x = torch.where(on, cx[sel] + fs_j * fsx[sel] + ss_i * ssx[sel], x)
+    y = torch.where(on, cy[sel] + fs_j * fsy[sel] + ss_i * ssy[sel], y)
     return torch.stack([x, y], dim=-1)
 
 
@@ -155,28 +161,28 @@ def _project_to_panels(
     x_pix: Tensor, y_pix: Tensor, valid: Tensor, bases: Tensor
 ) -> Tensor:
     n = x_pix.shape[0]
-    row = torch.full((n,), float("nan"), device=x_pix.device, dtype=x_pix.dtype)
-    col = torch.full((n,), float("nan"), device=x_pix.device, dtype=x_pix.dtype)
-    for b in bases:
-        min_ss, _, min_fs, _ = b[0], b[1], b[2], b[3]
-        cx, cy, fsx, fsy, ssx, ssy = b[4], b[5], b[6], b[7], b[8], b[9]
-        fs_len = b[3] - b[2]
-        ss_len = b[1] - b[0]
-        det = fsx * ssy - ssx * fsy
-        rx = x_pix - cx
-        ry = y_pix - cy
-        fs_j = (ssy * rx - ssx * ry) / det
-        ss_i = (-fsy * rx + fsx * ry) / det
-        on = (
-            valid
-            & (fs_j >= 0)
-            & (fs_j <= fs_len)
-            & (ss_i >= 0)
-            & (ss_i <= ss_len)
-            & torch.isnan(row)
-        )
-        row[on] = min_ss + ss_i[on]
-        col[on] = min_fs + fs_j[on]
+    P = bases.shape[0]
+    min_ss, max_ss, min_fs, max_fs = bases[:, 0], bases[:, 1], bases[:, 2], bases[:, 3]
+    cx, cy = bases[:, 4], bases[:, 5]
+    fsx, fsy, ssx, ssy = bases[:, 6], bases[:, 7], bases[:, 8], bases[:, 9]
+    fs_len = (max_fs - min_fs)[:, None]
+    ss_len = (max_ss - min_ss)[:, None]
+    det = (fsx * ssy - ssx * fsy)[:, None]
+    rx = x_pix[None, :] - cx[:, None]
+    ry = y_pix[None, :] - cy[:, None]
+    fs_j = (ssy[:, None] * rx - ssx[:, None] * ry) / det
+    ss_i = (-fsy[:, None] * rx + fsx[:, None] * ry) / det
+    on = (
+        valid[None, :] & (fs_j >= 0) & (fs_j <= fs_len) & (ss_i >= 0) & (ss_i <= ss_len)
+    )
+    # each q takes the first panel it lands on
+    pid = torch.arange(P, device=x_pix.device)[:, None]
+    chosen = torch.where(on, pid, P).min(dim=0).values
+    has = chosen < P
+    sel = chosen.clamp_max(P - 1)
+    ar = torch.arange(n, device=x_pix.device)
+    row = torch.where(has, min_ss[sel] + ss_i[sel, ar], float("nan"))
+    col = torch.where(has, min_fs[sel] + fs_j[sel, ar], float("nan"))
     return torch.stack([row, col], dim=-1)
 
 

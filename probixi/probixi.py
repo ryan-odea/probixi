@@ -502,6 +502,8 @@ class Probixi:
                 **topts,
             )
         self._scale_ref = ScaleReference.from_noise_model(self.noise)
+        if getattr(self, "indexer", None) is not None and self.noise.gain is not None:
+            self.indexer._measured_gain = self.noise.gain
         return result
 
     def peak_stream(
@@ -538,6 +540,7 @@ class Probixi:
             offset = 0
             for item in frames:
                 self._ensure_built(item)
+                self.noise.record_drift = False
                 if update_noise:
                     self._update_noise(item)
                 if estimate_scale and self._scale_ref is not None:
@@ -602,14 +605,12 @@ class Probixi:
             bright_threshold=bright_threshold,
         )
 
-        def _attach() -> Iterator:
-            for r in base:
-                fs = self._frame_scales.pop(r.frame_index, None)
-                if fs is not None:
-                    r.scale, r.scale_sigma = fs.scale, fs.sigma
-                yield r
+        def _attach(r) -> None:
+            fs = self._frame_scales.pop(r.frame_index, None)
+            if fs is not None:
+                r.scale, r.scale_sigma = fs.scale, fs.sigma
 
-        return type(base)(_attach())
+        return base.tap(_attach)
 
     def scale_stream(
         self,

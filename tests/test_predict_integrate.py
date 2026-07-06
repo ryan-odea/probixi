@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import numpy as np
 import pytest
 import sim
 import torch
@@ -139,8 +138,6 @@ def test_integrate_recovers_injected_intensity_and_background(cell):
         excess,
         var,
         obs_positions=torch.empty(0, 2, dtype=torch.float64),
-        obs_intensity=torch.empty(0, dtype=torch.float64),
-        obs_sigma=torch.empty(0, dtype=torch.float64),
         box_radius=4,
         mean=mean,
     )
@@ -148,8 +145,9 @@ def test_integrate_recovers_injected_intensity_and_background(cell):
     assert abs(float(intensity.median()) - truth_I) < 0.1 * truth_I
     # background reported is the injected mean
     assert torch.allclose(bg, torch.full((n,), background, dtype=torch.float64))
-    # box sigma is sqrt of summed per-pixel variances; for spots whose full box
-    # lies inside the frame the count is the complete (2r+1)^2 box
+    # box sigma combines the summed per-pixel background variance with the
+    # signal's own shot noise (adu_per_photon defaults to 1.0); for spots whose
+    # full box lies inside the frame the count is the complete (2r+1)^2 box
     box_radius = 4
     # integrate_boxes rounds the centre to the nearest pixel before slicing
     centre = torch.round(lattice_pos).to(torch.long)
@@ -162,11 +160,8 @@ def test_integrate_recovers_injected_intensity_and_background(cell):
     )
     assert bool(interior.any())
     box_pixels = (2 * box_radius + 1) ** 2
-    full_sigma = float(np.sqrt(box_pixels) * noise_sigma)
-    assert torch.allclose(
-        sigma[interior],
-        torch.full((int(interior.sum()),), full_sigma, dtype=torch.float64),
-    )
+    expected_sigma = torch.sqrt(box_pixels * noise_sigma**2 + intensity.clamp_min(0.0))
+    assert torch.allclose(sigma[interior], expected_sigma[interior])
 
 
 def test_integrate_snaps_predicted_to_nearby_observed_peak(cell):
@@ -184,8 +179,6 @@ def test_integrate_snaps_predicted_to_nearby_observed_peak(cell):
         excess,
         var,
         obs_positions=obs_pos,
-        obs_intensity=torch.full((n,), 1.0, dtype=torch.float64),
-        obs_sigma=torch.full((n,), 1.0, dtype=torch.float64),
         snap_radius=5.0,
         box_radius=3,
     )
@@ -205,8 +198,6 @@ def test_integrate_does_not_snap_observed_peak_outside_snap_radius():
         excess,
         var,
         obs_positions=obs_pos,
-        obs_intensity=torch.tensor([1.0], dtype=torch.float64),
-        obs_sigma=torch.tensor([1.0], dtype=torch.float64),
         snap_radius=5.0,
         box_radius=2,
     )
@@ -225,8 +216,6 @@ def test_integrate_with_no_observed_peaks_keeps_predicted_positions():
         excess,
         var,
         obs_positions=torch.empty(0, 2, dtype=torch.float64),
-        obs_intensity=torch.empty(0, dtype=torch.float64),
-        obs_sigma=torch.empty(0, dtype=torch.float64),
         box_radius=2,
     )
     assert not bool(snapped.any())
@@ -244,8 +233,6 @@ def test_integrate_peak_is_box_maximum_of_excess():
         excess,
         var,
         obs_positions=torch.empty(0, 2, dtype=torch.float64),
-        obs_intensity=torch.empty(0, dtype=torch.float64),
-        obs_sigma=torch.empty(0, dtype=torch.float64),
         box_radius=2,
     )
     assert float(peak[0]) == pytest.approx(42.0)
