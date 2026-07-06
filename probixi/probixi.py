@@ -504,7 +504,18 @@ class Probixi:
         self._scale_ref = ScaleReference.from_noise_model(self.noise)
         if getattr(self, "indexer", None) is not None and self.noise.gain is not None:
             self.indexer._measured_gain = self.noise.gain
+        self._sync_active_noise_sources()
         return result
+
+    def _sync_active_noise_sources(self) -> None:
+        finder = getattr(self, "_finder", None)
+        if finder is None:
+            return
+        if finder.combination == "calibrated":
+            weights = self.noise.calibrated_weights or {"pixel": 1.0}
+        else:
+            weights, _ = self.noise._preset_weights(finder.combination)
+        self.noise.set_active_update_sources({k for k, w in weights.items() if w > 0})
 
     def peak_stream(
         self,

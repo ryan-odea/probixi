@@ -241,6 +241,10 @@ class NoiseModel(nn.Module):
         self._mask_version = 0
         # Set by calibrate_noise().apply(); used by the "calibrated" combination.
         self.calibrated_weights: Optional[dict[str, float]] = None
+        # None -> update every source; else only these (pixel always updates, as
+        # robust clip, mask commit, and drift all read it). Set post-calibration
+        # so sources the active prediction never blends aren't computed per frame.
+        self.active_update_sources: Optional[set] = None
         self.var_scale: float = 1.0
         self.eigen_modes: Optional[Tensor] = None
         self.read_var: Optional[float] = None
@@ -266,8 +270,11 @@ class NoiseModel(nn.Module):
         frame_for_stats = self._robust_clip(frame)
         self.pixel.update(frame_for_stats)
         feed_mask = self.valid_mask
-        self.rotational.update(frame_for_stats, mask=feed_mask)
-        self.panel.update(frame_for_stats, mask=feed_mask)
+        active = self.active_update_sources
+        if active is None or "rotational" in active:
+            self.rotational.update(frame_for_stats, mask=feed_mask)
+        if active is None or "panel" in active:
+            self.panel.update(frame_for_stats, mask=feed_mask)
         self.n_frames += 1
         self._n_host += 1
         n = self._n_host
@@ -283,6 +290,14 @@ class NoiseModel(nn.Module):
             and n % self.drift_log_every == 0
         ):
             self._record_drift(n)
+
+    def set_active_update_sources(self, sources: Optional[Iterable[str]]) -> None:
+        # Restrict per-frame updates to `sources` (plus pixel, always required).
+        # Pass None to restore updating every source (e.g. before recalibration).
+        if sources is None:
+            self.active_update_sources = None
+        else:
+            self.active_update_sources = set(sources) | {"pixel"}
 
     def fit(self, frames: Iterable[Tensor]) -> "NoiseModel":
         for item in frames:

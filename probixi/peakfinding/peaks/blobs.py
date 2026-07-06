@@ -3,21 +3,10 @@ from __future__ import annotations
 from dataclasses import dataclass, fields
 
 import torch
-import torch.nn.functional as F
 from torch import Tensor
 
-# cached frame-invariant index grids, keyed by (H, W, device[, dtype])
-_SEED_CACHE: dict = {}
+# cached frame-invariant index grids, keyed by (H, W, device, dtype)
 _COORD_CACHE: dict = {}
-
-
-def _seed_grid(H: int, W: int, device: torch.device) -> Tensor:
-    key = (H, W, device)
-    grid = _SEED_CACHE.get(key)
-    if grid is None:
-        grid = (torch.arange(H * W, dtype=torch.long, device=device) + 1).reshape(H, W)
-        _SEED_CACHE[key] = grid
-    return grid
 
 
 def _coord_grids(
@@ -88,49 +77,50 @@ def label_connected_components(
 
     H, W = mask.shape
     device = mask.device
-    if not mask.any():
-        return torch.zeros(H, W, dtype=torch.long, device=device), 0
+    out = torch.zeros(H, W, dtype=torch.long, device=device)
 
-    # flood-fill only inside the foreground bounding box
-    rows_any = mask.any(dim=1)
-    cols_any = mask.any(dim=0)
-    r_idx = rows_any.nonzero(as_tuple=True)[0]
-    c_idx = cols_any.nonzero(as_tuple=True)[0]
-    r0, r1 = int(r_idx[0]), int(r_idx[-1]) + 1
-    c0, c1 = int(c_idx[0]), int(c_idx[-1]) + 1
-    mask_c = mask[r0:r1, c0:c1]
-    hc, wc = mask_c.shape
+    # Work only on foreground pixels: the detector is extremely sparse, so a dense
+    # per-pixel flood over H*W is wasteful. Build the fg adjacency graph and flood
+    # component labels over the ~10^2 fg nodes instead.
+    flat = mask.reshape(-1)
+    fg = flat.nonzero(as_tuple=True)[0]
+    K = int(fg.numel())
+    if K == 0:
+        return out, 0
 
-    # Seed each foreground pixel with a unique id, then iterate min over self +
-    # neighbors until the per-component global minimum floods to convergence
-    INF = H * W + 2
-    seeds = _seed_grid(H, W, device)[r0:r1, c0:c1]
-    labels = seeds * mask_c
+    rows = fg // W
+    cols = fg % W
     offsets = (
         [(-1, 0), (1, 0), (0, -1), (0, 1)]
         if connectivity == 1
         else [(-1, -1), (-1, 0), (-1, 1), (0, -1), (0, 1), (1, -1), (1, 0), (1, 1)]
     )
 
-    for it in range(max_iters):
-        prev = labels
-        cur = labels.masked_fill(~mask_c, INF)
-        padded = F.pad(cur, (1, 1, 1, 1), value=INF)
-        acc = cur
-        for dy, dx in offsets:
-            acc = torch.minimum(acc, padded[1 + dy : 1 + dy + hc, 1 + dx : 1 + dx + wc])
-        labels = torch.where(mask_c, acc, 0)
-        # poll for convergence every 8th iteration
-        if it % 8 == 7 and labels.equal(prev):
-            break
+    # For each fg pixel and offset, the fg-index of that neighbor (-1 if none)
+    nbr = torch.full((K, len(offsets)), -1, dtype=torch.long, device=device)
+    for o, (dy, dx) in enumerate(offsets):
+        r2 = rows + dy
+        c2 = cols + dx
+        valid = (r2 >= 0) & (r2 < H) & (c2 >= 0) & (c2 < W)
+        nflat = (r2 * W + c2).clamp_(0, H * W - 1)
+        idx = torch.searchsorted(fg, nflat).clamp_(max=K - 1)
+        hit = valid & (fg[idx] == nflat)
+        nbr[:, o] = torch.where(hit, idx, torch.full_like(idx, -1))
 
-    # Compress sparse surviving seed ids to a dense 1:n_blobs range
-    unique = labels[mask_c].unique()
-    n_blobs = int(unique.numel())
-    remap = torch.zeros(int(labels.max()) + 1, dtype=torch.long, device=device)
-    remap[unique] = torch.arange(1, n_blobs + 1, dtype=torch.long, device=device)
-    out = torch.zeros(H, W, dtype=torch.long, device=device)
-    out[r0:r1, c0:c1] = remap[labels]
+    labels = torch.arange(K, dtype=torch.long, device=device)
+    big = torch.full((), K, dtype=torch.long, device=device)
+    nbr_valid = nbr >= 0
+    nbr_c = nbr.clamp_min(0)
+    for _ in range(max_iters):
+        gathered = torch.where(nbr_valid, labels[nbr_c], big)
+        cand = torch.minimum(labels, gathered.amin(dim=1))
+        if torch.equal(cand, labels):
+            break
+        labels = cand
+
+    uniq, inv = torch.unique(labels, return_inverse=True)
+    n_blobs = int(uniq.numel())
+    out.reshape(-1)[fg] = inv + 1
     return out, n_blobs
 
 
