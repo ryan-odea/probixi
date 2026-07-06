@@ -30,8 +30,7 @@ __all__ = [
 
 
 def block_bounds(start: int, stop: int, rank: int, world_size: int) -> tuple[int, int]:
-    """Contiguous, balanced ``[lo, hi)`` sub-range of ``[start, stop)`` for ``rank``
-    """
+    """Contiguous, balanced ``[lo, hi)`` sub-range of ``[start, stop)`` for ``rank``"""
     if not 0 <= rank < world_size:
         raise ValueError(f"rank {rank} out of range for world_size {world_size}")
     total = max(0, stop - start)
@@ -80,8 +79,7 @@ def _validate_cuda_devices(dev_list: Sequence[torch.device]) -> None:
 
 
 def merge_streams(part_paths: Sequence[PathLike], output_path: PathLike) -> int:
-    """Concatenate per-rank ``.stream`` files into one, renumbering serials.
-    """
+    """Concatenate per-rank ``.stream`` files into one, renumbering serials."""
     serial = 0
     header_written = False
     with Path(output_path).open("w") as out:
@@ -142,8 +140,7 @@ def run_block(
     cfg: BlockConfig,
     part_path: PathLike,
 ) -> dict:
-    """Calibrate on the shared seed frames, then index this rank's block.
-    """
+    """Calibrate on the shared seed frames, then index this rank's block."""
     # cap CPU threads before any torch work so co-resident workers don't oversubscribe
     if cfg.threads is not None and cfg.threads > 0:
         torch.set_num_threads(cfg.threads)
@@ -239,8 +236,7 @@ def run_data_parallel(
     keep_parts: bool = False,
     quiet: bool = False,
 ) -> Path:
-    """Run indexing across several devices on one node and merge the outputs.
-    """
+    """Run indexing across several devices on one node and merge the outputs."""
     dev_list = resolve_devices(devices)
     _validate_cuda_devices(dev_list)
     world = len(dev_list)
