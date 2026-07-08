@@ -113,8 +113,7 @@ def peak_resolution_limit(
     snr: Tensor | None = None,
     snr_floor: float = 0.0,
 ) -> float:
-    """Per-crystal diffraction limit from the indexed peaks' resolution.
-    """
+    """Per-crystal diffraction limit from the indexed peaks' resolution."""
     if percentile <= 0.0 or peak_resolution.numel() == 0:
         return float("inf")
     vals = peak_resolution
@@ -136,8 +135,7 @@ def falloff_resolution_limit(
     nbins: int = 10,
     min_refl: int = 40,
 ) -> float | None:
-    """Per-crystal diffraction limit (nm^-1) from the I/sigma-vs-resolution falloff.
-    """
+    """Per-crystal diffraction limit (nm^-1) from the I/sigma-vs-resolution falloff."""
     n = int(q_nm.shape[0])
     if n < min_refl:
         return None

@@ -19,8 +19,8 @@ from .integrate import (
 )
 from .lattice import cell_to_B, decompose_A
 from .predict import detector_q_max, predict_reflections
-from .rocking import estimate_mosaicity, rocking_radius
 from .refine import RefineResult, refine_multiframe_known_B
+from .rocking import estimate_mosaicity
 from .seed import sphere_seed_candidates
 
 MIN_PEAKS_TO_INDEX = 3
@@ -309,9 +309,9 @@ class IntegrateConfig:
     domain_size_recip: float = 5.0e-5
     box_radius: int = 3
     snap_radius: float = 5.0
-    resolution_isigma: float = 1.0     # per-crystal drl: cut where <I/sig> falls to this
+    resolution_isigma: float = 1.0  # per-crystal drl: cut where <I/sig> falls to this
     resolution_nbins: int = 10
-    resolution_min_refl: int = 40      # below this, fall back to the peak percentile
+    resolution_min_refl: int = 40  # below this, fall back to the peak percentile
     resolution_percentile: float = 0.90  # fallback estimator (sparse crystals)
     resolution_snr_floor: float = 0.0
     adu_per_photon: Optional[float] = None
@@ -887,7 +887,8 @@ class Indexer:
         else:
             q_rep = 0.0
         result.profile_radius = (
-            r_size + 0.5 * eta * q_rep
+            r_size
+            + 0.5 * eta * q_rep
             + 0.5 * wavelength * self.integrate.bandwidth * q_rep * q_rep
         )
         keep = torch.isfinite(sigma) & (sigma > 0)

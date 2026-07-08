@@ -153,8 +153,10 @@ def predict_reflections(
     eps = S_norm - 1.0
 
     if eta is not None:
-        tol = wavelength * predict_sigma * rocking_radius(
-            qn, eta, r_size, bandwidth, wavelength
+        tol = (
+            wavelength
+            * predict_sigma
+            * rocking_radius(qn, eta, r_size, bandwidth, wavelength)
         )
         tol = tol.clamp_min(partiality_threshold)
         keep = (qn <= q_max) & (Sz > 0) & (eps.abs() < tol)

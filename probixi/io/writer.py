@@ -343,7 +343,9 @@ class DataOffloader(_StreamWriter):
             f"probixi/rmsd = {result.rmsd:.6f} A^-1",
         ]
         if result.mosaicity is not None:
-            lines.append(f"probixi/mosaicity = {math.degrees(result.mosaicity):.4f} deg")
+            lines.append(
+                f"probixi/mosaicity = {math.degrees(result.mosaicity):.4f} deg"
+            )
         if result.scale is not None:
             lines.append(
                 f"probixi/scale = {result.scale:.5f} {result.scale_sigma or 0.0:.5f}"

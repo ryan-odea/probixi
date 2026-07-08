@@ -24,8 +24,7 @@ def estimate_mosaicity(
     r_size_floor: float,
     min_peaks: int = 8,
 ) -> tuple[float, float]:
-    """Fit ``(eta, r_size)`` to the indexed reflections' radial Ewald offset.
-    """
+    """Fit ``(eta, r_size)`` to the indexed reflections' radial Ewald offset."""
     if int(q_pred.shape[0]) < min_peaks:
         return prior_eta, r_size_floor
     qn = torch.linalg.vector_norm(q_pred, dim=-1)
