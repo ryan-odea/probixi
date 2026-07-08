@@ -298,7 +298,7 @@ def main(
 
     if gif:
         probixi.noise_diagnostics(
-            gif, stop=seed_frames, batch_size=max(2, seed_frames // 8)
+            gif, stop=seed_frames, batch_size=max(1, batch_size)
         )
         if not quiet:
             click.echo(f"Wrote noise diagnostic GIF to {gif}")
