@@ -455,6 +455,7 @@ class Indexer:
         self.device = device
         self._geometry_gain = geometry.get("adu_per_photon")
         self._measured_gain: Optional[float] = None
+        self._bg_annulus_pixels: Optional[float] = None
         self._q_max: Optional[float] = None
         self.B_target = cell_to_B(target_cell, device=device, dtype=dtype)
 
@@ -845,6 +846,7 @@ class Indexer:
             mean=mean.to(excess.dtype) if mean is not None else None,
             pixel_valid=valid_mask,
             adu_per_photon=self._adu_per_photon(),
+            n_bg=self._bg_annulus_pixels,
         )
         peak_res_nm = None
         if result.positions.numel() > 0:

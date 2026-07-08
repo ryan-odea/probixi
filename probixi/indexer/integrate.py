@@ -7,9 +7,9 @@ A_INV_TO_NM_INV = 10.0
 
 # Box integration of background-subtracted intensity at predicted positions. The
 # excess map is already background-subtracted, so integrated intensity is the sum
-# of excess over a small box and its variance the sum of per-pixel noise
-# variances. The box must hold a spot despite prediction scatter yet stay far
-# narrower than the inter-spot spacing so neighbours don't leak in.
+# of excess over a small box and its variance is the summed per-pixel background
+# noise inflated by the gross-minus-background factor 1 + n_peak/n_bg (the shared
+# local-background estimate) plus the signal shot noise I*gain.
 
 
 @torch.no_grad()
@@ -21,6 +21,7 @@ def integrate_boxes(
     mean: Tensor | None = None,
     pixel_valid: Tensor | None = None,
     adu_per_photon: float = 1.0,
+    n_bg: float | None = None,
 ) -> tuple[Tensor, Tensor, Tensor, Tensor]:
     # Integrate intensity (sum excess), sigma (sqrt of summed background noise
     # plus signal shot noise), peak (max excess) and background (mean per-pixel
@@ -50,17 +51,20 @@ def integrate_boxes(
     zero = torch.zeros_like(e)
     I = torch.where(valid, e, zero).sum(dim=1)  # noqa: E741
     var_sum = torch.where(valid, v, zero).sum(dim=1)
+    n_peak = valid.to(excess.dtype).sum(dim=1)
     peak = torch.where(valid, e, torch.full_like(e, float("-inf"))).amax(dim=1)
     # boxes with no valid pixel
     peak = torch.where(torch.isfinite(peak), peak, torch.zeros_like(peak))
     if mean is not None:
         m = mean.reshape(-1)[flat]
         bg_sum = torch.where(valid, m, zero).sum(dim=1)
-        bg_count = valid.to(excess.dtype).sum(dim=1)
-        background = bg_sum / bg_count.clamp_min(1.0)
+        background = bg_sum / n_peak.clamp_min(1.0)
     else:
         background = torch.zeros(M, dtype=excess.dtype, device=device)
-    total_var = var_sum.clamp_min(0.0) + I.clamp_min(0.0) * adu_per_photon
+    bg_var = var_sum.clamp_min(0.0)
+    if n_bg is not None and n_bg > 0:
+        bg_var = bg_var * (1.0 + n_peak / float(n_bg))
+    total_var = bg_var + I.clamp_min(0.0) * adu_per_photon
     return I, total_var.sqrt(), peak, background
 
 
@@ -75,6 +79,7 @@ def integrate_predicted(
     mean: Tensor | None = None,
     pixel_valid: Tensor | None = None,
     adu_per_photon: float = 1.0,
+    n_bg: float | None = None,
 ) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor, Tensor]:
     M = pred_positions.shape[0]
     positions = pred_positions
@@ -96,6 +101,7 @@ def integrate_predicted(
         mean=mean,
         pixel_valid=pixel_valid,
         adu_per_photon=adu_per_photon,
+        n_bg=n_bg,
     )
     return positions, intensity, sigma, snapped, peak, background
 

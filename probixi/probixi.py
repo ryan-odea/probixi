@@ -504,6 +504,8 @@ class Probixi:
         self._scale_ref = ScaleReference.from_noise_model(self.noise)
         if getattr(self, "indexer", None) is not None and self.noise.gain is not None:
             self.indexer._measured_gain = self.noise.gain
+        if getattr(self, "indexer", None) is not None:
+            self.indexer._bg_annulus_pixels = self._finder.background_annulus_pixels()
         self._sync_active_noise_sources()
         return result
 
