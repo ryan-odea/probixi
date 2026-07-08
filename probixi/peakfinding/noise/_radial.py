@@ -81,4 +81,4 @@ class RotationalNoise(NoiseStats):
         return self.mean_[self.bin_idx]
 
     def var(self) -> Tensor:
-        return super().var()[self.bin_idx]
+        return super().var()[self.bin_idx] * self.pixels_per_bin[self.bin_idx]

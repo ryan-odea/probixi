@@ -63,46 +63,32 @@ def _sep_correlate(x4d: Tensor, a: Tensor, pad_mode: str = "constant") -> Tensor
     return F.conv2d(tc, kc)
 
 
-# cached box-window corner indices + per-pixel box size, keyed (H, W, radius, device, dtype)
-_BOX_IDX_CACHE: dict = {}
+# cached separable ones-kernels for the box filter, keyed (radius, device, dtype)
+_BOX_KERNEL_CACHE: dict = {}
 
 
-def _box_window_idx(H: int, W: int, radius: int, device: torch.device, dtype):
-    key = (H, W, radius, device, dtype)
-    got = _BOX_IDX_CACHE.get(key)
+def _box_kernels(radius: int, device: torch.device, dtype):
+    key = (radius, device, dtype)
+    got = _BOX_KERNEL_CACHE.get(key)
     if got is None:
-        r = torch.arange(H, device=device)
-        c = torch.arange(W, device=device)
-        r_lo = (r - radius).clamp_min(0)
-        r_hi = (r + radius + 1).clamp_max(H)
-        c_lo = (c - radius).clamp_min(0)
-        c_hi = (c + radius + 1).clamp_max(W)
-        # per-pixel in-bounds box size (edge boxes clamped), (H, W)
-        count = (r_hi - r_lo).to(dtype).view(-1, 1) * (c_hi - c_lo).to(dtype).view(
-            1, -1
-        )
-        got = (r_lo, r_hi, c_lo, c_hi, count)
-        _BOX_IDX_CACHE[key] = got
+        k = 2 * radius + 1
+        kr = torch.ones(1, 1, k, 1, device=device, dtype=dtype)
+        kc = torch.ones(1, 1, 1, k, device=device, dtype=dtype)
+        got = (kr, kc)
+        _BOX_KERNEL_CACHE[key] = got
     return got
 
 
 @torch.no_grad()
 def _box_sum(x: Tensor, radius: int) -> Tensor:
-    # (2r+1)^2 box sum via summed-area table: O(H*W) regardless of radius.
-    # edge boxes sum only in-bounds pixels (zero-pad semantics). (H,W) or (B,H,W)
+    # (2r+1)^2 box sum with zero-pad edges, as two 1D ones-convolutions
     if radius < 1:
         return x.clone()
-    H, W = x.shape[-2], x.shape[-1]
-    r_lo, r_hi, c_lo, c_hi, count = _box_window_idx(H, W, radius, x.device, x.dtype)
-    # mean-centre before cumsum, add mean*count back (float32-stable summed area)
-    mean = x.mean(dim=(-2, -1), keepdim=True)
-    xc = x - mean
-    # integral image (zeroed top/left); box = I[hi,hi]-I[lo,hi]-I[hi,lo]+I[lo,lo]
-    integral = F.pad(xc.cumsum(-2).cumsum(-1), (1, 0, 1, 0))
-    top = integral[..., r_lo, :]
-    bot = integral[..., r_hi, :]
-    box = bot[..., c_hi] - bot[..., c_lo] - top[..., c_hi] + top[..., c_lo]
-    return box + mean * count
+    xb = x.view(1, 1, *x.shape) if x.ndim == 2 else x.unsqueeze(1)
+    kr, kc = _box_kernels(radius, x.device, x.dtype)
+    t = F.conv2d(F.pad(xb, (0, 0, radius, radius)), kr)
+    t = F.conv2d(F.pad(t, (radius, radius, 0, 0)), kc)
+    return t.reshape(x.shape)
 
 
 @torch.no_grad()

@@ -12,13 +12,15 @@ from ..peakfinding.peaks import PeakResult
 from .forward import detector_to_q
 from .integrate import (
     A_INV_TO_NM_INV,
+    falloff_resolution_limit,
     integrate_predicted,
-    resolution_limit,
+    peak_resolution_limit,
     spot_enrichment,
 )
 from .lattice import cell_to_B, decompose_A
 from .predict import detector_q_max, predict_reflections
 from .refine import RefineResult, refine_multiframe_known_B
+from .rocking import estimate_mosaicity
 from .seed import sphere_seed_candidates
 
 MIN_PEAKS_TO_INDEX = 3
@@ -166,6 +168,8 @@ class IndexResult:
     enrich_p: Optional[float] = None
     scale: Optional[float] = None
     scale_sigma: Optional[float] = None
+    mosaicity: Optional[float] = None
+    profile_radius: Optional[float] = None
 
 
 @dataclass
@@ -223,24 +227,17 @@ class RefineConfig:
     lr : float
         Adam learning rate on the axis-angle perturbation.
     max_iters : int
-        Number of optimization steps (upper bound; early-stop may end sooner).
+        Number of optimization steps.
     reassign_every : int
         Re-assign peak->hkl correspondences every this many steps.
     min_indexed : int
         Minimum indexed peaks for a candidate to be accepted.
-    patience : int
-        Stop early if the batch loss has not improved (by ``rel_tol``) for this
-        many consecutive steps. Set <= 0 to disable early-stopping.
-    rel_tol : float
-        Relative improvement threshold for the patience counter.
     """
 
     lr: float = 1e-3
     max_iters: int = 200
     reassign_every: int = 10
     min_indexed: int = 6
-    patience: int = 40
-    rel_tol: float = 1e-3
 
 
 @dataclass(frozen=True)
@@ -253,32 +250,48 @@ class IntegrateConfig:
         Predict the full lattice and box-integrate it. When off, the stream lists
         only observed-and-indexed peaks. Requires the streaming path.
     partiality_threshold : float
-        Max ``|S| - 1`` (Ewald excitation error) for a reflection to count as
-        diffracting. Larger -> more (more partial) reflections predicted. When
-        ``partiality_rmsd_factor > 0`` this acts as a *floor*; the effective
-        per-crystal tolerance is the larger of this and the auto value.
-    partiality_rmsd_factor : float
-        Self-calibrate the Ewald-shell tolerance per crystal from its own peak
-        spread: ``tolerance = factor * wavelength * rmsd`` (``rmsd`` is the RMS
-        q-residual of the indexed peaks, a mosaicity+bandwidth proxy), clamped to
-        ``[partiality_threshold, partiality_max]``. ``<= 0`` disables auto and
-        uses the fixed ``partiality_threshold``.
-    partiality_max : float
-        Upper clamp for the auto per-crystal tolerance (guards runaway prediction
-        on badly-fit crystals).
+        Absolute floor on the per-reflection ``|S| - 1`` (Ewald excitation error)
+        tolerance, so a crystal with a vanishing rocking width still predicts
+        something. The tolerance itself comes from the physical rocking model
+        below.
+    mosaicity_from_data : bool
+        Estimate the per-crystal mosaicity ``eta`` (and domain-size term) from
+        the radial Ewald offset of the indexed reflections (see
+        ``rocking.estimate_mosaicity``). When off, use the ``mosaicity_deg``
+        prior for every crystal.
+    mosaicity_deg : float
+        Prior/fallback mosaic angular spread (degrees) used when
+        ``mosaicity_from_data`` is off or the per-crystal fit is ill-posed.
+    mosaicity_min_deg, mosaicity_max_deg : float
+        Physical clamps on the fitted mosaicity (degrees).
+    bandwidth : float
+        Beam bandwidth ``dlambda/lambda``. Adds the ``~|q|^2`` term to the
+        rocking width; set per source (synchrotron ~1e-4, FEL SASE ~2e-3). ``0``
+        lets the mosaicity fit absorb it.
+    predict_sigma : float
+        How many rocking half-widths ``R(|q|)`` to integrate out to; the
+        excitation-error tolerance is ``wavelength * predict_sigma * R(|q|)``.
+    domain_size_recip : float
+        Floor on the constant (domain-size) term of the rocking width (A^-1).
     box_radius : int
         Half-width (px) of the integration box.
     snap_radius : float
         A predicted spot within this many px of an observed peak is recentred on
         that peak's centroid before integration.
-    resolution_snr : float
-        Mean-I/sigma a resolution shell must clear to set the per-crystal
+    resolution_percentile : float
+        Quantile of the indexed peaks' resolution used as the per-crystal
         diffraction limit written to the stream. ``<= 0`` disables the estimate.
         The limit is only *reported*: all reflections are integrated to the
         detector edge and the merge decides resolution (Monte-Carlo style;
-        avoids per-crystal positivity bias).
-    resolution_bin : float
-        Shell width (nm^-1) for the per-crystal diffraction-limit scan.
+        avoids per-crystal positivity bias). Estimated from the observed peaks
+        (real signal), not the integrate-to-edge reflection set whose weak
+        partials would truncate a mean-I/sigma scan far short of the data.
+    resolution_snr_floor : float
+        Minimum indexed-peak intensity-to-sigma for a peak to count toward the
+        resolution quantile above. ``> 0`` drops a weak near-noise
+        high-resolution peak tail that would otherwise inflate the reported
+        limit and pull noise shells into the merge; ``<= 0`` uses every indexed
+        peak. Falls back to all peaks for a crystal with none above the floor.
     adu_per_photon : float, optional
         Detector gain used for the signal shot-noise term in sigma(I). ``None``
         auto-detects it from the measured photon-transfer gain, else the
@@ -287,12 +300,20 @@ class IntegrateConfig:
 
     enabled: bool = True
     partiality_threshold: float = 0.0005
-    partiality_rmsd_factor: float = 2.0
-    partiality_max: float = 0.01
+    mosaicity_from_data: bool = True
+    mosaicity_deg: float = 0.1
+    mosaicity_min_deg: float = 0.02
+    mosaicity_max_deg: float = 0.8
+    bandwidth: float = 0.0
+    predict_sigma: float = 1.5
+    domain_size_recip: float = 5.0e-5
     box_radius: int = 3
     snap_radius: float = 5.0
-    resolution_snr: float = 1.0
-    resolution_bin: float = 0.5
+    resolution_isigma: float = 1.0  # per-crystal drl: cut where <I/sig> falls to this
+    resolution_nbins: int = 10
+    resolution_min_refl: int = 40  # below this, fall back to the peak percentile
+    resolution_percentile: float = 0.90  # fallback estimator (sparse crystals)
+    resolution_snr_floor: float = 0.0
     adu_per_photon: Optional[float] = None
 
 
@@ -434,6 +455,7 @@ class Indexer:
         self.device = device
         self._geometry_gain = geometry.get("adu_per_photon")
         self._measured_gain: Optional[float] = None
+        self._bg_annulus_pixels: Optional[float] = None
         self._q_max: Optional[float] = None
         self.B_target = cell_to_B(target_cell, device=device, dtype=dtype)
 
@@ -541,8 +563,6 @@ class Indexer:
             max_iters=self.refine.max_iters,
             reassign_every=self.refine.reassign_every,
             min_indexed=self.refine.min_indexed,
-            patience=self.refine.patience,
-            rel_tol=self.refine.rel_tol,
             weights_per_frame=[s[4] for s in seeded] if has_weights else None,
         )
 
@@ -783,22 +803,34 @@ class Indexer:
         frame_shape = (int(excess.shape[-2]), int(excess.shape[-1]))
         if self._q_max is None:
             self._q_max = detector_q_max(self.geometry, frame_shape)
-        # |S|-1 ~ wavelength * (q-residual)
-        # scale the Ewald-shell tolerance to each crystal's own observed peak spread (mosaicity+bandwidth proxy).
-        threshold = self.integrate.partiality_threshold
-        if (
-            self.integrate.partiality_rmsd_factor > 0.0
-            and math.isfinite(result.rmsd)
-            and result.rmsd > 0.0
-        ):
-            wavelength = float(self.geometry["wavelength"])
-            auto = self.integrate.partiality_rmsd_factor * wavelength * result.rmsd
-            threshold = min(max(threshold, auto), self.integrate.partiality_max)
+
+        wavelength = float(self.geometry["wavelength"])
+        eta = math.radians(self.integrate.mosaicity_deg)
+        r_size = self.integrate.domain_size_recip
+        if self.integrate.mosaicity_from_data and bool(result.indexed_mask.any()):
+            q_pred = result.hkl[result.indexed_mask].to(excess.dtype) @ result.A.to(
+                excess.dtype
+            ).transpose(-1, -2)
+            eta, r_size = estimate_mosaicity(
+                q_pred,
+                wavelength=wavelength,
+                bandwidth=self.integrate.bandwidth,
+                prior_eta=math.radians(self.integrate.mosaicity_deg),
+                eta_min=math.radians(self.integrate.mosaicity_min_deg),
+                eta_max=math.radians(self.integrate.mosaicity_max_deg),
+                r_size_floor=self.integrate.domain_size_recip,
+            )
+        result.mosaicity = eta
         pred = predict_reflections(
             result.A.to(excess.dtype),
             self.geometry,
             q_max=self._q_max,
-            partiality_threshold=threshold,
+            eta=eta,
+            r_size=r_size,
+            bandwidth=self.integrate.bandwidth,
+            predict_sigma=self.integrate.predict_sigma,
+            partiality_threshold=self.integrate.partiality_threshold,
+            centering=self.target_cell.centering,
             frame_shape=frame_shape,
         )
         if len(pred) == 0:
@@ -814,16 +846,51 @@ class Indexer:
             mean=mean.to(excess.dtype) if mean is not None else None,
             pixel_valid=valid_mask,
             adu_per_photon=self._adu_per_photon(),
+            n_bg=self._bg_annulus_pixels,
         )
-        resolution_nm = pred.resolution * A_INV_TO_NM_INV
-        limit = resolution_limit(
-            resolution_nm,
-            intensity,
-            sigma,
-            self.integrate.resolution_snr,
-            self.integrate.resolution_bin,
+        peak_res_nm = None
+        if result.positions.numel() > 0:
+            peak_q = detector_to_q(result.positions.to(excess.dtype), self.geometry)
+            peak_res_nm = peak_q.norm(dim=-1) * A_INV_TO_NM_INV
+
+        sig_ok = torch.isfinite(sigma) & (sigma > 0)
+        drl = None
+        if bool(sig_ok.any()):
+            q_nm = pred.resolution[sig_ok].to(excess.dtype) * A_INV_TO_NM_INV
+            drl = falloff_resolution_limit(
+                q_nm,
+                intensity[sig_ok] / sigma[sig_ok],
+                target=self.integrate.resolution_isigma,
+                nbins=self.integrate.resolution_nbins,
+                min_refl=self.integrate.resolution_min_refl,
+            )
+        if drl is None:
+            if peak_res_nm is not None:
+                peak_snr = None
+                if result.intensities is not None and result.sigmas is not None:
+                    peak_snr = result.intensities / result.sigmas
+                drl = peak_resolution_limit(
+                    peak_res_nm,
+                    self.integrate.resolution_percentile,
+                    snr=peak_snr,
+                    snr_floor=self.integrate.resolution_snr_floor,
+                )
+            else:
+                drl = float("inf")
+        result.diffraction_limit = drl
+        # profile_radius: the same rocking model at a representative |q| (the
+        # resolution limit, else the median indexed peak), for the stream/xsphere.
+        if drl is not None and math.isfinite(drl) and drl > 0.0:
+            q_rep = drl / A_INV_TO_NM_INV
+        elif peak_res_nm is not None:
+            q_rep = float(peak_res_nm.median()) / A_INV_TO_NM_INV
+        else:
+            q_rep = 0.0
+        result.profile_radius = (
+            r_size
+            + 0.5 * eta * q_rep
+            + 0.5 * wavelength * self.integrate.bandwidth * q_rep * q_rep
         )
-        result.diffraction_limit = limit
         keep = torch.isfinite(sigma) & (sigma > 0)
         result.predicted_hkl = pred.hkl[keep]
         result.predicted_positions = positions[keep]

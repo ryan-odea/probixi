@@ -100,4 +100,5 @@ class PanelNoise(NoiseStats):
     def var(self) -> Tensor:
         safe = self.panel_map.clamp_min(0)
         z = torch.zeros((), dtype=self.M2_.dtype, device=self.M2_.device)
-        return torch.where(self.valid_mask, super().var()[safe], z)
+        per_pixel = super().var()[safe] * self.pixels_per_panel[safe]
+        return torch.where(self.valid_mask, per_pixel, z)

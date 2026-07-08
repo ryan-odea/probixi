@@ -342,6 +342,16 @@ class PeakFinder:
         self._mf_bank_den: Optional[list[Tensor]] = None
         self._annulus_count: Optional[Tensor] = None
 
+    def background_annulus_pixels(self) -> Optional[float]:
+        # Nominal pixel count of the local-background annulus (outer box minus
+        # inner box), used to inflate integrated sigma(I) by 1 + n_peak/n_bg for
+        # the shared background subtraction. None when no local background is used.
+        if not self.local_background:
+            return None
+        outer = 2 * self.local_outer_radius + 1
+        inner = 2 * self.local_inner_radius + 1
+        return float(outer * outer - inner * inner)
+
     def _pred(self) -> dict[str, Tensor]:
         # prediction cache keyed on model updates
         key = self.noise._n_host
