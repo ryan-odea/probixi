@@ -6,6 +6,7 @@ import torch
 from torch import Tensor
 
 from .forward import detector_to_q, q_to_detector
+from .rocking import rocking_radius
 
 # Given orientation A, a lattice point diffracts when its scattered
 # vector S = lambda*q + zhat is ~unit (Ewald condition). Mosaicity/bandwidth
@@ -40,6 +41,32 @@ class PredictedReflections:
         return int(self.hkl.shape[0])
 
 
+def _centering_mask(hkl: Tensor, centering: str | None) -> Tensor:
+    n = hkl.shape[0]
+    keep_all = torch.ones(n, dtype=torch.bool, device=hkl.device)
+    if not centering:
+        return keep_all
+    c = centering.strip().upper()[:1]
+    h = hkl[:, 0].round().to(torch.long)
+    k = hkl[:, 1].round().to(torch.long)
+    l = hkl[:, 2].round().to(torch.long)
+    if c == "A":
+        return (k + l) % 2 == 0
+    if c == "B":
+        return (h + l) % 2 == 0
+    if c == "C":
+        return (h + k) % 2 == 0
+    if c == "I":
+        return (h + k + l) % 2 == 0
+    if c == "F":
+        return ((h + k) % 2 == 0) & ((h + l) % 2 == 0) & ((k + l) % 2 == 0)
+    if c == "R":  # rhombohedral on hexagonal axes, obverse setting
+        return (-h + k + l) % 3 == 0
+    if c == "H":  # hexagonal H-centered (triple) cell
+        return (h - k) % 3 == 0
+    return keep_all  # "P" or unknown symbol: no absences
+
+
 def _enumerate_hkls_within(
     A: Tensor, q_max: float, dtype: torch.dtype, device
 ) -> Tensor:
@@ -64,7 +91,13 @@ def predict_reflections(
     A: Tensor,
     geometry: dict,
     q_max: float,
+    *,
+    eta: float | None = None,
+    r_size: float = 0.0,
+    bandwidth: float = 0.0,
+    predict_sigma: float = 1.5,
     partiality_threshold: float = 0.0025,
+    centering: str | None = None,
     frame_shape: tuple[int, int] | None = None,
 ) -> PredictedReflections:
     """Predict the reflections that diffract on one frame for orientation ``A``.
@@ -77,9 +110,24 @@ def predict_reflections(
         Detector geometry (``beam_center``, ``clen``, ``pixel_size``, ``wavelength``).
     q_max : float
         Resolution limit (A^-1); reflections with ``|q| > q_max`` are dropped.
+    eta : float, optional
+        Mosaic angular spread (rad). When given, the excitation-error tolerance
+        is the physical rocking shell ``|eps| < wavelength * predict_sigma *
+        R(|q|)`` with ``R`` from :func:`rocking_radius` (so the shell grows with
+        resolution instead of being flat). When ``None`` the fixed
+        ``partiality_threshold`` is used.
+    r_size, bandwidth : float, optional
+        Domain-size (constant, A^-1) and bandwidth (``dlambda/lambda``) terms of
+        the rocking model; used only when ``eta`` is given.
+    predict_sigma : float, optional
+        How many rocking half-widths to integrate out to.
     partiality_threshold : float, optional
-        Max ``|S| - 1`` (excitation error) for a reflection to count as
-        diffracting. Wider -> more (more partial) reflections.
+        Max ``|S| - 1`` (excitation error). With ``eta`` it is an absolute floor
+        on the per-reflection tolerance
+    centering : str, optional
+        Bravais centering symbol (``P``/``A``/``B``/``C``/``I``/``F``/``R``).
+        Reflections forbidden by the centering condition are dropped so absent
+        positions aren't predicted. ``None`` or ``P`` applies no condition.
     frame_shape : tuple of int, optional
         (rows, cols); predictions off the detector are dropped when given.
 
@@ -94,6 +142,8 @@ def predict_reflections(
     wavelength = float(geometry["wavelength"])
 
     hkl = _enumerate_hkls_within(A, q_max, dtype, device)
+    if centering:
+        hkl = hkl[_centering_mask(hkl, centering)]
     q = hkl @ A.transpose(-1, -2)  # (M, 3) = (A @ hkl^T)^T
     qn = torch.linalg.vector_norm(q, dim=-1)
 
@@ -104,7 +154,14 @@ def predict_reflections(
     S_norm = torch.sqrt(S[:, 0] ** 2 + S[:, 1] ** 2 + Sz * Sz)
     eps = S_norm - 1.0
 
-    keep = (qn <= q_max) & (Sz > 0) & (eps.abs() < partiality_threshold)
+    if eta is not None:
+        tol = wavelength * predict_sigma * rocking_radius(
+            qn, eta, r_size, bandwidth, wavelength
+        )
+        tol = tol.clamp_min(partiality_threshold)
+        keep = (qn <= q_max) & (Sz > 0) & (eps.abs() < tol)
+    else:
+        keep = (qn <= q_max) & (Sz > 0) & (eps.abs() < partiality_threshold)
     hkl, q, qn, eps = hkl[keep], q[keep], qn[keep], eps[keep]
     if hkl.shape[0] == 0:
         empty = q.new_empty(0)

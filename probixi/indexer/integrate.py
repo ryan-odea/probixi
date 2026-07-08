@@ -101,15 +101,62 @@ def integrate_predicted(
 
 
 @torch.no_grad()
-def peak_resolution_limit(peak_resolution: Tensor, percentile: float) -> float:
+def peak_resolution_limit(
+    peak_resolution: Tensor,
+    percentile: float,
+    snr: Tensor | None = None,
+    snr_floor: float = 0.0,
+) -> float:
     """Per-crystal diffraction limit from the indexed peaks' resolution.
     """
     if percentile <= 0.0 or peak_resolution.numel() == 0:
         return float("inf")
+    vals = peak_resolution
+    if snr is not None and snr_floor > 0.0:
+        keep = torch.isfinite(snr) & (snr >= snr_floor)
+        if bool(keep.any()):
+            vals = peak_resolution[keep]
     q = min(percentile, 1.0)
-    vals = torch.sort(peak_resolution).values
+    vals = torch.sort(vals).values
     idx = min(int(vals.numel()) - 1, int(q * int(vals.numel())))
     return float(vals[idx])
+
+
+@torch.no_grad()
+def falloff_resolution_limit(
+    q_nm: Tensor,
+    isig: Tensor,
+    target: float = 1.0,
+    nbins: int = 10,
+    min_refl: int = 40,
+) -> float | None:
+    """Per-crystal diffraction limit (nm^-1) from the I/sigma-vs-resolution falloff.
+    """
+    n = int(q_nm.shape[0])
+    if n < min_refl:
+        return None
+    order = torch.argsort(q_nm)
+    qs = q_nm[order].tolist()
+    iss = isig[order].tolist()
+    bq: list[float] = []
+    bm: list[float] = []
+    for i in range(nbins):
+        lo = (i * n) // nbins
+        hi = ((i + 1) * n) // nbins
+        if hi <= lo:
+            continue
+        seg = qs[lo:hi]  # already sorted by |q|
+        bq.append(seg[len(seg) // 2])  # shell median |q|
+        bm.append(sum(iss[lo:hi]) / (hi - lo))  # shell mean I/sigma
+    if not bq:
+        return None
+    if bm[0] < target:  # even the innermost shell is at/below noise
+        return bq[0]
+    for i in range(1, len(bm)):
+        if bm[i] < target:  # interpolate the crossing between shell i-1 and i
+            f = (bm[i - 1] - target) / (bm[i - 1] - bm[i])
+            return bq[i - 1] + f * (bq[i] - bq[i - 1])
+    return qs[-1]  # data-limited: never crosses target
 
 
 @torch.no_grad()

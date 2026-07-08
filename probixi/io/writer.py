@@ -31,6 +31,14 @@ def _profile_radius_nm_inv(rmsd_a_inv: float) -> float:
     return min(max(r, PROFILE_RADIUS_MIN_NM_INV), PROFILE_RADIUS_MAX_NM_INV)
 
 
+def _profile_radius(result) -> float:
+    r = getattr(result, "profile_radius", None)
+    if r is not None and math.isfinite(r) and r > 0.0:
+        r_nm = r * A_INV_TO_NM_INV
+        return min(max(r_nm, PROFILE_RADIUS_MIN_NM_INV), PROFILE_RADIUS_MAX_NM_INV)
+    return _profile_radius_nm_inv(result.rmsd)
+
+
 class _StreamWriter:
     """Shared CrystFEL ``.stream`` writing machinery.
 
@@ -329,11 +337,13 @@ class DataOffloader(_StreamWriter):
             f"lattice_type = {cell.lattice_type or 'triclinic'}",
             f"centering = {cell.centering or 'P'}",
             f"unique_axis = {cell.unique_axis or '?'}",
-            f"profile_radius = {_profile_radius_nm_inv(result.rmsd):.5f} nm^-1",
+            f"profile_radius = {_profile_radius(result):.5f} nm^-1",
             # orientation-only refinement; detector position is never refined
             "predict_refine/det_shift x = 0.000000 y = 0.000000 mm",
             f"probixi/rmsd = {result.rmsd:.6f} A^-1",
         ]
+        if result.mosaicity is not None:
+            lines.append(f"probixi/mosaicity = {math.degrees(result.mosaicity):.4f} deg")
         if result.scale is not None:
             lines.append(
                 f"probixi/scale = {result.scale:.5f} {result.scale_sigma or 0.0:.5f}"
