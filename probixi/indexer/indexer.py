@@ -227,24 +227,17 @@ class RefineConfig:
     lr : float
         Adam learning rate on the axis-angle perturbation.
     max_iters : int
-        Number of optimization steps (upper bound; early-stop may end sooner).
+        Number of optimization steps.
     reassign_every : int
         Re-assign peak->hkl correspondences every this many steps.
     min_indexed : int
         Minimum indexed peaks for a candidate to be accepted.
-    patience : int
-        Stop early if the batch loss has not improved (by ``rel_tol``) for this
-        many consecutive steps. Set <= 0 to disable early-stopping.
-    rel_tol : float
-        Relative improvement threshold for the patience counter.
     """
 
     lr: float = 1e-3
     max_iters: int = 200
     reassign_every: int = 10
     min_indexed: int = 6
-    patience: int = 40
-    rel_tol: float = 1e-3
 
 
 @dataclass(frozen=True)
@@ -569,8 +562,6 @@ class Indexer:
             max_iters=self.refine.max_iters,
             reassign_every=self.refine.reassign_every,
             min_indexed=self.refine.min_indexed,
-            patience=self.refine.patience,
-            rel_tol=self.refine.rel_tol,
             weights_per_frame=[s[4] for s in seeded] if has_weights else None,
         )
 

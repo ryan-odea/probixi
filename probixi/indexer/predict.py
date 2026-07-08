@@ -70,10 +70,8 @@ def _centering_mask(hkl: Tensor, centering: str | None) -> Tensor:
 def _enumerate_hkls_within(
     A: Tensor, q_max: float, dtype: torch.dtype, device
 ) -> Tensor:
-    # All integer (h,k,l) != 0 that could fall inside |q| <= q_max; per-axis
-    # bound h_i <= q_max / |A[:, i]| makes the box safe.
-    col_norms = torch.linalg.vector_norm(A, dim=0).clamp_min(1e-12)
-    maxima = torch.ceil(q_max / col_norms).to(torch.long).tolist()
+    row_norms = torch.linalg.vector_norm(torch.linalg.inv(A), dim=1)
+    maxima = torch.ceil(q_max * row_norms).to(torch.long).tolist()
 
     def _rng(m: int) -> Tensor:
         m = max(int(m), 1)

@@ -104,8 +104,6 @@ def refine_multiframe_known_B(
     max_iters: int = 200,
     reassign_every: int = 10,
     min_indexed: int = 6,
-    patience: int = 40,
-    rel_tol: float = 1e-3,
     weights_per_frame: Optional[list[Tensor]] = None,
 ) -> list[RefineResult]:
     # Pad (A_init, q_obs) to (F, K_max, ...) / (F, N_max, 3) and run one Adam over
@@ -160,9 +158,6 @@ def refine_multiframe_known_B(
     hkl_dt = hkl.to(dtype)
     cand_mask_f = cand_mask.to(dtype)
 
-    best_loss = float("inf")
-    stale = 0
-
     for step in range(max_iters):
         reassigned = step % reassign_every == 0 and step > 0
         if reassigned:
@@ -192,16 +187,6 @@ def refine_multiframe_known_B(
         loss = per_loss.sum()
         loss_val = float(loss.detach().item())
         history.append(loss_val)
-
-        if reassigned:
-            best_loss, stale = loss_val, 0
-        elif patience > 0:
-            if loss_val < best_loss * (1.0 - rel_tol):
-                best_loss, stale = loss_val, 0
-            else:
-                stale += 1
-                if stale >= patience:
-                    break
 
         optim.zero_grad(set_to_none=True)
         loss.backward()
