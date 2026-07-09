@@ -16,6 +16,7 @@ from .indexer import (
     RefineConfig,
     SeedConfig,
 )
+from .indexer.forward import detector_to_q
 from .io import (
     CellParams,
     DataLoader,
@@ -116,6 +117,7 @@ class Probixi:
     _frame_scales: dict = field(default_factory=dict, init=False, repr=False)
     _h5_mask: Optional[Tensor] = field(default=None, init=False, repr=False)
     _h5_mask_loaded: bool = field(default=False, init=False, repr=False)
+    _beamstop_qmin: Optional[float] = field(default=None, init=False, repr=False)
 
     def __post_init__(self) -> None:
         self.loader = DataLoader(
@@ -355,6 +357,100 @@ class Probixi:
             self._h5_mask = torch.as_tensor(good, dtype=torch.bool)
         return self._h5_mask
 
+    def _qmap(self, frame_size: tuple[int, int], device=None) -> Optional[Tensor]:
+        # Per-pixel |q| (A^-1) from the detector geometry
+        geom = self.loader.metadata.geometry
+        if geom is None:
+            return None
+        rr = torch.arange(frame_size[0], dtype=torch.float32, device=device).view(-1, 1)
+        cc = torch.arange(frame_size[1], dtype=torch.float32, device=device).view(1, -1)
+        pos = torch.stack(
+            [rr.expand(frame_size).reshape(-1), cc.expand(frame_size).reshape(-1)],
+            dim=-1,
+        )
+        return torch.linalg.vector_norm(
+            detector_to_q(pos, geom.to_dict(), dtype=torch.float32), dim=-1
+        ).reshape(frame_size)
+
+    def _infer_beamstop_qmin(
+        self,
+        seed: list,
+        max_frames: int = 200,
+        n_bins: int = 40,
+        spike_ratio: float = 50.0,
+        edge_fraction: float = 0.1,
+        min_fraction: float = 0.05,
+        min_peaks: int = 200,
+    ) -> Optional[float]:
+        # Learn a beam-center exclusion |q|_min (A^-1) from the calibrated finder
+        if self._noise is None:
+            return None
+        frame_size = tuple(self._noise.valid_mask.shape)
+        qmap = self._qmap(frame_size, device=self._noise.valid_mask.device)
+        if qmap is None:
+            return None
+        rows, cols = frame_size
+        qs: list[Tensor] = []
+        for res in self.peak_stream(
+            seed[:max_frames], update_noise=False, estimate_scale=False
+        ):
+            ks = res.kept_stats
+            if ks is None or ks.row_centroid.numel() == 0:
+                continue
+            r = ks.row_centroid.round().long().clamp(0, rows - 1)
+            c = ks.col_centroid.round().long().clamp(0, cols - 1)
+            qs.append(qmap[r, c])
+        if not qs:
+            return None
+        allq = torch.cat(qs).float()
+        if allq.numel() < min_peaks:
+            return None
+        qmax = float(qmap.max())
+        if qmax <= 0:
+            return None
+        edges = torch.linspace(0.0, qmax, n_bins + 1)
+        ph = torch.histc(allq, bins=n_bins, min=0.0, max=qmax)
+        pix = torch.histc(
+            qmap[self._noise.valid_mask].float(), bins=n_bins, min=0.0, max=qmax
+        )
+        density = ph / pix.clamp_min(1.0)
+        pos_d = density[density > 0]
+        if pos_d.numel() == 0:
+            return None
+        med = float(pos_d.median())
+        inner = density[: max(1, n_bins // 4)]
+        ref = float(inner.max())
+        if med <= 0 or ref < spike_ratio * med:
+            return None
+        amax = int(inner.argmax())
+        thr = edge_fraction * ref
+        lo = hi = amax
+        while lo - 1 >= 0 and float(density[lo - 1]) >= thr:
+            lo -= 1
+        while hi + 1 < n_bins and float(density[hi + 1]) >= thr:
+            hi += 1
+        q_min = float(edges[hi + 1])
+        if q_min <= 0.0:
+            return None
+        if float((allq < q_min).sum()) / allq.numel() < min_fraction:
+            return None
+        return q_min
+
+    def _apply_beamstop_qmin(self, q_min: float) -> None:
+        # AND a |q| >= q_min beam-center exclusion into the noise model's masks so
+        # detection and the background sources skip the beamstop region.
+        if self._noise is None or q_min <= 0:
+            return
+        qmap = self._qmap(
+            tuple(self._noise.valid_mask.shape), device=self._noise.valid_mask.device
+        )
+        if qmap is None:
+            return
+        keep = (qmap >= q_min).to(self._noise.valid_mask.device)
+        self._noise.static_mask &= keep
+        self._noise.valid_mask &= keep
+        self._noise._mask_version += 1
+
     def _update_noise(self, item: Tensor) -> None:
         if item.ndim == 3:
             for frame in item:
@@ -506,8 +602,16 @@ class Probixi:
             self.indexer._measured_gain = self.noise.gain
         if getattr(self, "indexer", None) is not None:
             self.indexer._bg_annulus_pixels = self._finder.background_annulus_pixels()
+        self._beamstop_qmin = self._infer_beamstop_qmin(seed)
+        if self._beamstop_qmin:
+            self._apply_beamstop_qmin(self._beamstop_qmin)
         self._sync_active_noise_sources()
         return result
+
+    @property
+    def beamstop_min_res(self) -> Optional[float]:
+        """Effective low-resolution cutoff (A) excluding the beam center, or None."""
+        return 1.0 / self._beamstop_qmin if self._beamstop_qmin else None
 
     def _sync_active_noise_sources(self) -> None:
         finder = getattr(self, "_finder", None)

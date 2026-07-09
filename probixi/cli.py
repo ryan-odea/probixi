@@ -312,6 +312,9 @@ def main(
         )
         if tc is not None:
             msg += f" mf_threshold={tc.threshold:.2f}"
+        bmr = probixi.beamstop_min_res
+        if bmr is not None:
+            msg += f" beamstop_min_res={bmr:.1f}A (learned)"
         click.echo(msg)
 
     if render:

@@ -444,6 +444,7 @@ def calibrate_threshold(
     # correction so the meta distribution matches what the finder sees at run time.
     t_maps: list[Tensor] = []
     t_max_per_frame: list[float] = []
+    mask_cpu = mask.cpu()
     for f in frames:
         f = f.to(dtype=dtype, device=device)
         lm, lv = local_mean_var(f - mu, mask, local_inner_radius, local_outer_radius)
@@ -460,20 +461,20 @@ def calibrate_threshold(
             t = matched_filter_z(z, k, mask)
             T = t if T is None else torch.maximum(T, t)
         assert T is not None
-        t_maps.append(T)
         t_max_per_frame.append(float(T[mask].max()))
+        t_maps.append(T.cpu())
 
     # Pool body pixels across frames (subsampled) for the empirical-null fit.
     body_pieces: list[Tensor] = []
     per_frame_cap = max(1, body_subsample // len(t_maps))
     gen = torch.Generator(device="cpu").manual_seed(rng_seed)
-    for T in t_maps:
-        flat = T[mask]
+    for T in t_maps:  # T is on the host
+        flat = T[mask_cpu]
         if flat.numel() > per_frame_cap:
             idx = torch.randperm(flat.numel(), generator=gen)[:per_frame_cap]
-            body_pieces.append(flat[idx.to(flat.device)].cpu())
+            body_pieces.append(flat[idx])
         else:
-            body_pieces.append(flat.cpu())
+            body_pieces.append(flat)
     t_body = torch.cat(body_pieces)
     mu0, sigma0 = _empirical_null_central_matching(t_body)
 
@@ -492,18 +493,14 @@ def calibrate_threshold(
     tgrid = torch.linspace(
         threshold_grid_min, threshold_grid_max, n_steps, device=device, dtype=dtype
     )
-    # precompute local-max indicator per quiet frame once
-    quiet_T = [t_maps[i] for i in quiet_idx]
-    is_max_per_frame: list[Tensor] = []
-    for T in quiet_T:
+    thr_list = tgrid.tolist()
+    counts_per_thr: list[list[int]] = [[] for _ in thr_list]
+    for i in quiet_idx:
+        T = t_maps[i].to(device)
         Tb = T.unsqueeze(0).unsqueeze(0)
         pooled = F.max_pool2d(Tb, kernel_size=3, stride=1, padding=1)
-        is_max_per_frame.append(((Tb.squeeze() >= pooled.squeeze()) & mask))
-
-    median_counts: list[float] = []
-    for thr in tgrid.tolist():
-        per_frame_counts: list[int] = []
-        for T, is_max in zip(quiet_T, is_max_per_frame):
+        is_max = (Tb.squeeze() >= pooled.squeeze()) & mask
+        for j, thr in enumerate(thr_list):
             above = (T > thr) & mask
             peaks = is_max & above
             if size_min > 1:
@@ -512,10 +509,10 @@ def calibrate_threshold(
                     9.0 * F.avg_pool2d(Ab, kernel_size=3, stride=1, padding=1).squeeze()
                 )
                 peaks = peaks & (local_size >= float(size_min))
-            per_frame_counts.append(int(peaks.sum()))
-        median_counts.append(
-            float(torch.tensor(per_frame_counts, dtype=torch.float32).median())
-        )
+            counts_per_thr[j].append(int(peaks.sum()))
+    median_counts: list[float] = [
+        float(torch.tensor(c, dtype=torch.float32).median()) for c in counts_per_thr
+    ]
     counts_t = torch.tensor(median_counts)
 
     ok = counts_t <= float(target_noise_peaks)
