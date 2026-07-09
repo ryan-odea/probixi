@@ -4,6 +4,7 @@ import os
 import queue
 import struct
 import threading
+import warnings
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Iterator, Optional, Sequence, Union
@@ -86,17 +87,34 @@ class DataLoader:
         files: dict[str, H5Info] = {}
         frame_size: Optional[tuple] = None
         total_frames = 0
+        skipped = 0
         for path in self._read_list():
-            info = scan_h5(path, geometry)
+            try:
+                info = scan_h5(path, geometry)
+            except Exception as exc:
+                warnings.warn(f"skipping unreadable file {path!r}: {exc}")
+                skipped += 1
+                continue
             if frame_size is None:
                 frame_size = info.frame_shape
             elif frame_size != info.frame_shape:
-                raise ValueError(
-                    f"Inconsistent frame size in {path}: "
-                    f"{info.frame_shape} != {frame_size}"
+                warnings.warn(
+                    f"skipping {path!r}: frame size {info.frame_shape} "
+                    f"!= expected {frame_size}"
                 )
+                skipped += 1
+                continue
             total_frames += info.n_frames
             files[info.filename] = info
+        if skipped:
+            warnings.warn(
+                f"skipped {skipped} unreadable file(s); "
+                f"{len(files)} readable file(s) remain"
+            )
+        if not files:
+            raise ValueError(
+                f"no readable files in {self.list_file} ({skipped} skipped)"
+            )
         return files, frame_size, total_frames
 
     def _parse_geometry(self) -> Optional[Geometry]:
