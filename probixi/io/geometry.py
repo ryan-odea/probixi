@@ -203,6 +203,9 @@ def read_geometry(path: PathLike) -> Geometry:
     distance = parameters.get("clen")
     if isinstance(distance, str):
         distance = None
+    elif isinstance(distance, (int, float)) and not isinstance(distance, bool):
+        # CrystFEL detector distance is clen + coffset
+        distance = float(distance) + _mean_coffset(panels, parameters)
 
     dim_map = _collect_dims(parameters)
     data_layout = _build_data_layout(parameters.get("data"), dim_map)
@@ -412,9 +415,9 @@ def _dataset_mean(f: h5py.File, path: str) -> Optional[float]:
     return float(finite.mean())
 
 
-def _mean_coffset(geometry: Geometry) -> float:
-    values = [float(p["coffset"]) for p in geometry.panels.values() if "coffset" in p]
-    top = geometry.parameters.get("coffset")
+def _mean_coffset(panels: dict, parameters: dict) -> float:
+    values = [float(p["coffset"]) for p in panels.values() if "coffset" in p]
+    top = parameters.get("coffset")
     if not values and isinstance(top, (int, float)):
         return float(top)
     return sum(values) / len(values) if values else 0.0
@@ -425,7 +428,7 @@ def _resolve_clen(f: h5py.File, path: str, geometry: Geometry) -> Optional[float
     if raw is None:
         return None
     metres = raw * 1e-3 if abs(raw) > _CLEN_MM_THRESHOLD_M else raw
-    return metres + _mean_coffset(geometry)
+    return metres + _mean_coffset(geometry.panels, geometry.parameters)
 
 
 def _resolve_wavelength(f: h5py.File, path: str) -> Optional[float]:

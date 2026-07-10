@@ -387,7 +387,10 @@ def calibrate_threshold(
     target_noise_peaks : float
         Target median blobs per quiet frame above the chosen threshold.
     quiet_quantile : float
-        Fraction of seed frames classified signal-free by max(T).
+        Fallback fraction of lowest-max(T) frames used as the quiet set when the
+        null-based absolute cut (mu0 + sigma0*sqrt(2 ln N)) yields too few (< 4)
+        quiet frames. The primary quiet/hit split is now that absolute cut, so the
+        quiet fraction adapts to the hit rate.
     mf_scales : tuple[float, ...]
         Matched-filter kernel scales (Bragg-spot core sigma range).
     local_inner_radius, local_outer_radius : int
@@ -479,12 +482,13 @@ def calibrate_threshold(
     mu0, sigma0 = _empirical_null_central_matching(t_body)
 
     tmax_t = torch.tensor(t_max_per_frame)
-    quiet_max_T = float(torch.quantile(tmax_t, quiet_quantile))
+    n_valid = int(mask.sum())
+    z_extreme = math.sqrt(2.0 * math.log(max(n_valid, 2)))
+    quiet_max_T = mu0 + sigma0 * z_extreme
     quiet_idx = [i for i, m in enumerate(t_max_per_frame) if m <= quiet_max_T]
     if len(quiet_idx) < 4:
-        # too few quiet frames; fall back to the bottom half by max(T)
         order = torch.argsort(tmax_t).tolist()
-        quiet_idx = order[: max(4, len(frames) // 2)]
+        quiet_idx = order[: max(4, int(round(quiet_quantile * len(frames))))]
         quiet_max_T = float(tmax_t[quiet_idx[-1]])
 
     n_steps = (

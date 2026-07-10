@@ -46,18 +46,47 @@ def integrate_boxes(
     flat = rr.clamp(0, H - 1) * W + cc.clamp(0, W - 1)
     if pixel_valid is not None:
         valid = valid & pixel_valid.reshape(-1)[flat]
+    # Assign each pixel to its nearest predicted centre
+    # so shared pixels are not double-counted across close spots.
+    if M > 1:
+        posf = positions.to(excess.dtype)
+        d_r = rr.to(excess.dtype) - posf[:, 0:1]
+        d_c = cc.to(excess.dtype) - posf[:, 1:2]
+        dist2 = d_r * d_r + d_c * d_c
+        p_flat = flat.reshape(-1)
+        d_flat = torch.where(
+            valid, dist2, torch.full_like(dist2, float("inf"))
+        ).reshape(-1)
+        npix = H * W
+        min_d = torch.full((npix,), float("inf"), device=device, dtype=dist2.dtype)
+        min_d.scatter_reduce_(0, p_flat, d_flat, reduce="amin", include_self=True)
+        win = valid & (dist2 <= min_d[flat] + 1e-6)
+        # tie-break by lowest centre index so every pixel has exactly one owner
+        cid = torch.arange(M, device=device).unsqueeze(1).expand_as(dist2)
+        min_cid = torch.full((npix,), M, device=device, dtype=torch.long)
+        min_cid.scatter_reduce_(
+            0,
+            p_flat,
+            torch.where(win, cid, torch.full_like(cid, M)).reshape(-1),
+            reduce="amin",
+            include_self=True,
+        )
+        own = win & (cid == min_cid[flat])
+    else:
+        own = valid
+
     e = excess.reshape(-1)[flat]
     v = var.reshape(-1)[flat]
     zero = torch.zeros_like(e)
-    I = torch.where(valid, e, zero).sum(dim=1)  # noqa: E741
-    var_sum = torch.where(valid, v, zero).sum(dim=1)
-    n_peak = valid.to(excess.dtype).sum(dim=1)
-    peak = torch.where(valid, e, torch.full_like(e, float("-inf"))).amax(dim=1)
+    I = torch.where(own, e, zero).sum(dim=1)  # noqa: E741
+    var_sum = torch.where(own, v, zero).sum(dim=1)
+    n_peak = own.to(excess.dtype).sum(dim=1)
+    peak = torch.where(own, e, torch.full_like(e, float("-inf"))).amax(dim=1)
     # boxes with no valid pixel
     peak = torch.where(torch.isfinite(peak), peak, torch.zeros_like(peak))
     if mean is not None:
         m = mean.reshape(-1)[flat]
-        bg_sum = torch.where(valid, m, zero).sum(dim=1)
+        bg_sum = torch.where(own, m, zero).sum(dim=1)
         background = bg_sum / n_peak.clamp_min(1.0)
     else:
         background = torch.zeros(M, dtype=excess.dtype, device=device)
