@@ -2,6 +2,7 @@
 from .assemble import build_physical_assembler, read_mask
 from .cell import CellParams, read_crystfel_cell
 from .cxi import PeakOffloader
+from .db import DuckDBOffloader, frame_id, is_duckdb_path
 from .frames import DataLoader, iter_frames
 from .geometry import BadRegion, Geometry, read_geometry
 from .metadata import H5Info, Metadata, scan_h5
@@ -24,4 +25,7 @@ __all__ = [
     "scan_h5",
     "DataOffloader",
     "PeakOffloader",
+    "DuckDBOffloader",
+    "frame_id",
+    "is_duckdb_path",
 ]

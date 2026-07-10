@@ -391,6 +391,55 @@ class IndexStream:
             n += 1
         return n
 
+    def to_db(
+        self,
+        path,
+        *,
+        geometry: dict,
+        cell: Optional[CellParams] = None,
+        geometry_file=None,
+        files: Optional[dict] = None,
+        panel: str = "0",
+    ) -> int:
+        """Drain the stream into a DuckDB database at ``path``.
+
+        Convenience terminal wrapping
+        :class:`~probixi.io.db.DuckDBOffloader`: opens the database, writes the
+        ``geometry``/``panels``/``cell`` metadata tables, and streams every
+        result into the ``frames``/``reflections``/``peaks`` tables.
+
+        Parameters
+        ----------
+        path : str or Path
+            Destination ``.duckdb`` file (overwritten if present).
+        geometry : dict
+            Indexer geometry dict (``beam_center``, ``clen``, ...).
+        cell : CellParams, optional
+            Target unit cell, written to the ``cell`` table.
+        geometry_file : str or Path, optional
+            Geometry file whose text is stored verbatim.
+        files : dict, optional
+            Loader file map; enables the non-indexed frame backfill.
+        panel : str, default "0"
+            Fallback panel name for out-of-panel peaks/reflections.
+
+        Returns
+        -------
+        int
+            Number of indexed frames written.
+        """
+        from ..io.db import DuckDBOffloader
+
+        with DuckDBOffloader(
+            path,
+            geometry=geometry,
+            cell=cell,
+            geometry_file=geometry_file,
+            files=files,
+            panel=panel,
+        ) as off:
+            return self.to_stream(off)
+
     def collect(self) -> list[IndexResult]:
         return list(self._source)
 

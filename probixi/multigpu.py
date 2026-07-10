@@ -9,7 +9,7 @@ from typing import Optional, Sequence, Union
 import torch
 import torch.multiprocessing as mp
 
-from .io import DataLoader, DataOffloader
+from .io import DataLoader, DataOffloader, DuckDBOffloader, is_duckdb_path
 from .probixi import Probixi
 
 PathLike = Union[str, Path]
@@ -17,12 +17,15 @@ PathLike = Union[str, Path]
 _CHUNK_MARKER = "----- Begin chunk -----"
 _SERIAL_PREFIX = "Image serial number:"
 _STREAM_VERSION_PREFIX = "CrystFEL stream format"
+_DB_DATA_TABLES = ("frames", "reflections", "peaks")
+_DB_META_TABLES = ("geometry", "panels", "cell")
 
 __all__ = [
     "run_data_parallel",
     "run_block",
     "run_block_from_env",
     "merge_streams",
+    "merge_dbs",
     "resolve_devices",
     "block_bounds",
     "BlockConfig",
@@ -109,6 +112,46 @@ def merge_streams(part_paths: Sequence[PathLike], output_path: PathLike) -> int:
     return serial
 
 
+def merge_dbs(part_paths: Sequence[PathLike], output_path: PathLike) -> int:
+    """Union per-rank DuckDB parts into one database."""
+    import duckdb
+
+    from .io import db as _db
+
+    out = Path(output_path)
+    out.unlink(missing_ok=True)
+    conn = duckdb.connect(str(out))
+    meta_done = False
+    try:
+        conn.execute(_db._SCHEMA)
+        for i, p in enumerate(part_paths):
+            part = Path(p)
+            if not part.exists() or part.stat().st_size == 0:
+                continue
+            alias = f"part{i}"
+            escaped = str(part).replace("'", "''")
+            try:
+                conn.execute(f"ATTACH '{escaped}' AS {alias} (READ_ONLY)")
+            except duckdb.Error:
+                continue  # skip a crashed/corrupt worker's part
+            try:
+                if not meta_done:
+                    for tbl in _DB_META_TABLES:
+                        conn.execute(f"INSERT INTO {tbl} SELECT * FROM {alias}.{tbl}")
+                    meta_done = True
+                for tbl in _DB_DATA_TABLES:
+                    conn.execute(f"INSERT INTO {tbl} SELECT * FROM {alias}.{tbl}")
+            finally:
+                conn.execute(f"DETACH {alias}")
+        conn.execute(_db._INDEXES)
+        (n_indexed,) = conn.execute(
+            "SELECT COUNT(*) FROM frames WHERE indexed"
+        ).fetchone()
+    finally:
+        conn.close()
+    return int(n_indexed)
+
+
 # worker
 @dataclass
 class BlockConfig:
@@ -127,10 +170,17 @@ class BlockConfig:
     enrich_alpha: float = 1e-3
     threads: Optional[int] = None
     quiet: bool = False
+    db: bool = False  # write per-rank DuckDB parts instead of .stream parts
 
 
 def _part_path(output: PathLike, rank: int) -> Path:
     return Path(f"{output}.rank{rank}")
+
+
+def _remove_part(part: PathLike) -> None:
+    Path(part).unlink(missing_ok=True)
+    Path(f"{part}.stats.json").unlink(missing_ok=True)
+    Path(f"{part}.wal").unlink(missing_ok=True)
 
 
 def run_block(
@@ -174,14 +224,20 @@ def run_block(
         stream = stream.enrich_gate(cfg.enrich_alpha)
 
     n = 0
-    with DataOffloader(
-        part_path,
+    offload_kwargs = dict(
         geometry=p.geometry,
         cell=p.target_cell,
         geometry_file=cfg.geometry_file,
         files=p.metadata.files,
         panel=cfg.panel,
-    ) as off:
+    )
+    if cfg.db:
+        offloader = DuckDBOffloader
+        # each rank backfills only its own block's non-indexed frames
+        offload_kwargs["frame_range"] = (lo, hi)
+    else:
+        offloader = DataOffloader
+    with offloader(part_path, **offload_kwargs) as off:
         for result in stream:
             off.write(result)
             n += 1
@@ -268,12 +324,12 @@ def run_data_parallel(
         enrich_alpha=enrich_alpha,
         threads=threads_per_worker,
         quiet=quiet,
+        db=is_duckdb_path(output),
     )
 
     part_paths = [_part_path(output, r) for r in range(world)]
     for part in part_paths:  # drop stale parts from a previous run
-        Path(part).unlink(missing_ok=True)
-        Path(f"{part}.stats.json").unlink(missing_ok=True)
+        _remove_part(part)
     if world == 1:
         # inline: no process overhead, and works for a single cpu/mps device
         run_block(0, 1, dev_list[0], cfg, part_paths[0])
@@ -285,7 +341,9 @@ def run_data_parallel(
             join=True,
         )
 
-    n_chunks = merge_streams(part_paths, output)
+    n_chunks = (
+        merge_dbs(part_paths, output) if cfg.db else merge_streams(part_paths, output)
+    )
 
     # aggregate block stats, then remove the per-rank parts
     totals = {"frames": 0, "hits": 0, "indexed": 0}
@@ -303,8 +361,7 @@ def run_data_parallel(
         )
     if not keep_parts:
         for part in part_paths:
-            Path(part).unlink(missing_ok=True)
-            Path(f"{part}.stats.json").unlink(missing_ok=True)
+            _remove_part(part)
     return Path(output)
 
 

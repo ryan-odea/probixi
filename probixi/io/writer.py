@@ -191,6 +191,8 @@ class DataOffloader(_StreamWriter):
 
         with DataOffloader(out, geometry=geom, cell=cell, files=files) as off:
             stream.to_stream(off)
+    
+    Please be aware that this functionality may be deprecated in the future.
 
     Parameters
     ----------

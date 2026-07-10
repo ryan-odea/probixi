@@ -7,7 +7,7 @@ from typing import Literal, Optional, cast
 import click
 import torch
 
-from probixi.io import DataOffloader, PeakOffloader
+from probixi.io import DataOffloader, DuckDBOffloader, PeakOffloader, is_duckdb_path
 from probixi.probixi import Probixi
 
 _IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".pdf", ".svg"}
@@ -102,8 +102,10 @@ def _run_multi_gpu(device_list: list, **kw) -> None:
     required=False,
     default=None,
     type=click.Path(writable=True),
-    help="Output CrystFEL-style .stream file (or, with --peaks-only, an output "
-    "directory for the CXI peak set). Optional when only --render is used.",
+    help="Output file. A .stream writes a CrystFEL stream; a .duckdb/.db writes "
+    "a DuckDB database (frames/reflections/peaks + geometry/cell/panels tables). "
+    "With --peaks-only it is instead an output directory for the CXI peak set. "
+    "Optional when only --render is used.",
 )
 @click.option(
     "--peaks-only",
@@ -297,9 +299,7 @@ def main(
         click.echo(f"Loaded {meta.n_frames} frames from {meta.n_files} file(s).")
 
     if gif:
-        probixi.noise_diagnostics(
-            gif, stop=seed_frames, batch_size=max(1, batch_size)
-        )
+        probixi.noise_diagnostics(gif, stop=seed_frames, batch_size=max(1, batch_size))
         if not quiet:
             click.echo(f"Wrote noise diagnostic GIF to {gif}")
 
@@ -337,16 +337,29 @@ def main(
         peaks = probixi.peak_stream(
             frames, start_index=start or 0, estimate_scale=False
         )
-        with PeakOffloader(
-            output,
-            geometry_file=geometry_file,
-            files=meta.files,
-        ) as off:
+        if is_duckdb_path(output):
+            off_ctx = DuckDBOffloader(
+                output,
+                geometry=probixi.geometry,
+                geometry_file=geometry_file,
+                files=meta.files,
+                frame_range=(start or 0, stop if stop is not None else meta.n_frames),
+                panel=panel,
+            )
+        else:
+            off_ctx = PeakOffloader(
+                output,
+                geometry_file=geometry_file,
+                files=meta.files,
+            )
+        with off_ctx as off:
+            # DuckDBOffloader records peaks via write_peaks; PeakOffloader via write
+            write = getattr(off, "write_peaks", None) or off.write
             n = 0
             for result in peaks:
                 if len(result) == 0:
                     continue
-                off.write(result)
+                write(result)
                 n += 1
                 if not quiet:
                     click.echo(f"  frame {result.frame_index}: {len(result)} peaks")
@@ -358,14 +371,22 @@ def main(
         stream = stream.enrich_gate(enrich_alpha)
     stats = stream.stats
     last_log = time.monotonic() - _PROGRESS_INTERVAL_S
-    with DataOffloader(
-        output,
+    offload_kwargs = dict(
         geometry=probixi.geometry,
         cell=probixi.target_cell,
         geometry_file=geometry_file,
         files=meta.files,
         panel=panel,
-    ) as off:
+    )
+    if is_duckdb_path(output):
+        offloader = DuckDBOffloader
+        offload_kwargs["frame_range"] = (
+            start or 0,
+            stop if stop is not None else meta.n_frames,
+        )
+    else:
+        offloader = DataOffloader
+    with offloader(output, **offload_kwargs) as off:
         n = 0
         for result in stream:
             off.write(result)
