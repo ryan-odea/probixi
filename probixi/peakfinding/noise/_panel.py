@@ -85,6 +85,7 @@ class PanelNoise(NoiseStats):
             valid = valid & mask.to(device=valid.device, dtype=torch.bool)
         valid_f = valid.to(frame.dtype)
         pid = self._pid_flat
+        assert isinstance(pid, Tensor)  # registered buffer
 
         sum_per_panel = torch.zeros_like(self.mean_)
         sum_per_panel.index_add_(0, pid, (frame * valid_f).flatten())

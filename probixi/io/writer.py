@@ -191,7 +191,7 @@ class DataOffloader(_StreamWriter):
 
         with DataOffloader(out, geometry=geom, cell=cell, files=files) as off:
             stream.to_stream(off)
-    
+
     Please be aware that this functionality may be deprecated in the future.
 
     Parameters
@@ -295,6 +295,13 @@ class DataOffloader(_StreamWriter):
 
         # Predicted-and-integrated lattice when available, else observed peaks
         if result.predicted_hkl is not None:
+            assert (
+                result.predicted_positions is not None
+                and result.predicted_intensities is not None
+                and result.predicted_sigmas is not None
+                and result.predicted_peak is not None
+                and result.predicted_background is not None
+            )
             p_pos = result.predicted_positions.detach().cpu().tolist()
             p_hkl = result.predicted_hkl.detach().cpu().tolist()
             p_int, p_sig, p_pk, p_bg = (

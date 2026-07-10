@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import time
 from pathlib import Path
-from typing import Literal, Optional, cast
+from typing import Any, Literal, Optional, cast
 
 import click
 import torch
@@ -354,7 +354,7 @@ def main(
             )
         with off_ctx as off:
             # DuckDBOffloader records peaks via write_peaks; PeakOffloader via write
-            write = getattr(off, "write_peaks", None) or off.write
+            write: Any = getattr(off, "write_peaks", None) or off.write
             n = 0
             for result in peaks:
                 if len(result) == 0:
@@ -371,7 +371,7 @@ def main(
         stream = stream.enrich_gate(enrich_alpha)
     stats = stream.stats
     last_log = time.monotonic() - _PROGRESS_INTERVAL_S
-    offload_kwargs = dict(
+    offload_kwargs: dict[str, Any] = dict(
         geometry=probixi.geometry,
         cell=probixi.target_cell,
         geometry_file=geometry_file,

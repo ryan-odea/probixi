@@ -506,7 +506,7 @@ class Indexer:
         self._measured_gain: Optional[float] = None
         self._bg_annulus_pixels: Optional[float] = None
         self._q_max: Optional[float] = None
-        self.B_target = cell_to_B(target_cell, device=device, dtype=dtype)
+        self.B_target = cell_to_B(target_cell, device=device, dtype=self.dtype)
 
         if self.seed.q_tolerance is not None:
             self.q_tolerance = float(self.seed.q_tolerance)

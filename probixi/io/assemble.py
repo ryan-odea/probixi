@@ -99,18 +99,22 @@ def assemble_batch(
 ) -> np.ndarray:
     dsets: dict[str, h5py.Dataset] = {}
     for p in placements:
-        if p.data_path not in dsets:
-            node = f[p.data_path]
+        key = p.data_path
+        assert key is not None, f"panel {p.name!r} has no data_path"
+        if key not in dsets:
+            node = f[key]
             if not isinstance(node, h5py.Dataset):
-                raise TypeError(f"{p.data_path!r} in {f.filename} is not a dataset")
-            dsets[p.data_path] = node
+                raise TypeError(f"{key!r} in {f.filename} is not a dataset")
+            dsets[key] = node
     out_dtype = next(iter(dsets.values())).dtype
     h, w = int(frame_shape[0]), int(frame_shape[1])
     n = hi - lo
     batch = np.zeros((n, h, w), dtype=out_dtype)
     for j in range(n):
         for p in placements:
-            dset = dsets[p.data_path]
+            key = p.data_path
+            assert key is not None
+            dset = dsets[key]
             slab = _slab_to_ss_fs(
                 np.asarray(dset[_panel_index(p, dset.ndim, lo + j)]), p
             )

@@ -4,10 +4,10 @@ import json
 import os
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional, Sequence, Union
+from typing import Any, Optional, Sequence, Union
 
 import torch
-import torch.multiprocessing as mp
+from torch.multiprocessing.spawn import spawn
 
 from .io import DataLoader, DataOffloader, DuckDBOffloader, is_duckdb_path
 from .probixi import Probixi
@@ -144,9 +144,8 @@ def merge_dbs(part_paths: Sequence[PathLike], output_path: PathLike) -> int:
             finally:
                 conn.execute(f"DETACH {alias}")
         conn.execute(_db._INDEXES)
-        (n_indexed,) = conn.execute(
-            "SELECT COUNT(*) FROM frames WHERE indexed"
-        ).fetchone()
+        row = conn.execute("SELECT COUNT(*) FROM frames WHERE indexed").fetchone()
+        n_indexed = row[0] if row else 0
     finally:
         conn.close()
     return int(n_indexed)
@@ -224,7 +223,7 @@ def run_block(
         stream = stream.enrich_gate(cfg.enrich_alpha)
 
     n = 0
-    offload_kwargs = dict(
+    offload_kwargs: dict[str, Any] = dict(
         geometry=p.geometry,
         cell=p.target_cell,
         geometry_file=cfg.geometry_file,
@@ -334,7 +333,7 @@ def run_data_parallel(
         # inline: no process overhead, and works for a single cpu/mps device
         run_block(0, 1, dev_list[0], cfg, part_paths[0])
     else:
-        mp.spawn(
+        spawn(
             _spawn_entry,
             args=(world, dev_list, cfg, str(output)),
             nprocs=world,

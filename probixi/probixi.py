@@ -149,7 +149,9 @@ class Probixi:
         """Detector geometry dict (beam_center, clen, pixel_size, wavelength, ...)."""
         if self.indexer is not None:
             return self.indexer.geometry
-        return self.loader.metadata.geometry.to_dict()
+        geom = self.loader.metadata.geometry
+        assert geom is not None  # guaranteed non-None by __post_init__
+        return geom.to_dict()
 
     @property
     def target_cell(self) -> CellParams:
@@ -352,7 +354,7 @@ class Probixi:
         if geom is None or geom.mask_spec is None or not files:
             return None
         data_file = next(iter(files.values())).filename
-        good = read_mask(geom, data_file, tuple(frame_size))
+        good = read_mask(geom, data_file, frame_size)
         if good is not None and tuple(good.shape) == tuple(frame_size):
             self._h5_mask = torch.as_tensor(good, dtype=torch.bool)
         return self._h5_mask
@@ -385,7 +387,8 @@ class Probixi:
         # Learn a beam-center exclusion |q|_min (A^-1) from the calibrated finder
         if self._noise is None:
             return None
-        frame_size = tuple(self._noise.valid_mask.shape)
+        shp = self._noise.valid_mask.shape
+        frame_size = (int(shp[0]), int(shp[1]))
         qmap = self._qmap(frame_size, device=self._noise.valid_mask.device)
         if qmap is None:
             return None
@@ -441,8 +444,9 @@ class Probixi:
         # detection and the background sources skip the beamstop region.
         if self._noise is None or q_min <= 0:
             return
+        shp = self._noise.valid_mask.shape
         qmap = self._qmap(
-            tuple(self._noise.valid_mask.shape), device=self._noise.valid_mask.device
+            (int(shp[0]), int(shp[1])), device=self._noise.valid_mask.device
         )
         if qmap is None:
             return
@@ -598,10 +602,10 @@ class Probixi:
                 **topts,
             )
         self._scale_ref = ScaleReference.from_noise_model(self.noise)
-        if getattr(self, "indexer", None) is not None and self.noise.gain is not None:
+        if self.indexer is not None and self.noise.gain is not None:
             self.indexer._measured_gain = self.noise.gain
-        if getattr(self, "indexer", None) is not None:
-            self.indexer._bg_annulus_pixels = self._finder.background_annulus_pixels()
+        if self.indexer is not None:
+            self.indexer._bg_annulus_pixels = self.finder.background_annulus_pixels()
         self._beamstop_qmin = self._infer_beamstop_qmin(seed)
         if self._beamstop_qmin:
             self._apply_beamstop_qmin(self._beamstop_qmin)

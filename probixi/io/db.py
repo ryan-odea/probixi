@@ -5,8 +5,8 @@ import math
 from pathlib import Path
 from typing import TYPE_CHECKING, Optional, Union
 
-import torch
 import duckdb
+import torch
 
 from ..indexer.lattice import B_to_cell
 from .geometry import EV_ANGSTROM
@@ -427,6 +427,13 @@ class DuckDBOffloader(_StreamWriter):
 
     def _reflections(self, result: "IndexResult") -> list:
         if result.predicted_hkl is not None:
+            assert (
+                result.predicted_positions is not None
+                and result.predicted_intensities is not None
+                and result.predicted_sigmas is not None
+                and result.predicted_peak is not None
+                and result.predicted_background is not None
+            )
             p_pos = result.predicted_positions.detach().cpu().tolist()
             p_hkl = result.predicted_hkl.detach().cpu().tolist()
             p_int, p_sig, p_pk, p_bg = (
@@ -542,7 +549,7 @@ class DuckDBOffloader(_StreamWriter):
         for start, stop, fname in self._ranges:
             for event in range(stop - start):
                 idx = start + event
-                if lo is not None and not (lo <= idx < hi):
+                if lo is not None and hi is not None and not (lo <= idx < hi):
                     continue
                 if idx in self._seen:
                     continue
