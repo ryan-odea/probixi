@@ -78,6 +78,36 @@ with DataOffloader(
               f"{result.n_indexed}/{result.n_peaks} indexed (rmsd {result.rmsd:.4f})")
 ```
 
+### DuckDB output
+
+The `.stream` format is convenient for interop (e.g. `partialator`), but querying a
+run means re-parsing a large text file. `probixi` can instead write a
+[DuckDB](https://duckdb.org) database. Please note this may be the default in the future.
+
+```bash
+probixi -i files.lst -g myGeometry.geom -p myCell.cell -o run.duckdb --device cuda
+```
+
+Or with python:
+
+```python
+stream = pipeline.index_stream(pipeline.frames(), batch_size=8)
+stream.to_db(
+    "run.duckdb",
+    geometry=pipeline.geometry,
+    cell=pipeline.target_cell,
+    geometry_file="myGeometry.geom",
+    files=pipeline.metadata.files,
+)
+```
+
+The database holds run metadata as small tables (`geometry`, `panels`, `cell`) plus:
+
+- **`frames`** — key `frame_id` (a hash of `filename//event`) with additional per-frame information
+- **`reflections`** — the integrated Miller indices (`h k l`, `I`, `sigma`, `peak`,
+  `background`, `fs/ss`, panel, resolution)
+- **`peaks`** — the peak-search results per frame
+
 ## Comparison with other works
 
 Here, we provide a comparison with other peakfinding algorithms with real data. Using a randomly sampled ~10,000 frames from experimentally collected data. Lysozyme and BacterioRhodopsin normally perform quite well. Our C1C2 crystals at the synchrotron diffracted barely above the noise floor.
