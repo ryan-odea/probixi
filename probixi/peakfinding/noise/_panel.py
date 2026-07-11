@@ -13,13 +13,8 @@ PanelSpec = Union[
 
 
 class PanelNoise(NoiseStats):
-    """Panel-level running mean/variance.
-
-    Attributes:
-        panel_map: (rows, cols) panel id per pixel; -1 marks no-panel pixels.
-        pixels_per_panel: Valid pixels assigned to each panel.
-        valid_mask: (rows, cols) bool mask of pixels belonging to some panel.
-    """
+    # Panel-level running mean/variance: panel id per pixel (-1 = no panel),
+    # pixels per panel, and a valid mask of pixels belonging to some panel.
 
     panel_map: Tensor
     pixels_per_panel: Tensor
