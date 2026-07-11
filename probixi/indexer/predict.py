@@ -34,9 +34,9 @@ def _centering_mask(hkl: Tensor, centering: str | None) -> Tensor:
     if not centering:
         return keep_all
     c = centering.strip().upper()[:1]
-    h = hkl[:, 0].round().to(torch.long)    #noqa: E741
-    k = hkl[:, 1].round().to(torch.long)    #noqa: E741
-    l = hkl[:, 2].round().to(torch.long)    #noqa: E741
+    h = hkl[:, 0].round().to(torch.long)  # noqa: E741
+    k = hkl[:, 1].round().to(torch.long)  # noqa: E741
+    l = hkl[:, 2].round().to(torch.long)  # noqa: E741
     if c == "A":
         return (k + l) % 2 == 0
     if c == "B":
