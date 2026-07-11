@@ -73,13 +73,17 @@ def test_loader_sums_frames_across_two_files(tmp_path):
     assert set(md.files) == {str(a_h5), str(b_h5)}
 
 
-def test_inconsistent_frame_sizes_raise(tmp_path):
+def test_inconsistent_frame_sizes_skip_with_warning(tmp_path):
     a_h5, _ = sim.write_run(tmp_path / "a", _frames(3, 8, 6))
     b_h5, _ = sim.write_run(tmp_path / "b", _frames(3, 10, 6))
     lst = tmp_path / "mixed.lst"
     lst.write_text(f"{a_h5}\n{b_h5}\n", encoding="utf-8")
-    with pytest.raises(ValueError):
-        DataLoader(lst)
+    with pytest.warns(UserWarning, match="frame size"):
+        md = DataLoader(lst).metadata
+    assert md.n_files == 1
+    assert md.n_frames == 3
+    assert md.frame_size == (8, 6)
+    assert set(md.files) == {str(a_h5)}
 
 
 def test_missing_list_file_raises(tmp_path):
