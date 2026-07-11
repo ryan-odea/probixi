@@ -284,7 +284,7 @@ def main(
         )
         return
 
-    dev = device_list[0] if device_list else (torch.device(device) if device else None)
+    dev = device_list[0] if device_list else None
     probixi = Probixi(
         list_file=list_file,
         geometry_file=geometry_file,
