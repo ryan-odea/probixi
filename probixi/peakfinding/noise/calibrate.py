@@ -8,7 +8,12 @@ import torch
 import torch.nn.functional as F
 from torch import Tensor
 
-from ..peaks.neighborhood import gaussian_kernel_2d, local_mean_var, matched_filter_z
+from ..peaks.neighborhood import (
+    LOCAL_BG_CLIP_K,
+    gaussian_kernel_2d,
+    local_mean_var,
+    matched_filter_z,
+)
 
 
 @dataclass
@@ -450,7 +455,13 @@ def calibrate_threshold(
     mask_cpu = mask.cpu()
     for f in frames:
         f = f.to(dtype=dtype, device=device)
-        lm, lv = local_mean_var(f - mu, mask, local_inner_radius, local_outer_radius)
+        lm, lv = local_mean_var(
+            f - mu,
+            mask,
+            local_inner_radius,
+            local_outer_radius,
+            clip_hi=LOCAL_BG_CLIP_K * var.sqrt(),
+        )
         mean_eff = mu + lm
         if flux_variance:
             var_eff = flux_variance_floor(
@@ -482,6 +493,7 @@ def calibrate_threshold(
     mu0, sigma0 = _empirical_null_central_matching(t_body)
 
     tmax_t = torch.tensor(t_max_per_frame)
+    # quiet frames: max(T) below the null extreme mu0 + sigma0*sqrt(2 ln N)
     n_valid = int(mask.sum())
     z_extreme = math.sqrt(2.0 * math.log(max(n_valid, 2)))
     quiet_max_T = mu0 + sigma0 * z_extreme
