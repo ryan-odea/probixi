@@ -17,11 +17,7 @@ _AXIS_RE = re.compile(r"([+-]?[0-9]*\.?[0-9]+(?:[eE][+-]?[0-9]+)?)\s*([xy])")
 
 
 def parse_axis_vector(spec: object) -> Optional[tuple[float, float]]:
-    """Parse a CrystFEL ``fs``/``ss`` axis spec into an ``(x, y)`` tuple.
-
-    ``"+0.003976x +0.999992y"`` -> ``(0.003976, 0.999992)``. Returns ``None`` for
-    anything without an ``x`` or ``y`` component (so callers can fall back).
-    """
+# Parse a CrystFEL ``fs``/``ss`` axis spec into an ``(x, y)`` tuple.
     if not isinstance(spec, str):
         return None
     comps = {axis: float(val) for val, axis in _AXIS_RE.findall(spec)}
@@ -51,23 +47,8 @@ class DataLayout:
 
 @dataclass
 class MaskSpec:
-    """CrystFEL bad-pixel mask reference (``mask``/``mask_file`` + bit flags).
-
-    A pixel is GOOD iff ``(value & mask_good) == mask_good`` and
-    ``(value & mask_bad) == 0`` -- all ``mask_good`` bits set and no ``mask_bad``
-    bit set.
-
-    Parameters
-    ----------
-    mask_file : str, optional
-        External HDF5 file holding the mask; None means the data file itself.
-    mask_path : str, optional
-        Internal HDF5 path to the mask array.
-    mask_good : int
-        Bits that must all be set for a pixel to be good.
-    mask_bad : int
-        Bits whose presence marks a pixel bad.
-    """
+    # CrystFEL bad-pixel mask reference (mask/mask_file + bit flags): a pixel is GOOD
+    # iff (value & mask_good) == mask_good and (value & mask_bad) == 0.
 
     mask_file: Optional[str]
     mask_path: Optional[str]
@@ -377,7 +358,7 @@ def _coerce(value: str):
 
 
 def resolve_dynamic_fields(geometry: Geometry, data_file: PathLike) -> Geometry:
-    """Fill in HDF5-path-valued ``clen``/``photon_energy`` from the data file."""
+    # Fill in HDF5-path-valued clen/photon_energy from the data file.
     clen_path = geometry.parameters.get("clen")
     pe_path = geometry.parameters.get("photon_energy")
     need_clen = geometry.distance is None and isinstance(clen_path, str)
