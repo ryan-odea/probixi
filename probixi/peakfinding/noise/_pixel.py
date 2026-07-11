@@ -7,7 +7,7 @@ from .model import NoiseStats
 
 
 class PixelNoise(NoiseStats):
-    """Per-pixel running mean/variance over the full frame."""
+    # Per-pixel running mean/variance over the full frame.
 
     valid_mask: Tensor
 
