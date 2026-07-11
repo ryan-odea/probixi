@@ -9,27 +9,8 @@ from torch import Tensor
 
 @dataclass
 class RefineResult:
-    """Refinement output over K candidate orientations and N peaks
-
-    Attributes
-    ----------
-    A : Tensor
-        (K, 3, 3) refined reciprocal-to-lab matrices.
-    rmsd : Tensor
-        (K,) RMS q-residual per candidate.
-    n_indexed : Tensor
-        (K,) hard-inlier count per candidate (for reporting).
-    soft_score : Tensor
-        (K,) confidence-weighted inlier mass; equals ``n_indexed`` when no
-        weights are given. Used for ranking.
-    indexed : Tensor
-        (K, N) bool mask of indexed peaks.
-    hkl : Tensor
-        (K, N, 3) integer Miller indices per candidate/peak.
-    history : Tensor
-        (steps,) refinement loss history.
-    """
-
+    # Refinement output over K candidate orientations and N peaks: refined A,
+    # per-candidate rmsd / inlier count / soft score, indexed mask, hkl, loss history.
     A: Tensor
     rmsd: Tensor
     n_indexed: Tensor
