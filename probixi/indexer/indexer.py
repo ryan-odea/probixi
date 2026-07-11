@@ -23,7 +23,7 @@ from .refine import RefineResult, refine_multiframe_known_B
 from .rocking import estimate_mosaicity
 from .seed import sphere_seed_candidates
 
-MIN_PEAKS_TO_INDEX = 3
+MIN_PEAKS_TO_INDEX = 5
 
 
 def _resolve_lattice_dtype(
@@ -59,11 +59,6 @@ class IndexStats:
     def hit_rate(self) -> float:
         """Hits per frame seen (0 when no frames)."""
         return self.hits / self.frames if self.frames else 0.0
-
-    @property
-    def index_rate(self) -> float:
-        """Indexed solutions per frame seen (0 when no frames)."""
-        return self.indexed / self.frames if self.frames else 0.0
 
     @property
     def index_rate_of_hits(self) -> float:
