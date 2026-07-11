@@ -41,6 +41,15 @@ from .peakfinding.noise import (
 
 PathLike = Union[str, Path]
 
+# Beam-center exclusion (|q|_min) tuning - maybe exposure to user in future???
+_BEAMSTOP_MAX_FRAMES = 200
+_BEAMSTOP_N_BINS = 40
+_BEAMSTOP_SPIKE_RATIO = 50.0
+_BEAMSTOP_EDGE_FRACTION = 0.1
+_BEAMSTOP_MIN_FRACTION = 0.05
+_BEAMSTOP_MIN_PEAKS = 200
+_BEAMSTOP_MIN_BIN_PEAKS = 5
+
 
 @dataclass
 class Probixi:
@@ -374,16 +383,7 @@ class Probixi:
             detector_to_q(pos, geom.to_dict(), dtype=torch.float32), dim=-1
         ).reshape(frame_size)
 
-    def _infer_beamstop_qmin(
-        self,
-        seed: list,
-        max_frames: int = 200,
-        n_bins: int = 40,
-        spike_ratio: float = 50.0,
-        edge_fraction: float = 0.1,
-        min_fraction: float = 0.05,
-        min_peaks: int = 200,
-    ) -> Optional[float]:
+    def _infer_beamstop_qmin(self, seed: list) -> Optional[float]:
         # Learn a beam-center exclusion |q|_min (A^-1) from the calibrated finder
         if self._noise is None:
             return None
@@ -393,9 +393,10 @@ class Probixi:
         if qmap is None:
             return None
         rows, cols = frame_size
+        n_bins = _BEAMSTOP_N_BINS
         qs: list[Tensor] = []
         for res in self.peak_stream(
-            seed[:max_frames], update_noise=False, estimate_scale=False
+            seed[:_BEAMSTOP_MAX_FRAMES], update_noise=False, estimate_scale=False
         ):
             ks = res.kept_stats
             if ks is None or ks.row_centroid.numel() == 0:
@@ -406,7 +407,7 @@ class Probixi:
         if not qs:
             return None
         allq = torch.cat(qs).float()
-        if allq.numel() < min_peaks:
+        if allq.numel() < _BEAMSTOP_MIN_PEAKS:
             return None
         qmax = float(qmap.max())
         if qmax <= 0:
@@ -417,16 +418,20 @@ class Probixi:
             qmap[self._noise.valid_mask].float(), bins=n_bins, min=0.0, max=qmax
         )
         density = ph / pix.clamp_min(1.0)
+        # zero bins with too few peaks to give a trustworthy density
+        density = torch.where(
+            ph >= _BEAMSTOP_MIN_BIN_PEAKS, density, torch.zeros_like(density)
+        )
         pos_d = density[density > 0]
         if pos_d.numel() == 0:
             return None
         med = float(pos_d.median())
         inner = density[: max(1, n_bins // 4)]
         ref = float(inner.max())
-        if med <= 0 or ref < spike_ratio * med:
+        if med <= 0 or ref < _BEAMSTOP_SPIKE_RATIO * med:
             return None
         amax = int(inner.argmax())
-        thr = edge_fraction * ref
+        thr = _BEAMSTOP_EDGE_FRACTION * ref
         lo = hi = amax
         while lo - 1 >= 0 and float(density[lo - 1]) >= thr:
             lo -= 1
@@ -435,7 +440,7 @@ class Probixi:
         q_min = float(edges[hi + 1])
         if q_min <= 0.0:
             return None
-        if float((allq < q_min).sum()) / allq.numel() < min_fraction:
+        if float((allq < q_min).sum()) / allq.numel() < _BEAMSTOP_MIN_FRACTION:
             return None
         return q_min
 
