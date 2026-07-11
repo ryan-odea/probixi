@@ -30,23 +30,8 @@ def cell_to_B(
     device=None,
     dtype: torch.dtype = torch.float64,
 ) -> Tensor:
-    """Reciprocal basis ``B`` (columns map hkl -> q) from unit-cell parameters.
-
-    Parameters
-    ----------
-    cell : CellParams
-        Unit cell (edges and angles in radians).
-    device : optional
-        Torch device for the result.
-    dtype : torch.dtype, optional
-        Result dtype (default ``torch.float64``).
-
-    Returns
-    -------
-    Tensor
-        (3, 3) matrix ``B = M^{-T}`` so that ``q = B @ hkl`` (crystallographer's
-        convention, no 2*pi factor).
-    """
+    # Reciprocal basis B = M^-T from cell params: q = B @ hkl (crystallographer
+    # convention, no 2*pi). M columns are the direct lattice vectors a, b, c.
     a, b, c = cell.a, cell.b, cell.c
     ca, cb, cg = math.cos(cell.alpha), math.cos(cell.beta), math.cos(cell.gamma)
     sg = math.sin(cell.gamma)
@@ -67,7 +52,7 @@ def cell_to_B(
 
 
 def B_to_cell(B: Tensor) -> CellParams:
-    """Recover cell edges and angles from a reciprocal basis ``B`` (inverse of cell_to_B)."""
+    # Recover cell edges/angles from reciprocal basis B (inverse of cell_to_B).
     if B.shape[-2:] != (3, 3):
         raise ValueError("B must be (3, 3)")
     M = torch.linalg.inv(B.transpose(-1, -2))
@@ -82,6 +67,8 @@ def B_to_cell(B: Tensor) -> CellParams:
 
 
 def reduce_cell(B: Tensor, max_coef: int = 3) -> Tensor:
+    # Greedy shortest-vector reduction: 3 short, non-collinear, non-coplanar
+    # lattice vectors from the integer-coefficient grid.
     if B.shape[-2:] != (3, 3):
         raise ValueError("B must be (3, 3)")
     device, dtype = B.device, B.dtype
@@ -123,19 +110,8 @@ def reduce_cell(B: Tensor, max_coef: int = 3) -> Tensor:
 
 
 def decompose_A(A: Tensor) -> tuple[Tensor, Tensor, CellParams]:
-    """Factor ``A = U @ B`` via QR, with ``B`` near-Niggli-reduced.
-
-    Parameters
-    ----------
-    A : Tensor
-        (3, 3) reciprocal-to-lab matrix, ``q = A @ hkl``.
-
-    Returns
-    -------
-    tuple of (Tensor, Tensor, CellParams)
-        ``(U, B, cell)``: orientation rotation, cell-only reciprocal basis, and
-        the unit cell recovered from ``B``.
-    """
+    # Factor A = U @ B via QR: U orthogonal residual, B the reduced cell-only
+    # reciprocal basis, cell recovered from B.
     if A.shape[-2:] != (3, 3):
         raise ValueError("A must be (3, 3)")
     B_reduced = reduce_cell(A)
