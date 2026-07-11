@@ -14,8 +14,8 @@ def _panel_bases(
     # (P, 10) tensor [min_ss, max_ss, min_fs, max_fs, corner_x, corner_y,
     # fs_x, fs_y, ss_x, ss_y] per panel
     # Panels are coplanar at z = clen: fs/ss keep only their in-plane (x, y)
-    # components. 
-    # 
+    # components.
+    #
     # NEED TO TEST [TODO] (3D): a tilted-panel detector (nonzero fs/ss z) needs per-panel
     # 3-D placement and ray-plane intersection in q_to_detector.
     panels = geometry.get("panels") or {}

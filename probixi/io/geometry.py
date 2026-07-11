@@ -17,7 +17,7 @@ _AXIS_RE = re.compile(r"([+-]?[0-9]*\.?[0-9]+(?:[eE][+-]?[0-9]+)?)\s*([xy])")
 
 
 def parse_axis_vector(spec: object) -> Optional[tuple[float, float]]:
-# Parse a CrystFEL ``fs``/``ss`` axis spec into an ``(x, y)`` tuple.
+    # Parse a CrystFEL ``fs``/``ss`` axis spec into an ``(x, y)`` tuple.
     if not isinstance(spec, str):
         return None
     comps = {axis: float(val) for val, axis in _AXIS_RE.findall(spec)}
