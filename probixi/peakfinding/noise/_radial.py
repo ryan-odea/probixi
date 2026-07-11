@@ -7,13 +7,7 @@ from .model import NoiseStats
 
 
 class RotationalNoise(NoiseStats):
-    """Radial-bin running stats for rotationally-symmetric background.
-
-    Attributes:
-        bin_idx: (rows, cols) radial-bin index per pixel.
-        pixels_per_bin: Pixels falling in each radial bin.
-        valid_mask: (rows, cols) bool mask of usable pixels.
-    """
+    # Radial-bin running stats for a rotationally-symmetric background
 
     bin_idx: Tensor
     pixels_per_bin: Tensor
