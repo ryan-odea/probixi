@@ -9,7 +9,8 @@ A_INV_TO_NM_INV = 10.0
 # excess map is already background-subtracted, so integrated intensity is the sum
 # of excess over a small box and its variance is the summed per-pixel background
 # noise inflated by the gross-minus-background factor 1 + n_peak/n_bg (the shared
-# local-background estimate) plus the signal shot noise I*gain.
+# local-background estimate) plus the signal shot noise I*gain. Ensure box ownership is
+# to the nearest predicted centre, so that overlapping boxes do not double-count pixels.
 
 
 @torch.no_grad()
@@ -46,8 +47,7 @@ def integrate_boxes(
     flat = rr.clamp(0, H - 1) * W + cc.clamp(0, W - 1)
     if pixel_valid is not None:
         valid = valid & pixel_valid.reshape(-1)[flat]
-    # Assign each pixel to its nearest predicted centre
-    # so shared pixels are not double-counted across close spots.
+    # Nearest-owner deblend: assign each pixel to its nearest predicted centre
     if M > 1:
         posf = positions.to(excess.dtype)
         d_r = rr.to(excess.dtype) - posf[:, 0:1]
@@ -61,7 +61,7 @@ def integrate_boxes(
         min_d = torch.full((npix,), float("inf"), device=device, dtype=dist2.dtype)
         min_d.scatter_reduce_(0, p_flat, d_flat, reduce="amin", include_self=True)
         win = valid & (dist2 <= min_d[flat] + 1e-6)
-        # tie-break by lowest centre index so every pixel has exactly one owner
+        # tie-break by lowest centre index
         cid = torch.arange(M, device=device).unsqueeze(1).expand_as(dist2)
         min_cid = torch.full((npix,), M, device=device, dtype=torch.long)
         min_cid.scatter_reduce_(
@@ -142,7 +142,7 @@ def peak_resolution_limit(
     snr: Tensor | None = None,
     snr_floor: float = 0.0,
 ) -> float:
-    """Per-crystal diffraction limit from the indexed peaks' resolution."""
+    # Per-crystal diffraction limit from a percentile of the indexed peaks' |q|.
     if percentile <= 0.0 or peak_resolution.numel() == 0:
         return float("inf")
     vals = peak_resolution
@@ -164,7 +164,7 @@ def falloff_resolution_limit(
     nbins: int = 10,
     min_refl: int = 40,
 ) -> float | None:
-    """Per-crystal diffraction limit (nm^-1) from the I/sigma-vs-resolution falloff."""
+    # Per-crystal diffraction limit (nm^-1): |q| where shell-mean I/sigma crosses target.
     n = int(q_nm.shape[0])
     if n < min_refl:
         return None
@@ -201,34 +201,10 @@ def spot_enrichment(
     radius: int = 2,
     pixel_valid: Tensor | None = None,
 ) -> tuple[int, float, float]:
-    """Significance of an indexing solution against the image.
-
-    Parameters
-    ----------
-    positions : Tensor
-        (M, 2) predicted ``(row, col)`` spot centres.
-    excess, var : Tensor
-        Background-subtracted signal and per-pixel noise variance (H, W).
-    z_threshold : float
-        Whitened significance a local peak must clear to count as "bright"
-    radius : int, default 2
-        Half-width (px) of the local-max neighbourhood.
-    pixel_valid : Tensor, optional
-        Boolean (H, W) mask of usable pixels.
-
-    Returns
-    -------
-    n_bright : int
-        Predicted spots whose neighbourhood clears ``z_threshold``.
-    enrichment : float
-        Observed bright-rate of predicted spots / background bright-rate
-        (= observed / chance). ~1 is a noise indexing, >>1 a real lattice.
-    p_value : float
-        Probability of seeing this many bright predicted spots by chance under
-        the noise-null (predicted positions independent of where signal is):
-        ``P(X >= n_bright)`` for ``X ~ Poisson(M * p)``, ``p`` the measured
-        background bright-rate.
-    """
+    # Significance of an indexing solution vs the image: n_bright predicted spots
+    # clearing z_threshold, enrichment = observed/chance bright-rate (~1 noise, >>1
+    # real), and Poisson p-value P(X >= n_bright), X ~ Poisson(M*p) for background
+    # bright-rate p.
     z = excess / var.clamp_min(1e-12).sqrt()
     if pixel_valid is not None:
         z = torch.where(pixel_valid, z, z.new_full((), float("-inf")))
