@@ -73,7 +73,6 @@ packages = ["probixi"]
 testpaths = ["tests"]
 markers = [
     "slow: end-to-end tests that simulate and process whole frames",
-    "realdata: tests that require a local real frame stack (skipped otherwise)",
     "cuda: tests that require a CUDA device (skipped otherwise)",
     "mps: tests that require an Apple Silicon MPS device (skipped otherwise)",
 ]

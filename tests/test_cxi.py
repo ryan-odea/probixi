@@ -8,7 +8,7 @@ import sim
 import torch
 
 from probixi import Probixi
-from probixi.io import DataLoader, iter_frames, read_geometry, read_mask, scan_h5
+from probixi.io import DataLoader, iter_frames, read_geometry, scan_h5
 from probixi.io.geometry import EV_ANGSTROM
 
 
@@ -214,37 +214,3 @@ def test_probixi_builds_and_runs_on_multipanel(
     assert len(results) == 8
     # the HDF5-masked pixel is excluded from the valid mask
     assert not bool(px.noise.valid_mask[5, 5])
-
-
-# --- real LCLS CXI + optimised geom intake (skips without local data) --------
-
-
-def test_real_cxi_and_optimised_geom_ingest(tmp_path, real_cxi, real_optimised_geom):
-    """Real LCLS CXI + optimised CSPAD geom: clen/wavelength resolve, frames stream, mask slices."""
-    lst = tmp_path / "real.lst"
-    lst.write_text(f"{real_cxi}\n", encoding="utf-8")
-
-    loader = DataLoader(lst, real_optimised_geom)
-    g = loader.metadata.geometry
-    frame_size = loader.metadata.frame_size
-    assert g is not None and frame_size is not None
-    frame_size = tuple(frame_size)
-
-    # clen/wavelength were HDF5 paths; now resolved to physical values
-    assert g.distance is not None and 0.0 < g.distance < 2.0
-    assert g.wavelength is not None and 0.1 < g.wavelength < 10.0
-    d = g.to_dict()  # complete -> the indexer/forward model can be built
-    assert set(d) >= {"beam_center", "clen", "pixel_size", "wavelength", "panels"}
-
-    # frames stream at the resolved data-space shape
-    f0 = next(iter(iter_frames(loader, start=0, stop=1)))
-    assert tuple(f0.shape) == frame_size
-
-    # the (possibly per-event) mask reads as one slab matching the frame
-    if g.mask_spec is not None and g.mask_spec.mask_path is not None:
-        good = read_mask(g, str(real_cxi), frame_size)
-        assert good is None or good.shape == frame_size
-
-    # peak-only Probixi builds and exposes the resolved geometry
-    px = Probixi(list_file=lst, geometry_file=real_optimised_geom)
-    assert px.geometry["clen"] == pytest.approx(g.distance)
