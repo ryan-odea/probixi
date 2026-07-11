@@ -18,6 +18,7 @@ from .blobs import (
     select_blobs,
 )
 from .neighborhood import (
+    LOCAL_BG_CLIP_K,
     annulus_count,
     gaussian_kernel_2d,
     local_mean_var,
@@ -420,6 +421,7 @@ class PeakFinder:
             self.local_inner_radius,
             self.local_outer_radius,
             count=self._annulus_count,
+            clip_hi=LOCAL_BG_CLIP_K * var0.sqrt(),
         )
         mean_eff = mean0 + local_mean
         if flux:
