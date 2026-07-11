@@ -10,14 +10,8 @@ from ._drift import DriftDiagnostics
 
 # NOISE STATES MOTHER ===================================================
 class NoiseStats(nn.Module):
-    """Streaming mean/variance base class
-
-    Attributes:
-        mean_: Running mean, shape ``stat_shape``.
-        M2_: Welford sum of squared deviations (``decay == 1``) or EWMA variance
-            directly (``decay < 1``).
-        n_: Frames seen since the last reset.
-    """
+    # Streaming mean/variance base: mean_, M2_ (Welford sum-of-squares for
+    # decay == 1, else EWMA variance directly), n_ (frames since reset).
 
     mean_: Tensor
     M2_: Tensor
