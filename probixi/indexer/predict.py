@@ -15,21 +15,8 @@ from .rocking import rocking_radius
 
 @dataclass
 class PredictedReflections:
-    """Reflections predicted to diffract on one frame.
-
-    Attributes
-    ----------
-    hkl : Tensor
-        (M, 3) integer Miller indices.
-    positions : Tensor
-        (M, 2) predicted detector ``(row, col)`` positions.
-    q : Tensor
-        (M, 3) predicted reciprocal-space vectors (A^-1), ``q = A @ hkl``.
-    excitation_error : Tensor
-        (M,) ``|S| - 1``, the dimensionless Ewald-sphere offset.
-    resolution : Tensor
-        (M,) ``|q|`` in A^-1 (1/d).
-    """
+    # Reflections predicted to diffract on one frame: hkl, detector positions,
+    # q = A @ hkl, excitation error |S|-1, and resolution |q|.
 
     hkl: Tensor
     positions: Tensor
@@ -98,42 +85,10 @@ def predict_reflections(
     centering: str | None = None,
     frame_shape: tuple[int, int] | None = None,
 ) -> PredictedReflections:
-    """Predict the reflections that diffract on one frame for orientation ``A``.
-
-    Parameters
-    ----------
-    A : Tensor
-        (3, 3) reciprocal-to-lab matrix; ``q = A @ hkl`` in the lab frame.
-    geometry : dict
-        Detector geometry (``beam_center``, ``clen``, ``pixel_size``, ``wavelength``).
-    q_max : float
-        Resolution limit (A^-1); reflections with ``|q| > q_max`` are dropped.
-    eta : float, optional
-        Mosaic angular spread (rad). When given, the excitation-error tolerance
-        is the physical rocking shell ``|eps| < wavelength * predict_sigma *
-        R(|q|)`` with ``R`` from :func:`rocking_radius` (so the shell grows with
-        resolution instead of being flat). When ``None`` the fixed
-        ``partiality_threshold`` is used.
-    r_size, bandwidth : float, optional
-        Domain-size (constant, A^-1) and bandwidth (``dlambda/lambda``) terms of
-        the rocking model; used only when ``eta`` is given.
-    predict_sigma : float, optional
-        How many rocking half-widths to integrate out to.
-    partiality_threshold : float, optional
-        Max ``|S| - 1`` (excitation error). With ``eta`` it is an absolute floor
-        on the per-reflection tolerance
-    centering : str, optional
-        Bravais centering symbol (``P``/``A``/``B``/``C``/``I``/``F``/``R``).
-        Reflections forbidden by the centering condition are dropped so absent
-        positions aren't predicted. ``None`` or ``P`` applies no condition.
-    frame_shape : tuple of int, optional
-        (rows, cols); predictions off the detector are dropped when given.
-
-    Returns
-    -------
-    PredictedReflections
-        Everything aligned row-for-row.
-    """
+    # Reflections that diffract on one frame for orientation A (q = A @ hkl):
+    # enumerate hkl within q_max, drop centering-forbidden ones, keep those on the
+    # Ewald shell (|eps| < rocking tol when eta given, else partiality_threshold) and
+    # the forward hemisphere / detector, then project to (row, col).
     if A.shape != (3, 3):
         raise ValueError("A must be (3, 3)")
     device, dtype = A.device, A.dtype
