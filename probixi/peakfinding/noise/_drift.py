@@ -3,16 +3,8 @@ from dataclasses import dataclass, field
 
 @dataclass
 class DriftDiagnostics:
-    """Time series of how much the noise model moves as it updates.
-
-    Attributes:
-        step: Frame count at which each sample was recorded.
-        mean_shift: Mean absolute change in the per-pixel mean since last sample.
-        var_ratio_log: Mean log-ratio of new to old variance.
-        kl_gaussian: Mean per-pixel KL of the new Gaussian from the old.
-        effective_n: Effective sample size backing the estimate at that step.
-        n_masked: Pixels currently masked out as invalid.
-    """
+    # Time series of noise-model drift per update: mean shift, log var-ratio,
+    # per-pixel Gaussian KL, effective sample size, and masked-pixel count.
 
     step: list[int] = field(default_factory=list)
     mean_shift: list[float] = field(default_factory=list)

@@ -23,7 +23,7 @@ from .refine import RefineResult, refine_multiframe_known_B
 from .rocking import estimate_mosaicity
 from .seed import sphere_seed_candidates
 
-MIN_PEAKS_TO_INDEX = 3
+MIN_PEAKS_TO_INDEX = 5
 
 
 def _resolve_lattice_dtype(
@@ -59,11 +59,6 @@ class IndexStats:
     def hit_rate(self) -> float:
         """Hits per frame seen (0 when no frames)."""
         return self.hits / self.frames if self.frames else 0.0
-
-    @property
-    def index_rate(self) -> float:
-        """Indexed solutions per frame seen (0 when no frames)."""
-        return self.indexed / self.frames if self.frames else 0.0
 
     @property
     def index_rate_of_hits(self) -> float:
@@ -391,6 +386,55 @@ class IndexStream:
             n += 1
         return n
 
+    def to_db(
+        self,
+        path,
+        *,
+        geometry: dict,
+        cell: Optional[CellParams] = None,
+        geometry_file=None,
+        files: Optional[dict] = None,
+        panel: str = "0",
+    ) -> int:
+        """Drain the stream into a DuckDB database at ``path``.
+
+        Convenience terminal wrapping
+        :class:`~probixi.io.db.DuckDBOffloader`: opens the database, writes the
+        ``geometry``/``panels``/``cell`` metadata tables, and streams every
+        result into the ``frames``/``reflections``/``peaks`` tables.
+
+        Parameters
+        ----------
+        path : str or Path
+            Destination ``.duckdb`` file (overwritten if present).
+        geometry : dict
+            Indexer geometry dict (``beam_center``, ``clen``, ...).
+        cell : CellParams, optional
+            Target unit cell, written to the ``cell`` table.
+        geometry_file : str or Path, optional
+            Geometry file whose text is stored verbatim.
+        files : dict, optional
+            Loader file map; enables the non-indexed frame backfill.
+        panel : str, default "0"
+            Fallback panel name for out-of-panel peaks/reflections.
+
+        Returns
+        -------
+        int
+            Number of indexed frames written.
+        """
+        from ..io.db import DuckDBOffloader
+
+        with DuckDBOffloader(
+            path,
+            geometry=geometry,
+            cell=cell,
+            geometry_file=geometry_file,
+            files=files,
+            panel=panel,
+        ) as off:
+            return self.to_stream(off)
+
     def collect(self) -> list[IndexResult]:
         return list(self._source)
 
@@ -457,7 +501,7 @@ class Indexer:
         self._measured_gain: Optional[float] = None
         self._bg_annulus_pixels: Optional[float] = None
         self._q_max: Optional[float] = None
-        self.B_target = cell_to_B(target_cell, device=device, dtype=dtype)
+        self.B_target = cell_to_B(target_cell, device=device, dtype=self.dtype)
 
         if self.seed.q_tolerance is not None:
             self.q_tolerance = float(self.seed.q_tolerance)

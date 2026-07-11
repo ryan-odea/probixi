@@ -6,6 +6,9 @@ import torch
 import torch.nn.functional as F
 from torch import Tensor
 
+# Local-background annulus one-sided clip level (sigma): residuals above this are signal.
+LOCAL_BG_CLIP_K = 5.0
+
 
 def gaussian_kernel_2d(
     size: int,
@@ -109,12 +112,16 @@ def local_mean_var(
     inner_radius: int,
     outer_radius: int,
     count: Optional[Tensor] = None,
+    clip_hi: Optional[Tensor] = None,
 ) -> tuple[Tensor, Tensor]:
     # Per-pixel mean and variance of residual over the masked annulus
     # inner_radius < |offset|_inf <= outer_radius (outer box minus inner box)
     # Excluding the inner box keeps a peak from biasing its own background.
     # ``count`` (annulus valid-pixel count) may be supplied precomputed, else None.
+    # ``clip_hi`` one-sided-caps the residual so annulus signal does not bias mean/var.
     m = mask.to(residual.dtype)
+    if clip_hi is not None:
+        residual = torch.minimum(residual, clip_hi.to(residual.dtype))
     rm = residual * m
     rm2 = residual * rm
     so = _box_sum(rm, outer_radius)

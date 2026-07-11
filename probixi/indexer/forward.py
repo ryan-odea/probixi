@@ -13,6 +13,11 @@ def _panel_bases(
 ) -> Optional[Tensor]:
     # (P, 10) tensor [min_ss, max_ss, min_fs, max_fs, corner_x, corner_y,
     # fs_x, fs_y, ss_x, ss_y] per panel
+    # Panels are coplanar at z = clen: fs/ss keep only their in-plane (x, y)
+    # components.
+    #
+    # NEED TO TEST [TODO] (3D): a tilted-panel detector (nonzero fs/ss z) needs per-panel
+    # 3-D placement and ray-plane intersection in q_to_detector.
     panels = geometry.get("panels") or {}
     rows: list[list[float]] = []
     for p in panels.values():
@@ -46,7 +51,9 @@ def _panel_bases(
 def _panel_model_bases(
     geometry: dict, device: Optional[torch.device], dtype: torch.dtype
 ) -> Optional[Tensor]:
-    if len(geometry.get("panels") or {}) < 2:
+    # General per-panel affine map when panels carry an fs/ss basis (any count);
+    # None if any panel lacks fs/ss, so the caller falls back to the beam-centre map.
+    if not (geometry.get("panels") or {}):
         return None
     return _panel_bases(geometry, device, dtype)
 
@@ -109,29 +116,9 @@ def detector_to_q(
     frame_rotation: Optional[Tensor] = None,
     dtype: torch.dtype = torch.float64,
 ) -> Tensor:
-    """Map detector pixel positions to reciprocal-space q-vectors.
-
-    Elastic (Ewald) construction with the beam along +z: a pixel at lab position
-    ``(x, y, clen)`` defines a scattered unit direction ``s_hat`` and
-    ``q = (s_hat - s0_hat) / lambda`` with ``s0_hat = (0, 0, 1)``.
-
-    Parameters
-    ----------
-    positions : Tensor
-        (N, 2) detector ``(row, col)`` pixel positions.
-    geometry : dict
-        Geometry dict (``beam_center``, ``clen``, ``pixel_size``, ``wavelength``,
-        and``panels`` with ``corner_x/y`` and ``fs``/``ss`` for multipanel).
-    frame_rotation : Tensor, optional
-        (3, 3) rotation taking q from lab into the crystal frame.
-    dtype : torch.dtype, optional
-        Working dtype (default ``torch.float64``).
-
-    Returns
-    -------
-    Tensor
-        (N, 3) reciprocal-space q-vectors (A^-1).
-    """
+    # Detector pixels -> reciprocal-space q (A^-1) via the Ewald construction
+    # (beam +z): pixel lab direction s_hat gives q = (s_hat - s0)/lambda, s0 = (0,0,1).
+    # frame_rotation (3,3) optionally maps q from lab into the crystal frame.
     if positions.ndim != 2 or positions.shape[-1] != 2:
         raise ValueError("positions must be (N, 2)")
     device = positions.device

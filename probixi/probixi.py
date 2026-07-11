@@ -16,6 +16,7 @@ from .indexer import (
     RefineConfig,
     SeedConfig,
 )
+from .indexer.forward import detector_to_q
 from .io import (
     CellParams,
     DataLoader,
@@ -39,6 +40,15 @@ from .peakfinding.noise import (
 )
 
 PathLike = Union[str, Path]
+
+# Beam-center exclusion (|q|_min) tuning - maybe exposure to user in future???
+_BEAMSTOP_MAX_FRAMES = 200
+_BEAMSTOP_N_BINS = 40
+_BEAMSTOP_SPIKE_RATIO = 50.0
+_BEAMSTOP_EDGE_FRACTION = 0.1
+_BEAMSTOP_MIN_FRACTION = 0.05
+_BEAMSTOP_MIN_PEAKS = 200
+_BEAMSTOP_MIN_BIN_PEAKS = 5
 
 
 @dataclass
@@ -116,6 +126,7 @@ class Probixi:
     _frame_scales: dict = field(default_factory=dict, init=False, repr=False)
     _h5_mask: Optional[Tensor] = field(default=None, init=False, repr=False)
     _h5_mask_loaded: bool = field(default=False, init=False, repr=False)
+    _beamstop_qmin: Optional[float] = field(default=None, init=False, repr=False)
 
     def __post_init__(self) -> None:
         self.loader = DataLoader(
@@ -147,7 +158,9 @@ class Probixi:
         """Detector geometry dict (beam_center, clen, pixel_size, wavelength, ...)."""
         if self.indexer is not None:
             return self.indexer.geometry
-        return self.loader.metadata.geometry.to_dict()
+        geom = self.loader.metadata.geometry
+        assert geom is not None  # guaranteed non-None by __post_init__
+        return geom.to_dict()
 
     @property
     def target_cell(self) -> CellParams:
@@ -350,10 +363,102 @@ class Probixi:
         if geom is None or geom.mask_spec is None or not files:
             return None
         data_file = next(iter(files.values())).filename
-        good = read_mask(geom, data_file, tuple(frame_size))
+        good = read_mask(geom, data_file, frame_size)
         if good is not None and tuple(good.shape) == tuple(frame_size):
             self._h5_mask = torch.as_tensor(good, dtype=torch.bool)
         return self._h5_mask
+
+    def _qmap(self, frame_size: tuple[int, int], device=None) -> Optional[Tensor]:
+        # Per-pixel |q| (A^-1) from the detector geometry
+        geom = self.loader.metadata.geometry
+        if geom is None:
+            return None
+        rr = torch.arange(frame_size[0], dtype=torch.float32, device=device).view(-1, 1)
+        cc = torch.arange(frame_size[1], dtype=torch.float32, device=device).view(1, -1)
+        pos = torch.stack(
+            [rr.expand(frame_size).reshape(-1), cc.expand(frame_size).reshape(-1)],
+            dim=-1,
+        )
+        return torch.linalg.vector_norm(
+            detector_to_q(pos, geom.to_dict(), dtype=torch.float32), dim=-1
+        ).reshape(frame_size)
+
+    def _infer_beamstop_qmin(self, seed: list) -> Optional[float]:
+        # Learn a beam-center exclusion |q|_min (A^-1) from the calibrated finder
+        if self._noise is None:
+            return None
+        shp = self._noise.valid_mask.shape
+        frame_size = (int(shp[0]), int(shp[1]))
+        qmap = self._qmap(frame_size, device=self._noise.valid_mask.device)
+        if qmap is None:
+            return None
+        rows, cols = frame_size
+        n_bins = _BEAMSTOP_N_BINS
+        qs: list[Tensor] = []
+        for res in self.peak_stream(
+            seed[:_BEAMSTOP_MAX_FRAMES], update_noise=False, estimate_scale=False
+        ):
+            ks = res.kept_stats
+            if ks is None or ks.row_centroid.numel() == 0:
+                continue
+            r = ks.row_centroid.round().long().clamp(0, rows - 1)
+            c = ks.col_centroid.round().long().clamp(0, cols - 1)
+            qs.append(qmap[r, c])
+        if not qs:
+            return None
+        allq = torch.cat(qs).float()
+        if allq.numel() < _BEAMSTOP_MIN_PEAKS:
+            return None
+        qmax = float(qmap.max())
+        if qmax <= 0:
+            return None
+        edges = torch.linspace(0.0, qmax, n_bins + 1)
+        ph = torch.histc(allq, bins=n_bins, min=0.0, max=qmax)
+        pix = torch.histc(
+            qmap[self._noise.valid_mask].float(), bins=n_bins, min=0.0, max=qmax
+        )
+        density = ph / pix.clamp_min(1.0)
+        # zero bins with too few peaks to give a trustworthy density
+        density = torch.where(
+            ph >= _BEAMSTOP_MIN_BIN_PEAKS, density, torch.zeros_like(density)
+        )
+        pos_d = density[density > 0]
+        if pos_d.numel() == 0:
+            return None
+        med = float(pos_d.median())
+        inner = density[: max(1, n_bins // 4)]
+        ref = float(inner.max())
+        if med <= 0 or ref < _BEAMSTOP_SPIKE_RATIO * med:
+            return None
+        amax = int(inner.argmax())
+        thr = _BEAMSTOP_EDGE_FRACTION * ref
+        lo = hi = amax
+        while lo - 1 >= 0 and float(density[lo - 1]) >= thr:
+            lo -= 1
+        while hi + 1 < n_bins and float(density[hi + 1]) >= thr:
+            hi += 1
+        q_min = float(edges[hi + 1])
+        if q_min <= 0.0:
+            return None
+        if float((allq < q_min).sum()) / allq.numel() < _BEAMSTOP_MIN_FRACTION:
+            return None
+        return q_min
+
+    def _apply_beamstop_qmin(self, q_min: float) -> None:
+        # AND a |q| >= q_min beam-center exclusion into the noise model's masks so
+        # detection and the background sources skip the beamstop region.
+        if self._noise is None or q_min <= 0:
+            return
+        shp = self._noise.valid_mask.shape
+        qmap = self._qmap(
+            (int(shp[0]), int(shp[1])), device=self._noise.valid_mask.device
+        )
+        if qmap is None:
+            return
+        keep = (qmap >= q_min).to(self._noise.valid_mask.device)
+        self._noise.static_mask &= keep
+        self._noise.valid_mask &= keep
+        self._noise._mask_version += 1
 
     def _update_noise(self, item: Tensor) -> None:
         if item.ndim == 3:
@@ -502,12 +607,20 @@ class Probixi:
                 **topts,
             )
         self._scale_ref = ScaleReference.from_noise_model(self.noise)
-        if getattr(self, "indexer", None) is not None and self.noise.gain is not None:
+        if self.indexer is not None and self.noise.gain is not None:
             self.indexer._measured_gain = self.noise.gain
-        if getattr(self, "indexer", None) is not None:
-            self.indexer._bg_annulus_pixels = self._finder.background_annulus_pixels()
+        if self.indexer is not None:
+            self.indexer._bg_annulus_pixels = self.finder.background_annulus_pixels()
+        self._beamstop_qmin = self._infer_beamstop_qmin(seed)
+        if self._beamstop_qmin:
+            self._apply_beamstop_qmin(self._beamstop_qmin)
         self._sync_active_noise_sources()
         return result
+
+    @property
+    def beamstop_min_res(self) -> Optional[float]:
+        """Effective low-resolution cutoff (A) excluding the beam center, or None."""
+        return 1.0 / self._beamstop_qmin if self._beamstop_qmin else None
 
     def _sync_active_noise_sources(self) -> None:
         finder = getattr(self, "_finder", None)

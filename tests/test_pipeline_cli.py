@@ -307,6 +307,102 @@ def test_cli_peaks_only_without_cell_writes_cxi_dir(tmp_path, run_files, geom_pa
     assert int(npeaks.sum()) > 0
 
 
+def test_cli_indexing_run_writes_duckdb(tmp_path, run_files, geom_path):
+    duckdb = pytest.importorskip("duckdb")
+    lst_path, _, _ = run_files
+    out = tmp_path / "indexed.duckdb"
+    runner = CliRunner()
+    result = runner.invoke(
+        cli.main,
+        [
+            "-i",
+            str(lst_path),
+            "-g",
+            str(geom_path),
+            "-p",
+            str(CELL_FIXTURE),
+            "-o",
+            str(out),
+            "--seed-frames",
+            str(N_NOISE),
+            "--warmup-frames",
+            "4",
+            "--start",
+            str(N_NOISE),
+            "--stop",
+            str(N_NOISE + N_PLANTED),
+            "--batch-size",
+            str(N_PLANTED),
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    assert out.is_file()
+    conn = duckdb.connect(str(out), read_only=True)
+    try:
+        tables = {r[0] for r in conn.execute("SHOW TABLES").fetchall()}
+        assert {"geometry", "cell", "frames", "reflections", "peaks"} <= tables
+        # only the processed [start, stop) range is recorded, all indexed
+        n_frames, n_indexed = conn.execute(
+            "SELECT COUNT(*), SUM(indexed::INT) FROM frames"
+        ).fetchone()
+        assert n_frames == N_PLANTED
+        assert n_indexed == N_PLANTED
+        # the planted lattice integrates real reflections that join to frames
+        joined = conn.execute(
+            "SELECT COUNT(*) FROM reflections r JOIN frames f USING (frame_id)"
+        ).fetchone()[0]
+        assert joined > 0
+        assert joined == conn.execute("SELECT COUNT(*) FROM reflections").fetchone()[0]
+    finally:
+        conn.close()
+
+
+def test_cli_peaks_only_writes_duckdb(tmp_path, run_files, geom_path):
+    duckdb = pytest.importorskip("duckdb")
+    lst_path, _, _ = run_files
+    out = tmp_path / "peaks.duckdb"
+    runner = CliRunner()
+    result = runner.invoke(
+        cli.main,
+        [
+            "-i",
+            str(lst_path),
+            "-g",
+            str(geom_path),
+            "-o",
+            str(out),
+            "--peaks-only",
+            "--seed-frames",
+            str(N_NOISE),
+            "--warmup-frames",
+            "4",
+            "--start",
+            str(N_NOISE),
+            "--stop",
+            str(N_NOISE + N_PLANTED),
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    # a .db with --peaks-only writes peaks into the database, not a CXI directory
+    assert out.is_file()
+    conn = duckdb.connect(str(out), read_only=True)
+    try:
+        n_peaks = conn.execute("SELECT COUNT(*) FROM peaks").fetchone()[0]
+        assert n_peaks > 0
+        # peaks-only: nothing indexed, no reflections
+        assert conn.execute("SELECT SUM(indexed::INT) FROM frames").fetchone()[0] == 0
+        assert conn.execute("SELECT COUNT(*) FROM reflections").fetchone()[0] == 0
+        # every peak joins back to a frame row carrying its peak count
+        assert (
+            conn.execute(
+                "SELECT COUNT(*) FROM peaks p JOIN frames f USING (frame_id)"
+            ).fetchone()[0]
+            == n_peaks
+        )
+    finally:
+        conn.close()
+
+
 def test_cli_missing_cell_without_peaks_only_fails(tmp_path, run_files, geom_path):
     lst_path, _, _ = run_files
     out = tmp_path / "fail.stream"

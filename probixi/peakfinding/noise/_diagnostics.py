@@ -117,39 +117,7 @@ def animate_noise_diagnostics(
     assemble=None,
     assembled_beam=None,
 ) -> Path:
-    """Drive ``model`` over ``frames`` in batches and write a diagnostic GIF.
-
-    Updates the (online) model frame by frame, snapshotting after every
-    ``batch_size`` frames, then renders a 3-panel animation: running mean
-    background, radial background profile, and per-batch drift (log scale).
-
-    Parameters
-    ----------
-    model : NoiseModel
-        Live model to fit and visualise; it is updated in place.
-    frames : iterable of Tensor
-        Frames to feed (2-D frames or (N, H, W) batches).
-    path : str or Path
-        Output ``.gif`` path.
-    batch_size : int, default 15
-        Frames folded in between snapshots (one animation frame per batch).
-    fps : int, default 4
-        Playback frame rate of the GIF.
-    dpi : int, default 100
-        Render resolution.
-    max_radius : float, optional
-        Clip the radial-profile x-axis to this radius (px); full range if None.
-    figsize : tuple, default (11.5, 6.0)
-        Figure size in inches.
-    assemble, assembled_beam : optional
-        Physical-assembly callable and beam position; when given, the image
-        panels are reassembled into detector space (continuous rings).
-
-    Returns
-    -------
-    Path
-        The written GIF path.
-    """
+    # Drive model over frames in batches and write a diagnostic GIF
     if batch_size < 1:
         raise ValueError("batch_size must be >= 1")
 

@@ -17,11 +17,7 @@ _AXIS_RE = re.compile(r"([+-]?[0-9]*\.?[0-9]+(?:[eE][+-]?[0-9]+)?)\s*([xy])")
 
 
 def parse_axis_vector(spec: object) -> Optional[tuple[float, float]]:
-    """Parse a CrystFEL ``fs``/``ss`` axis spec into an ``(x, y)`` tuple.
-
-    ``"+0.003976x +0.999992y"`` -> ``(0.003976, 0.999992)``. Returns ``None`` for
-    anything without an ``x`` or ``y`` component (so callers can fall back).
-    """
+    # Parse a CrystFEL ``fs``/``ss`` axis spec into an ``(x, y)`` tuple.
     if not isinstance(spec, str):
         return None
     comps = {axis: float(val) for val, axis in _AXIS_RE.findall(spec)}
@@ -51,23 +47,8 @@ class DataLayout:
 
 @dataclass
 class MaskSpec:
-    """CrystFEL bad-pixel mask reference (``mask``/``mask_file`` + bit flags).
-
-    A pixel is GOOD iff ``(value & mask_good) == mask_good`` and
-    ``(value & mask_bad) == 0`` -- all ``mask_good`` bits set and no ``mask_bad``
-    bit set.
-
-    Parameters
-    ----------
-    mask_file : str, optional
-        External HDF5 file holding the mask; None means the data file itself.
-    mask_path : str, optional
-        Internal HDF5 path to the mask array.
-    mask_good : int
-        Bits that must all be set for a pixel to be good.
-    mask_bad : int
-        Bits whose presence marks a pixel bad.
-    """
+    # CrystFEL bad-pixel mask reference (mask/mask_file + bit flags): a pixel is GOOD
+    # iff (value & mask_good) == mask_good and (value & mask_bad) == 0.
 
     mask_file: Optional[str]
     mask_path: Optional[str]
@@ -203,6 +184,9 @@ def read_geometry(path: PathLike) -> Geometry:
     distance = parameters.get("clen")
     if isinstance(distance, str):
         distance = None
+    elif isinstance(distance, (int, float)) and not isinstance(distance, bool):
+        # CrystFEL detector distance is clen + coffset
+        distance = float(distance) + _mean_coffset(panels, parameters)
 
     dim_map = _collect_dims(parameters)
     data_layout = _build_data_layout(parameters.get("data"), dim_map)
@@ -374,7 +358,7 @@ def _coerce(value: str):
 
 
 def resolve_dynamic_fields(geometry: Geometry, data_file: PathLike) -> Geometry:
-    """Fill in HDF5-path-valued ``clen``/``photon_energy`` from the data file."""
+    # Fill in HDF5-path-valued clen/photon_energy from the data file.
     clen_path = geometry.parameters.get("clen")
     pe_path = geometry.parameters.get("photon_energy")
     need_clen = geometry.distance is None and isinstance(clen_path, str)
@@ -412,9 +396,9 @@ def _dataset_mean(f: h5py.File, path: str) -> Optional[float]:
     return float(finite.mean())
 
 
-def _mean_coffset(geometry: Geometry) -> float:
-    values = [float(p["coffset"]) for p in geometry.panels.values() if "coffset" in p]
-    top = geometry.parameters.get("coffset")
+def _mean_coffset(panels: dict, parameters: dict) -> float:
+    values = [float(p["coffset"]) for p in panels.values() if "coffset" in p]
+    top = parameters.get("coffset")
     if not values and isinstance(top, (int, float)):
         return float(top)
     return sum(values) / len(values) if values else 0.0
@@ -425,7 +409,7 @@ def _resolve_clen(f: h5py.File, path: str, geometry: Geometry) -> Optional[float
     if raw is None:
         return None
     metres = raw * 1e-3 if abs(raw) > _CLEN_MM_THRESHOLD_M else raw
-    return metres + _mean_coffset(geometry)
+    return metres + _mean_coffset(geometry.panels, geometry.parameters)
 
 
 def _resolve_wavelength(f: h5py.File, path: str) -> Optional[float]:

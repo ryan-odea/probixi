@@ -9,27 +9,8 @@ from torch import Tensor
 
 @dataclass
 class RefineResult:
-    """Refinement output over K candidate orientations and N peaks
-
-    Attributes
-    ----------
-    A : Tensor
-        (K, 3, 3) refined reciprocal-to-lab matrices.
-    rmsd : Tensor
-        (K,) RMS q-residual per candidate.
-    n_indexed : Tensor
-        (K,) hard-inlier count per candidate (for reporting).
-    soft_score : Tensor
-        (K,) confidence-weighted inlier mass; equals ``n_indexed`` when no
-        weights are given. Used for ranking.
-    indexed : Tensor
-        (K, N) bool mask of indexed peaks.
-    hkl : Tensor
-        (K, N, 3) integer Miller indices per candidate/peak.
-    history : Tensor
-        (steps,) refinement loss history.
-    """
-
+    # Refinement output over K candidate orientations and N peaks: refined A,
+    # per-candidate rmsd / inlier count / soft score, indexed mask, hkl, loss history.
     A: Tensor
     rmsd: Tensor
     n_indexed: Tensor
@@ -104,7 +85,7 @@ def refine_multiframe_known_B(
     max_iters: int = 200,
     reassign_every: int = 10,
     min_indexed: int = 6,
-    weights_per_frame: Optional[list[Tensor]] = None,
+    weights_per_frame: Optional[list[Optional[Tensor]]] = None,
 ) -> list[RefineResult]:
     # Pad (A_init, q_obs) to (F, K_max, ...) / (F, N_max, 3) and run one Adam over
     # (F, K_max, 3) axis-angle perturbations.
@@ -137,8 +118,9 @@ def refine_multiframe_known_B(
         cand_mask[f, :K_f] = True
         q_pad[f, :N_f] = q_obs_per_frame[f]
         obs_mask[f, :N_f] = True
-        if use_soft and weights_per_frame[f] is not None:
-            w_pad[f, :N_f] = weights_per_frame[f].to(dtype=dtype, device=device)
+        w_f = weights_per_frame[f] if weights_per_frame is not None else None
+        if use_soft and w_f is not None:
+            w_pad[f, :N_f] = w_f.to(dtype=dtype, device=device)
         else:
             w_pad[f, :N_f] = 1.0
 

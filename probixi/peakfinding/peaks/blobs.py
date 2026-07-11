@@ -265,8 +265,9 @@ def compute_blob_stats(
     bbox_c1 = bbox_c1.to(torch.long)
 
     intensity_mean = intensity_sum / size_f
+    # peakedness = max/mean (>= 1); gate to 0 for non-positive mean (undefined)
     peakedness = torch.where(
-        intensity_mean.abs() > 1e-12,
+        intensity_mean > 1e-12,
         intensity_max / intensity_mean.clamp_min(1e-12),
         torch.zeros_like(intensity_mean),
     )

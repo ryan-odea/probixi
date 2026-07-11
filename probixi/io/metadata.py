@@ -93,6 +93,7 @@ def scan_h5(path: PathLike, geometry: Optional[Geometry] = None) -> H5Info:
             placements=None,
         )
 
+    assert geometry is not None  # layout is non-None, so geometry was too
     if "%" in str(layout.data_path):
         raise ValueError(
             f"per-event data paths ('%' in {layout.data_path!r}) are not supported"
@@ -176,6 +177,7 @@ def _validate_placements(
                 )
         exp_ss = p.max_ss - p.min_ss + 1
         exp_fs = p.max_fs - p.min_fs + 1
+        assert p.ss_axis is not None and p.fs_axis is not None
         got_ss, got_fs = raw_shape[p.ss_axis], raw_shape[p.fs_axis]
         if got_ss != exp_ss or got_fs != exp_fs:
             raise ValueError(

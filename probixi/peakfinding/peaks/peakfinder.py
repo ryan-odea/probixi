@@ -18,6 +18,7 @@ from .blobs import (
     select_blobs,
 )
 from .neighborhood import (
+    LOCAL_BG_CLIP_K,
     annulus_count,
     gaussian_kernel_2d,
     local_mean_var,
@@ -403,12 +404,15 @@ class PeakFinder:
             mean0 = mean0 + self._eigen_correction(
                 frame - mean0, var0, modes, pred["mask"]
             )
-        flux = self.flux_variance and self.noise.gain is not None
+        gain = self.noise.gain
+        read_var = self.noise.read_var
+        flux = self.flux_variance and gain is not None
         if not self.local_background:
             if flux:
+                assert gain is not None and read_var is not None
                 # Photon-transfer floor read_var + gain*level
                 floor = self.flux_var_floor * var0
-                base = self.noise.read_var + self.noise.gain * mean0.clamp_min(0.0)
+                base = read_var + gain * mean0.clamp_min(0.0)
                 return mean0, torch.maximum(base, floor).clamp_min(1e-12)
             return mean0, var0
         local_mean, local_var = local_mean_var(
@@ -417,11 +421,13 @@ class PeakFinder:
             self.local_inner_radius,
             self.local_outer_radius,
             count=self._annulus_count,
+            clip_hi=LOCAL_BG_CLIP_K * var0.sqrt(),
         )
         mean_eff = mean0 + local_mean
         if flux:
+            assert gain is not None and read_var is not None
             floor = self.flux_var_floor * var0
-            base = self.noise.read_var + self.noise.gain * mean_eff.clamp_min(0.0)
+            base = read_var + gain * mean_eff.clamp_min(0.0)
             base = torch.maximum(base, floor).clamp_min(1e-12)
             return mean_eff, torch.maximum(base, local_var)
         return mean_eff, torch.maximum(var0, local_var)
@@ -433,6 +439,7 @@ class PeakFinder:
         for k, den in zip(self._mf_kernels, dens):
             t = matched_filter_z(z, k, mask, den=den)
             stat = t if stat is None else torch.maximum(stat, t)
+        assert stat is not None, "matched filter requires at least one kernel scale"
         return stat
 
     @torch.no_grad()

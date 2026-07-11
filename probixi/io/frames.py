@@ -4,6 +4,7 @@ import os
 import queue
 import struct
 import threading
+import warnings
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Iterator, Optional, Sequence, Union
@@ -24,6 +25,7 @@ try:
 
     _HAS_BSHUF = True
 except Exception:  # pragma: no cover
+    bitshuffle = None
     _HAS_BSHUF = False
 
 PathLike = Union[str, Path]
@@ -86,17 +88,34 @@ class DataLoader:
         files: dict[str, H5Info] = {}
         frame_size: Optional[tuple] = None
         total_frames = 0
+        skipped = 0
         for path in self._read_list():
-            info = scan_h5(path, geometry)
+            try:
+                info = scan_h5(path, geometry)
+            except Exception as exc:
+                warnings.warn(f"skipping unreadable file {path!r}: {exc}")
+                skipped += 1
+                continue
             if frame_size is None:
                 frame_size = info.frame_shape
             elif frame_size != info.frame_shape:
-                raise ValueError(
-                    f"Inconsistent frame size in {path}: "
-                    f"{info.frame_shape} != {frame_size}"
+                warnings.warn(
+                    f"skipping {path!r}: frame size {info.frame_shape} "
+                    f"!= expected {frame_size}"
                 )
+                skipped += 1
+                continue
             total_frames += info.n_frames
             files[info.filename] = info
+        if skipped:
+            warnings.warn(
+                f"skipped {skipped} unreadable file(s); "
+                f"{len(files)} readable file(s) remain"
+            )
+        if not files:
+            raise ValueError(
+                f"no readable files in {self.list_file} ({skipped} skipped)"
+            )
         return files, frame_size, total_frames
 
     def _parse_geometry(self) -> Optional[Geometry]:
@@ -147,6 +166,7 @@ def _bshuf_lz4_decoder(dset: h5py.Dataset, frame_shape):
     shape = tuple(int(x) for x in frame_shape)
 
     def decode(raw) -> np.ndarray:
+        assert bitshuffle is not None
         blk = struct.unpack(">i", raw[8:12])[0]
         comp = np.frombuffer(raw[12:], dtype=np.uint8)
         return bitshuffle.decompress_lz4(comp, shape, dt, blk // itemsize if blk else 0)
@@ -179,6 +199,7 @@ def _iter_file_frames(info, f_lo, f_hi, pool, window, stop, fast_state):
         while i < f_hi and not stop.is_set():
             end = min(i + window, f_hi)
             if decoder is not None:
+                assert dset is not None
                 raws = [dset.id.read_direct_chunk((j, 0, 0))[1] for j in range(i, end)]
                 for arr in pool.map(decoder, raws):
                     yield arr
@@ -187,6 +208,7 @@ def _iter_file_frames(info, f_lo, f_hi, pool, window, stop, fast_state):
                 for k in range(block.shape[0]):
                     yield block[k]
             else:
+                assert info.placements is not None
                 block = assemble_batch(f, i, end, info.placements, info.frame_shape)
                 for k in range(block.shape[0]):
                     yield block[k]

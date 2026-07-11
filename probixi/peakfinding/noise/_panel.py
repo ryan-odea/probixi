@@ -13,13 +13,8 @@ PanelSpec = Union[
 
 
 class PanelNoise(NoiseStats):
-    """Panel-level running mean/variance.
-
-    Attributes:
-        panel_map: (rows, cols) panel id per pixel; -1 marks no-panel pixels.
-        pixels_per_panel: Valid pixels assigned to each panel.
-        valid_mask: (rows, cols) bool mask of pixels belonging to some panel.
-    """
+    # Panel-level running mean/variance: panel id per pixel (-1 = no panel),
+    # pixels per panel, and a valid mask of pixels belonging to some panel.
 
     panel_map: Tensor
     pixels_per_panel: Tensor
@@ -85,6 +80,7 @@ class PanelNoise(NoiseStats):
             valid = valid & mask.to(device=valid.device, dtype=torch.bool)
         valid_f = valid.to(frame.dtype)
         pid = self._pid_flat
+        assert isinstance(pid, Tensor)  # registered buffer
 
         sum_per_panel = torch.zeros_like(self.mean_)
         sum_per_panel.index_add_(0, pid, (frame * valid_f).flatten())

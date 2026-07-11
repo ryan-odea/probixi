@@ -9,7 +9,7 @@ from torch import Tensor
 def rocking_radius(
     qn: Tensor, eta: float, r_size: float, bandwidth: float, wavelength: float
 ) -> Tensor:
-    """Rocking half-width (A^-1) at each ``|q|`` (A^-1)."""
+    # Rocking half-width (A^-1) at |q|: domain size + mosaic eta*|q|/2 + bandwidth term
     return r_size + 0.5 * eta * qn + 0.5 * wavelength * bandwidth * qn * qn
 
 
@@ -24,10 +24,11 @@ def estimate_mosaicity(
     r_size_floor: float,
     min_peaks: int = 8,
 ) -> tuple[float, float]:
-    """Fit ``(eta, r_size)`` to the indexed reflections' radial Ewald offset."""
+    # Fit (eta, r_size) to the indexed reflections' radial Ewald offset.
     if int(q_pred.shape[0]) < min_peaks:
         return prior_eta, r_size_floor
     qn = torch.linalg.vector_norm(q_pred, dim=-1)
+    # excitation error eps = |lambda*q + zhat| - 1, minus the bandwidth term
     S = q_pred * wavelength
     Sz = S[:, 2] + 1.0
     eps = torch.sqrt(S[:, 0] ** 2 + S[:, 1] ** 2 + Sz * Sz) - 1.0
@@ -36,6 +37,7 @@ def estimate_mosaicity(
     denom = float((qn * qn).sum())
     if denom <= 1e-12:
         return prior_eta, r_size_floor
+    # through-origin slope; eta = 2*slope with the half-normal sqrt(pi/2) correction
     slope = float((qn * r_s).sum() / denom)
     eta = 2.0 * slope * math.sqrt(math.pi / 2.0)
     if not math.isfinite(eta):

@@ -34,7 +34,10 @@ def test_lattice_dtype_policy_is_device_aware():
     assert _resolve_lattice_dtype(None, torch.float32) is torch.float32
 
 
+@pytest.mark.mps
 def test_indexer_uses_float32_on_mps(geometry_dict, cell):
+    if not torch.backends.mps.is_available():
+        pytest.skip("MPS device not available")
     idxr = Indexer(geometry_dict, cell, device=torch.device("mps"))
     assert idxr.dtype is torch.float32
     assert idxr.B_target.dtype is torch.float32
