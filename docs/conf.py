@@ -43,6 +43,7 @@ extensions = [
 
 intersphinx_mapping = {"py": ("https://docs.python.org/3", None)}
 
+myst_heading_anchors = 4
 
 # Render $...$ / $$...$$ math in the Markdown overviews.
 myst_enable_extensions = ["dollarmath", "amsmath"]
