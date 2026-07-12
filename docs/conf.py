@@ -33,6 +33,8 @@ extensions = [
     "sphinx.ext.doctest",
     "sphinx.ext.autodoc",
     "sphinx.ext.autosummary",
+    "sphinx.ext.napoleon",
+    "sphinx.ext.mathjax",
     "sphinx.ext.intersphinx",
     "sphinx_copybutton",
     "sphinx_autodoc_typehints",
@@ -40,6 +42,10 @@ extensions = [
 ]
 
 intersphinx_mapping = {"py": ("https://docs.python.org/3", None)}
+
+
+# Render $...$ / $$...$$ math in the Markdown overviews.
+myst_enable_extensions = ["dollarmath", "amsmath"]
 
 templates_path = ["_templates"]
 exclude_patterns = ["_build", "Thumbs.db", ".DS_Store"]
