@@ -1,5 +1,5 @@
 # probixi - Self-Calibrating (PROB)ab(I)listic Peak Detection for Serial (X)-Ray Crystallograph(I)c Data <a href="https://github.com/ryan-odea/probixi">
-<img src="docs/assets/sticker.png" align="right" height="138" alt="Probixi logo with link to website." /></a>
+<img src="https://raw.githubusercontent.com/ryan-odea/Probixi/main/docs/assets/sticker.png" align="right" height="138" alt="Probixi logo with link to website." /></a>
 [![Lifecycle:
 experimental](https://img.shields.io/badge/lifecycle-experimental-orange.svg)](https://lifecycle.r-lib.org/articles/stages.html#experimental)
 [![PyPI version](https://badge.fury.io/py/probixi.svg)](https://pypi.org/project/probixi) 
@@ -15,7 +15,7 @@ experimental](https://img.shields.io/badge/lifecycle-experimental-orange.svg)](h
 
 `probixi` proposes that bragg peaks can be found/recovered from a detector image by observing the background noise distributional shape over time, per pixel, and collecting peak candidates from an outlier set. Since this noise model is determined in an unsupervised fashion, the user does not need to tune hyperparameters for finding peaks. We are still testing robustness to different types of data collection (synchrotron, FEL) and random fluence changes.
 
-![image](docs/assets/br_fel.gif)
+![image](https://raw.githubusercontent.com/ryan-odea/Probixi/main/docs/assets/br_fel.gif)
 
 ## Installing the Package
 
