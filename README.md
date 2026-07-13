@@ -1,5 +1,5 @@
-# probixi - Self-Calibrating (PROB)ab(I)listic Peak Detection for Serial (X)-Ray Crystallograph(I)c Data <a href="https://github.com/ryan-odea/probixi"><img src="docs/assets/sticker.png" align="right" height="138" alt="Probixi logo with link to website." /></a>
-
+# probixi - Self-Calibrating (PROB)ab(I)listic Peak Detection for Serial (X)-Ray Crystallograph(I)c Data <a href="https://github.com/ryan-odea/probixi">
+<img src="docs/assets/sticker.png" align="right" height="138" alt="Probixi logo with link to website." /></a>
 [![Lifecycle:
 experimental](https://img.shields.io/badge/lifecycle-experimental-orange.svg)](https://lifecycle.r-lib.org/articles/stages.html#experimental)
 [![PyPI version](https://badge.fury.io/py/probixi.svg)](https://pypi.org/project/probixi) 
