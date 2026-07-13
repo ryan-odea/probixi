@@ -4,7 +4,7 @@ Well diffracting samples are often trivial to peakfind and then index. These wel
 
 ## Setting Up (FEL)
 
-As always, we need to provide our expected cell, geometry, and a list file of files to index. We can additionally gather information about the noise model we are creating. `probixi` will try to read the pixel mask stored in `.cxi` files and then add other detected misbehaving pixels (if any). For this experiment, let's go with the standard lysozyme taken at SwissFEL.
+As always, we need to provide our expected cell, geometry, and a list file of files to index. We can additionally gather information about the noise model we are creating. `probixi` will try to read the pixel mask stored in `.cxi` files and then add other detected misbehaving pixels (if any). For this experiment, let's go with bacterioRhodopsin.
 
 ```bash
 probixi \
@@ -16,6 +16,8 @@ probixi \
   --gif noise_model.gif \
   --enrich-gate
 ```
+
+![image](../assets/br_fel.gif)
 
 `--gif noise_model.gif` writes a diagnostic animation of the noise model as it warms over the seed frames — the running mean background, its radial profile, and the per-batch drift. It costs only a few seconds and is the quickest way to confirm the background and the learned dead-pixel mask have settled before you trust the detected peaks. Writing `-o lysozyme.stream` (rather than a `.db`) gives a CrystFEL-style stream you can feed straight into `partialator`/`process_hkl` next to an `indexamajig` run, so the two pipelines can be compared one-to-one on the same data.
 
@@ -47,3 +49,5 @@ probixi \
 ```
 
 The calls are identical. Serial synchrotron shots are usually lower fluence than at an FEL, so per-frame signal is weaker. The self-calibrating noise model and detection threshold do that adapting for you. The enrichment gate applies unchanged, still guarding against the occasional overprediction on the strongest shots.
+
+![image](../assets/br_sync.gif)

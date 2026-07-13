@@ -18,6 +18,8 @@ Because weak signal leaves little margin, a clean background estimate matters mo
 
 > NOTE: `--target-noise-peaks` is still being tested to ensure you don't merge more noise downstream
 
+![image](../assets/c1c2_sync.gif)
+
 ## Sparse patterns index themselves
 
 With few peaks, seeding an orientation is the hard part, and it is handled for you. The Fibonacci-sphere seeder adapts per frame: on peak-starved frames it automatically widens the orientation search (at the cost of some computation), more sample directions and in-plane angles, so a sparse pattern still gets a fair shot, then narrows back on richer frames. A candidate must still explain a minimum handful of peaks (six by default) to be accepted, so an information-starved frame simply goes unindexed rather than indexing wrongly.
