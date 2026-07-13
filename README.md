@@ -13,7 +13,7 @@ experimental](https://img.shields.io/badge/lifecycle-experimental-orange.svg)](h
 [![Documentation Status](https://readthedocs.org/projects/probixi/badge/?version=latest)](https://probixi.readthedocs.io)
 [![Code Style](https://img.shields.io/badge/code%20style-black-000000.svg)](https://github.com/psf/black)
 
-`probixi` proposes that bragg peaks can be found/recovered from a detector image by observing the background noise distributional shape over time, per pixel, and collecting peak candidates from an outlier set. Since this noise model is determined in an unsupervised fashion, the user does not need to tune hyperparameters for finding peaks. We are still testing robustness to different types of data collection (synchrotron, FEL) and random fluence changes, results will be included in this README as they arrive.
+`probixi` proposes that bragg peaks can be found/recovered from a detector image by observing the background noise distributional shape over time, per pixel, and collecting peak candidates from an outlier set. Since this noise model is determined in an unsupervised fashion, the user does not need to tune hyperparameters for finding peaks. We are still testing robustness to different types of data collection (synchrotron, FEL) and random fluence changes.
 
 ![image](docs/assets/br_fel.gif)
 
@@ -108,52 +108,6 @@ The database holds run metadata as small tables (`geometry`, `panels`, `cell`) p
   `background`, `fs/ss`, panel, resolution)
 - **`peaks`** — the peak-search results per frame
 
-## Comparison with other works
-
-Here, we provide a comparison with other peakfinding algorithms with real data. Using a randomly sampled ~10,000 frames from experimentally collected data. Lysozyme and BacterioRhodopsin normally perform quite well. Our C1C2 crystals at the synchrotron diffracted barely above the noise floor.
-
-Notes:
-
-1. For wall time, because `probixi` handles optimizing internal hyperparameters automatically, I have included time used for loose manual hyperparameter tuning on 10% subsamples to find optimal SNR, threshold, and minimum pixels. CPU time for only peakfinding and indexing is bracketed.
-2. `probixi` uses a single NVIDIA 40gb A100, but is extendable to multiple GPUs at request.
-3. Rsplit Difference (CC*) indicates the difference (comparison - `probixi`). Reflections are currently merged via `partialator` for `.hkl` generation. Further work is planned to handle automerging. (CC*) indicates CC* difference (comparison - `probixi`)
-
-Benchmarks were run on:
-
-- GPU: NVIDIA 40gb A100
-- CPU: AMD EPYC 9335 using all 32 cores
-
-### `peakfinder8 + indexamajig`
-
-| Dataset                               | Percent Indexed (`probixi`) | Wall time (`probixi`) | Percent Indexed (`peakfinder8+ indexamajig`) | Wall Time (`peakfinder8+ indexamajig`) [No-Tuning] | Rsplit Difference (CC*) |
-|---------------------------------------|---------------------------|---------------------|-------------------------------------|-------------------------------|-------------------|
-| Lysozyme-Synchrotron                  ||||||
-| Lysozyme-FEL                          ||||||
-| BacterioRhodopsin-Synchrotron         | 18.0 || 19.6 || 0.03 (-0.01) |
-| BacterioRhodopsin-FEL                 ||||||
-| C1C2-Synchrotron                      | 1.9 || 1.09 || 147.18 (-0.07) |
-| Randomly Dimmed Lysozyme-FEL          ||||||
-| Randomly Dimmed BacterioRhodopsin-FEL ||||||
-
-### pyFAI + TORO
-
-Perhaps a more fair comparison, especially with respect to speed, is [pyFAI][pyfai] (azimuthal
-integration and peak picking) paired with the [TORO][toro] indexer, which both run on the GPU.
-
-[pyfai]: https://doi.org/10.1107/S1600576715004306
-[toro]: https://doi.org/10.1107/S1600576724003182
-
-
-| Dataset                               | Percent Indexed (`probixi`) | Wall time (`probixi`) | Percent Indexed (`pyFAI+TORO`) | Wall Time (`pyFAI+TORO`) [No-Tuning] | Total Rsplit (CC*) |
-|---------------------------------------|---------------------------|---------------------|-------------------------------------|-------------------------------|-------------------|
-| Lysozyme-Synchrotron                  ||||||
-| Lysozyme-FEL                          ||||||
-| BacterioRhodopsin-Synchrotron         | 18 |||||
-| BacterioRhodopsin-FEL                 ||||||
-| Randomly Dimmed Lysozyme-FEL          ||||||
-| C1C2-Synchrotron                      | 1.9 |||||
-| Randomly Dimmed BacterioRhodopsin-FEL ||||||
-
 
 ### Using `probixi` as only a peakfinder
 
@@ -203,6 +157,7 @@ with PeakOffloader(
   - torch
   - matplotlib
   - pillow
+  - duckdb
 
 ## Contributing
 
