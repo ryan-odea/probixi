@@ -13,5 +13,23 @@ documentation for details.
 
 .. toctree::
    :maxdepth: 2
-   :caption: Contents:
+   :hidden:
+   :caption: Interface:
 
+   modules/probixi
+
+.. toctree::
+   :maxdepth: 2
+   :caption: Vignettes:
+
+   vignettes/getting_started
+   vignettes/good_diffraction
+   vignettes/bad_diffraction
+
+.. toctree::
+   :maxdepth: 2
+   :caption: How it Works:
+
+   overview/io
+   overview/peakfinding
+   overview/indexing
