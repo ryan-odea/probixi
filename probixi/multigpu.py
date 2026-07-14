@@ -164,6 +164,8 @@ class BlockConfig:
     target_noise_peaks: Optional[float] = 5.0
     noise_mode: str = "online"
     warmup_frames: int = 16
+    flux_variance: bool = False
+    flux_var_floor: float = 0.15
     panel: str = "0"
     enrich_gate: bool = False
     enrich_alpha: float = 1e-3
@@ -203,6 +205,8 @@ def run_block(
         cell_file=cfg.cell_file,
         noise_mode=cfg.noise_mode,  # type: ignore[arg-type]
         warmup_frames=cfg.warmup_frames,
+        flux_variance=cfg.flux_variance,
+        flux_var_floor=cfg.flux_var_floor,
         device=dev,
     )
     if p.indexer is None:
@@ -284,6 +288,8 @@ def run_data_parallel(
     target_noise_peaks: Optional[float] = 5.0,
     noise_mode: str = "online",
     warmup_frames: int = 16,
+    flux_variance: bool = False,
+    flux_var_floor: float = 0.15,
     panel: str = "0",
     enrich_gate: bool = False,
     enrich_alpha: float = 1e-3,
@@ -318,6 +324,8 @@ def run_data_parallel(
         target_noise_peaks=target_noise_peaks,
         noise_mode=noise_mode,
         warmup_frames=warmup_frames,
+        flux_variance=flux_variance,
+        flux_var_floor=flux_var_floor,
         panel=panel,
         enrich_gate=enrich_gate,
         enrich_alpha=enrich_alpha,

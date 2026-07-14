@@ -62,6 +62,8 @@ def _run_multi_gpu(device_list: list, **kw) -> None:
         target_noise_peaks=kw["target_noise_peaks"],
         noise_mode=kw["noise_mode"],
         warmup_frames=kw["warmup_frames"],
+        flux_variance=kw["flux_variance"],
+        flux_var_floor=kw["flux_var_floor"],
         panel=kw["panel"],
         enrich_gate=kw["enrich_gate"],
         enrich_alpha=kw["enrich_alpha"],
@@ -182,6 +184,21 @@ def _run_multi_gpu(device_list: list, **kw) -> None:
     "yields at most this many noise blobs.",
 )
 @click.option(
+    "--flux-variance",
+    is_flag=True,
+    help="Fit a photon-transfer curve during calibration and whiten each pixel "
+    "against its own Poisson noise, instead of using a frozen variance floor. "
+    "Opt-in; intended for XFEL/SFX or jet-intensity-variable data.",
+)
+@click.option(
+    "--flux-var-floor",
+    type=float,
+    default=0.15,
+    show_default=True,
+    help="Variance floor as a fraction of the calibrated per-pixel variance, "
+    "applied under --flux-variance.",
+)
+@click.option(
     "--panel",
     default="0",
     show_default=True,
@@ -238,6 +255,8 @@ def main(
     warmup_frames: int,
     seed_frames: int,
     target_noise_peaks: float,
+    flux_variance: bool,
+    flux_var_floor: float,
     panel: str,
     enrich_gate: bool,
     enrich_alpha: float,
@@ -276,6 +295,8 @@ def main(
             target_noise_peaks=target_noise_peaks,
             noise_mode=noise_mode,
             warmup_frames=warmup_frames,
+            flux_variance=flux_variance,
+            flux_var_floor=flux_var_floor,
             panel=panel,
             enrich_gate=enrich_gate,
             enrich_alpha=enrich_alpha,
@@ -291,6 +312,8 @@ def main(
         cell_file=cell_file,
         noise_mode=cast("Literal['online', 'per_frame']", noise_mode),
         warmup_frames=warmup_frames,
+        flux_variance=flux_variance,
+        flux_var_floor=flux_var_floor,
         device=dev,
     )
 
