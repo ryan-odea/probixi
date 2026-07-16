@@ -26,6 +26,8 @@ And that's it! There are a few more advanced parameters provided in detail below
 | --devices | str | Comma-separated device list for multi-gpu indexing |
 | --enrich-alpha | float | Max probability to accept a frame under --enrich-gate |
 | --enrich-gate | NA (flag) | Drop indexed frames whose predicted spots are not backed by image signal beyond chance - better for high fluence and good diffraction |
+| --flux-var-floor | float | Variance floor as a fraction of the calibrated per-pixel variance, applied under `--flux-variance` (default 0.15) |
+| --flux-variance | NA (flag) | Fit a photon-transfer curve during calibration and whiten each pixel against its own Poisson noise, instead of a frozen variance floor. Intended for XFEL/SFX or jet-intensity-variable data |
 | --gif | str/Path | Returns a gif of the noise model evolution over the seed frames |
 | --gpus | int | Multi-gpu indexing across first N devices (the same as --devices cuda:0,cuda:1...) |
 | --noise-mode | str | `online` (continuously updated) or `per_frame` built noise models |

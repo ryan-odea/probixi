@@ -4,8 +4,8 @@ build-backend = "hatchling.build"
 
 [project]
 name = "probixi"
-version = "0.3.0"
-description = "Self-Calibrating Probabilistic Peak Finding for Serial X-Ray Crystallography"
+version = "0.3.1"
+description = "Self-Calibrating Probabilistic Peak Finding for Serial X-Ray Crystallographic Data"
 readme = "README.md"
 license = { text = "MIT" }
 requires-python = ">=3.10"
