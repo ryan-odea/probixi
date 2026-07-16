@@ -15,6 +15,7 @@
 
 .. toctree::
    :maxdepth: 2
+   :hidden:
    :caption: Vignettes:
 
    vignettes/getting_started
@@ -23,6 +24,7 @@
 
 .. toctree::
    :maxdepth: 2
+   :hidden:
    :caption: How it Works:
 
    overview/io
