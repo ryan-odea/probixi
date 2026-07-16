@@ -9,7 +9,7 @@ authors:
     given-names: Tobias
     affiliation: "PSI - Paul Scherrer Institute Laboratory of Biomolecular Research"
 title: "probixi - Self Calibrating (PROB)ab(I)listic Peak Finding for Serial (X)-ray Crystallograph(I)c Data"
-version: 0.3.0
+version: 0.3.1
 url: https://probixi.readthedocs.io/
 repository-code: https://github.com/ryan-odea/probixi
 repository-artifact: https://pypi.org/project/probixi/
