@@ -51,6 +51,41 @@ _BEAMSTOP_MIN_PEAKS = 200
 _BEAMSTOP_MIN_BIN_PEAKS = 5
 
 
+# --- BEGIN GENERATED CITATION ---
+_CITATION = r"""
+@software{odea_probixi,
+  author  = {O'Dea, Ryan and Weinert, Tobias},
+  title   = {{probixi}: Self-Calibrating Probabilistic Peak Finding for Serial X-Ray Crystallographic Data},
+  version = {0.3.0},
+  year    = {2026},
+  url     = {https://github.com/ryan-odea/probixi}
+}
+"""
+# --- END GENERATED CITATION ---
+_CITATION_URL = (
+    "https://raw.githubusercontent.com/ryan-odea/probixi/main/docs/assets/citation.bib"
+)
+
+# Cite repo version
+__citation__ = _CITATION.strip() + "\n"
+
+
+def citation(timeout: float = 3.0) -> str:
+    text = _CITATION
+    try:
+        from urllib.request import urlopen
+
+        with urlopen(_CITATION_URL, timeout=timeout) as resp:
+            fetched = resp.read().decode("utf-8")
+        if fetched.strip():
+            text = fetched
+    except Exception:
+        pass
+    entry = text.strip() + "\n"
+    print(entry, end="")
+    return entry
+
+
 @dataclass
 class Probixi:
     """Self-calibrating probabilistic peak finder and indexer.
