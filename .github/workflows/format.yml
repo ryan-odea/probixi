@@ -22,6 +22,43 @@ jobs:
         with:
           python-version: '3.11'
 
+      - name: Sync version into citation files
+        run: |
+          python - <<'EOF'
+          import pathlib, re
+
+          root = pathlib.Path(".")
+          pyproject = (root / "pyproject.toml").read_text()
+          version = re.search(r'(?m)^version\s*=\s*"([^"]+)"', pyproject).group(1)
+
+          # CITATION.cff
+          cff = root / "CITATION.cff"
+          cff.write_text(re.sub(r"(?m)^version:.*$", f"version: {version}", cff.read_text()))
+
+          # citation.bib
+          bib_path = root / "docs" / "assets" / "citation.bib"
+          bib = re.sub(
+              r"(?m)^(\s*version\s*=\s*\{)[^}]*(\})",
+              lambda m: m.group(1) + version + m.group(2),
+              bib_path.read_text(),
+          )
+          bib_path.write_text(bib)
+
+          driver = root / "probixi" / "probixi.py"
+          block = (
+              "# --- BEGIN GENERATED CITATION ---\n"
+              '_CITATION = r"""\n' + bib.strip() + '\n"""\n'
+              "# --- END GENERATED CITATION ---"
+          )
+          driver.write_text(re.sub(
+              r"# --- BEGIN GENERATED CITATION.*?# --- END GENERATED CITATION ---",
+              lambda _: block,
+              driver.read_text(),
+              flags=re.S,
+          ))
+          print(f"Synced version {version} into CITATION.cff, docs/assets/citation.bib, and probixi.py")
+          EOF
+
       - name: Install formatters
         run: pip install black isort ruff
 
