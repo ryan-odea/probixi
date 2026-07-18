@@ -3,8 +3,10 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+import sim
 import torch
 
+from probixi.io.geometry import EV_ANGSTROM
 from probixi.multigpu import (
     BlockConfig,
     block_bounds,
@@ -13,10 +15,13 @@ from probixi.multigpu import (
     run_block,
 )
 
-REPO_ROOT = Path(__file__).parent.parent
-RUN_LST = REPO_ROOT / "test_data" / "run1.lst"
-RUN_GEOM = REPO_ROOT / "test_data" / "Eiger4M-v1.geom"
-RUN_CELL = REPO_ROOT / "test_data" / "bR.cell"
+FIXTURES = Path(__file__).parent / "fixtures"
+CELL_FIXTURE = FIXTURES / "bR.cell"
+# small single-panel detector: fast synthetic run, no real data needed
+_DET = 256
+_CLEN = 0.10
+_PIXEL_SIZE = 150e-6
+_WAVELENGTH = 1.3
 
 
 # --------------------------------------------------------------------------- #
@@ -179,20 +184,46 @@ def test_env_int_rejects_non_integer(monkeypatch):
 
 
 # --------------------------------------------------------------------------- #
-# Real-data integration (runs the actual pipeline per block, then merges)
+# Integration: run the actual per-block pipeline on a SYNTHETIC run, then merge.
+# Indexing correctness itself is covered by test_pipeline_cli; here we exercise the
+# multi-GPU-specific orchestration (block sub-range, per-rank offload, stats, merge).
 # --------------------------------------------------------------------------- #
-def _has_run_data() -> bool:
-    return RUN_LST.is_file() and RUN_GEOM.is_file() and RUN_CELL.is_file()
+def _sim_geom_text() -> str:
+    # single centred panel; beam_center=(-corner_y,-corner_x), res=1/pixel_size
+    bc = (_DET - 1) / 2.0
+    return (
+        f"clen = {_CLEN}\n"
+        f"photon_energy = {EV_ANGSTROM / _WAVELENGTH}\n"
+        f"res = {1.0 / _PIXEL_SIZE}\n"
+        "max_adu = 65535\n"
+        "data = /entry/data/data\n"
+        "0/min_fs = 0\n"
+        "0/min_ss = 0\n"
+        f"0/max_fs = {_DET - 1}\n"
+        f"0/max_ss = {_DET - 1}\n"
+        f"0/corner_x = {-bc}\n"
+        f"0/corner_y = {-bc}\n"
+        "0/fs = +1.0x +0.0y\n"
+        "0/ss = +0.0x +1.0y\n"
+    )
 
 
-@pytest.mark.slow
+def _synthetic_noise_run(tmp_path: Path) -> tuple[Path, Path]:
+    # 8 signal-free frames written as an HDF5 stack + a .lst (absolute paths, so the
+    # run is CWD-independent), plus a matching single-panel geometry.
+    geom_path = tmp_path / "sim.geom"
+    geom_path.write_text(_sim_geom_text(), encoding="utf-8")
+    noise = sim.simulate_noise_frames((_DET, _DET), 8, seed=100)
+    _, lst_path = sim.write_run(tmp_path / "run", noise)
+    return lst_path, geom_path
+
+
 def test_run_block_covers_disjoint_ranges_and_merges(tmp_path):
-    if not _has_run_data():
-        pytest.skip("no test_data/run1.lst run available")
+    lst_path, geom_path = _synthetic_noise_run(tmp_path)
     cfg = BlockConfig(
-        list_file=str(RUN_LST),
-        geometry_file=str(RUN_GEOM),
-        cell_file=str(RUN_CELL),
+        list_file=str(lst_path),
+        geometry_file=str(geom_path),
+        cell_file=str(CELL_FIXTURE),
         start=0,
         stop=8,
         seed_frames=4,
@@ -200,7 +231,7 @@ def test_run_block_covers_disjoint_ranges_and_merges(tmp_path):
         threads=2,
         quiet=True,
     )
-    # Drive both ranks in-process (no spawn) to keep the test fast + robust.
+    # drive both ranks in-process (no spawn) to keep the test fast + robust
     parts = [tmp_path / "o.rank0", tmp_path / "o.rank1"]
     s0 = run_block(0, 2, "cpu", cfg, parts[0])
     s1 = run_block(1, 2, "cpu", cfg, parts[1])
@@ -208,8 +239,13 @@ def test_run_block_covers_disjoint_ranges_and_merges(tmp_path):
     # contiguous, disjoint blocks covering the whole [0, 8) range
     assert (s0["lo"], s0["hi"]) == (0, 4)
     assert (s1["lo"], s1["hi"]) == (4, 8)
-    assert s0["frames"] + s1["frames"] == 8
+    assert s0["frames"] == 4 and s1["frames"] == 4
+    # each rank drops a stats sidecar next to its part
+    assert Path(f"{parts[0]}.stats.json").is_file()
+    assert Path(f"{parts[1]}.stats.json").is_file()
 
+    # the per-rank parts merge into one well-formed stream: a single header and
+    # globally renumbered, monotonic serials (empty is fine -- noise indexes nothing)
     out = tmp_path / "merged.stream"
     merge_streams(parts, out)
     txt = out.read_text()
