@@ -355,3 +355,59 @@ def test_blob_stats_centroid_recovers_isolated_spot_position():
     )
     assert float(stats.row_centroid[0]) == pytest.approx(truth_r, abs=1.0)
     assert float(stats.col_centroid[0]) == pytest.approx(truth_c, abs=1.0)
+
+
+def test_compute_blob_stats_every_field_matches_per_blob_reference():
+    # Guards the fused (batched-scatter) reductions: each field is checked against a
+    # straightforward per-blob loop, so a mixed-up column would be caught.
+    torch.manual_seed(0)
+    H = W = 12
+    labels = torch.zeros(H, W, dtype=torch.long)
+    labels[2:4, 2:5] = 1  # 2x3 blob
+    labels[7:10, 6:8] = 2  # 3x2 blob
+    excess = torch.rand(H, W) * 100.0  # positive -> intensity-weighted centroid
+    z = torch.randn(H, W)
+    log_bf = torch.randn(H, W)
+    posterior = torch.rand(H, W)
+    var = torch.rand(H, W) + 0.1
+    stats = compute_blob_stats(
+        labels, 2, excess=excess, z=z, log_bf=log_bf, posterior=posterior, var=var
+    )
+    for b in (1, 2):
+        i, m = b - 1, labels == b
+        idx = torch.nonzero(m)
+        rr, cc = idx[:, 0].to(excess.dtype), idx[:, 1].to(excess.dtype)
+        w = excess[m].clamp_min(0)
+        wsum = float(w.sum())
+        rc = float((w * rr).sum()) / wsum
+        cc_ = float((w * cc).sum()) / wsum
+        Crr = float((w * (rr - rc) ** 2).sum()) / wsum
+        Ccc = float((w * (cc - cc_) ** 2).sum()) / wsum
+        Crc = float((w * (rr - rc) * (cc - cc_)).sum()) / wsum
+        tr = Crr + Ccc
+        disc = (tr * tr - 4.0 * (Crr * Ccc - Crc * Crc)) ** 0.5
+        ecc = (0.5 * (tr + disc)) / (0.5 * (tr - disc))
+        assert int(stats.size[i]) == int(m.sum())
+        assert float(stats.intensity_sum[i]) == pytest.approx(
+            float(excess[m].sum()), abs=1e-3
+        )
+        assert float(stats.intensity_sigma[i]) == pytest.approx(
+            float(var[m].sum().sqrt()), abs=1e-4
+        )
+        assert float(stats.log_bf_sum[i]) == pytest.approx(
+            float(log_bf[m].sum()), abs=1e-4
+        )
+        assert float(stats.posterior_mean[i]) == pytest.approx(
+            float(posterior[m].mean()), abs=1e-5
+        )
+        assert float(stats.intensity_max[i]) == pytest.approx(
+            float(excess[m].max()), abs=1e-5
+        )
+        assert float(stats.z_max[i]) == pytest.approx(float(z[m].max()), abs=1e-5)
+        assert float(stats.row_centroid[i]) == pytest.approx(rc, abs=1e-3)
+        assert float(stats.col_centroid[i]) == pytest.approx(cc_, abs=1e-3)
+        assert float(stats.eccentricity[i]) == pytest.approx(ecc, rel=1e-3)
+        assert int(stats.bbox_r0[i]) == int(idx[:, 0].min())
+        assert int(stats.bbox_r1[i]) == int(idx[:, 0].max()) + 1
+        assert int(stats.bbox_c0[i]) == int(idx[:, 1].min())
+        assert int(stats.bbox_c1[i]) == int(idx[:, 1].max()) + 1

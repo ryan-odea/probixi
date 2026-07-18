@@ -4,7 +4,7 @@ import pytest
 import sim
 import torch
 
-from probixi.indexer.integrate import integrate_predicted
+from probixi.indexer.integrate import integrate_boxes, integrate_predicted
 from probixi.indexer.lattice import cell_to_B
 from probixi.indexer.predict import detector_q_max, predict_reflections
 
@@ -220,6 +220,49 @@ def test_integrate_with_no_observed_peaks_keeps_predicted_positions():
     )
     assert not bool(snapped.any())
     assert torch.allclose(positions, pred_pos)
+
+
+def test_integrate_boxes_deblend_owns_shared_pixel_by_nearest_then_lowest_index():
+    # M>1 nearest-owner deblend: a pixel in the overlap of two boxes is assigned to
+    # exactly one centre (nearest, ties broken by lowest index), never double-counted.
+    shape = (48, 48)
+    positions = torch.tensor([[24.0, 22.0], [24.0, 26.0]], dtype=torch.float64)
+    excess = torch.zeros(shape, dtype=torch.float64)
+    excess[24, 22] = 100.0  # only in box 0
+    excess[24, 26] = 80.0  # only in box 1
+    excess[24, 24] = 30.0  # equidistant (d=2) -> tie -> lowest index (box 0)
+    var = torch.ones(shape, dtype=torch.float64)
+    inten, sigma, peak, bg = integrate_boxes(excess, var, positions, radius=3)
+    # shared pixel counted once, in box 0; total conserved (no double-count)
+    assert float(inten[0]) == pytest.approx(130.0)
+    assert float(inten[1]) == pytest.approx(80.0)
+    assert float(inten.sum()) == pytest.approx(210.0)
+
+
+@pytest.mark.mps
+def test_integrate_boxes_deblend_runs_on_mps_and_matches_cpu():
+    # The M>1 deblend tie-break used an int64 scatter_reduce, which has no MPS
+    # kernel and crashed on-device; guard that it runs and agrees with CPU.
+    if not torch.backends.mps.is_available():
+        pytest.skip("MPS device not available")
+    shape = (48, 48)
+    positions = torch.tensor([[24.0, 22.0], [24.0, 26.0]], dtype=torch.float32)
+    excess = torch.zeros(shape, dtype=torch.float32)
+    excess[24, 22] = 100.0
+    excess[24, 26] = 80.0
+    excess[24, 24] = 30.0  # overlap pixel -> exercises the tie-break scatter
+    var = torch.ones(shape, dtype=torch.float32)
+
+    def run(dev: torch.device):
+        out = integrate_boxes(excess.to(dev), var.to(dev), positions.to(dev), radius=3)
+        return [t.cpu() for t in out]
+
+    I_c, s_c, p_c, b_c = run(torch.device("cpu"))
+    I_m, s_m, p_m, b_m = run(torch.device("mps"))  # previously raised on int64
+    assert torch.allclose(I_c, I_m, atol=1e-4)
+    assert torch.allclose(s_c, s_m, atol=1e-4)
+    assert torch.allclose(p_c, p_m, atol=1e-4)
+    assert float(I_m[0]) == pytest.approx(130.0, abs=1e-3)
 
 
 def test_integrate_peak_is_box_maximum_of_excess():
