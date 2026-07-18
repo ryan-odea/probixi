@@ -90,33 +90,33 @@ def label_connected_components(
 
     rows = fg // W
     cols = fg % W
-    offsets = (
-        [(-1, 0), (1, 0), (0, -1), (0, 1)]
-        if connectivity == 1
-        else [(-1, -1), (-1, 0), (-1, 1), (0, -1), (0, 1), (1, -1), (1, 0), (1, 1)]
-    )
+    if connectivity == 1:
+        doff = torch.tensor([-1, 1, 0, 0], dtype=torch.long, device=device)
+        coff = torch.tensor([0, 0, -1, 1], dtype=torch.long, device=device)
+    else:
+        doff = torch.tensor(
+            [-1, -1, -1, 0, 0, 1, 1, 1], dtype=torch.long, device=device
+        )
+        coff = torch.tensor(
+            [-1, 0, 1, -1, 1, -1, 0, 1], dtype=torch.long, device=device
+        )
 
-    # For each fg pixel and offset, the fg-index of that neighbor (-1 if none)
-    nbr = torch.full((K, len(offsets)), -1, dtype=torch.long, device=device)
-    for o, (dy, dx) in enumerate(offsets):
-        r2 = rows + dy
-        c2 = cols + dx
-        valid = (r2 >= 0) & (r2 < H) & (c2 >= 0) & (c2 < W)
-        nflat = (r2 * W + c2).clamp_(0, H * W - 1)
-        idx = torch.searchsorted(fg, nflat).clamp_(max=K - 1)
-        hit = valid & (fg[idx] == nflat)
-        nbr[:, o] = torch.where(hit, idx, torch.full_like(idx, -1))
+    valid = (r2 >= 0) & (r2 < H) & (c2 >= 0) & (c2 < W)
+    nflat = (r2 * W + c2).clamp_(0, H * W - 1)
+    nbr_c = torch.searchsorted(fg, nflat).clamp_(max=K - 1)  # in [0, K-1]
+    nbr_valid = valid & (fg[nbr_c] == nflat)
 
     labels = torch.arange(K, dtype=torch.long, device=device)
     big = torch.full((), K, dtype=torch.long, device=device)
-    nbr_valid = nbr >= 0
-    nbr_c = nbr.clamp_min(0)
-    for _ in range(max_iters):
+    # Convergence needs a host sync (torch.equal)
+    check_every = 4
+    for it in range(max_iters):
         gathered = torch.where(nbr_valid, labels[nbr_c], big)
         cand = torch.minimum(labels, gathered.amin(dim=1))
-        if torch.equal(cand, labels):
-            break
+        converged = it % check_every == check_every - 1 and torch.equal(cand, labels)
         labels = cand
+        if converged:
+            break
 
     uniq, inv = torch.unique(labels, return_inverse=True)
     n_blobs = int(uniq.numel())
@@ -191,36 +191,54 @@ def compute_blob_stats(
     rows = grid_rows_f[fg]
     cols = grid_cols_f[fg]
 
+    # Fused per-blob reductions: batch each group of same-index scatters into one call over a stacked source.
+    lbl2 = lbl.unsqueeze(1)
     size = torch.zeros(n_total, dtype=torch.long, device=device)
     size.scatter_add_(0, lbl, torch.ones_like(lbl))
-    w_sum = torch.zeros(n_total, dtype=dtype, device=device)
-    w_sum.scatter_add_(0, lbl, w)
 
-    w_row = torch.zeros(n_total, dtype=dtype, device=device)
-    w_col = torch.zeros(n_total, dtype=dtype, device=device)
-    g_row = torch.zeros(n_total, dtype=dtype, device=device)
-    g_col = torch.zeros(n_total, dtype=dtype, device=device)
-    w_row.scatter_add_(0, lbl, w * rows)
-    w_col.scatter_add_(0, lbl, w * cols)
-    g_row.scatter_add_(0, lbl, rows)
-    g_col.scatter_add_(0, lbl, cols)
+    add1_src = torch.stack(
+        [
+            w,
+            w * rows,
+            w * cols,
+            rows,
+            cols,
+            flat_excess,
+            flat_var.clamp_min(0),
+            flat_lbf,
+            flat_post,
+        ],
+        dim=1,
+    )
+    add1 = torch.zeros(n_total, add1_src.shape[1], dtype=dtype, device=device)
+    add1.scatter_add_(0, lbl2.expand_as(add1_src), add1_src)
+    w_sum, w_row, w_col, g_row, g_col = (
+        add1[:, 0],
+        add1[:, 1],
+        add1[:, 2],
+        add1[:, 3],
+        add1[:, 4],
+    )
+    intensity_sum, var_sum, log_bf_sum, post_sum = (
+        add1[:, 5],
+        add1[:, 6],
+        add1[:, 7],
+        add1[:, 8],
+    )
 
     has_w = w_sum > 0
     size_f = size.clamp_min(1).to(dtype)
-    row_centroid = torch.where(has_w, w_row / w_sum.clamp_min(1e-12), g_row / size_f)
-    col_centroid = torch.where(has_w, w_col / w_sum.clamp_min(1e-12), g_col / size_f)
+    w_safe = w_sum.clamp_min(1e-12)
+    row_centroid = torch.where(has_w, w_row / w_safe, g_row / size_f)
+    col_centroid = torch.where(has_w, w_col / w_safe, g_col / size_f)
 
     # Weighted second central moments -> 2x2 covariance (inertia) matrix
     dr = rows - row_centroid[lbl]
     dc = cols - col_centroid[lbl]
-    Crr = torch.zeros(n_total, dtype=dtype, device=device)
-    Ccc = torch.zeros(n_total, dtype=dtype, device=device)
-    Crc = torch.zeros(n_total, dtype=dtype, device=device)
-    Crr.scatter_add_(0, lbl, w * dr * dr)
-    Ccc.scatter_add_(0, lbl, w * dc * dc)
-    Crc.scatter_add_(0, lbl, w * dr * dc)
-    w_safe = w_sum.clamp_min(1e-12)
-    Crr, Ccc, Crc = Crr / w_safe, Ccc / w_safe, Crc / w_safe
+    add2_src = torch.stack([w * dr * dr, w * dc * dc, w * dr * dc], dim=1)
+    add2 = torch.zeros(n_total, 3, dtype=dtype, device=device)
+    add2.scatter_add_(0, lbl2.expand_as(add2_src), add2_src)
+    Crr, Ccc, Crc = add2[:, 0] / w_safe, add2[:, 1] / w_safe, add2[:, 2] / w_safe
     # Closed-form symmetric-2x2 eigenvalues; ratio = eccentricity. disc >=0
     tr = Crr + Ccc
     disc = (tr * tr - 4.0 * (Crr * Ccc - Crc * Crc)).clamp_min(0.0).sqrt()
@@ -231,38 +249,43 @@ def compute_blob_stats(
         lam_max / lam_min.clamp_min(1e-12),
         torch.full_like(lam_max, float("inf")),
     )
-
-    intensity_sum = torch.zeros(n_total, dtype=dtype, device=device)
-    intensity_sum.scatter_add_(0, lbl, flat_excess)
-    # sigma(I) = sqrt(sum var): per-pixel noise treated independent over the peak blob
-    var_sum = torch.zeros(n_total, dtype=dtype, device=device)
-    var_sum.scatter_add_(0, lbl, flat_var.clamp_min(0))
+    # sigma(I) = sqrt(sum var)
     intensity_sigma = var_sum.sqrt()
-    log_bf_sum = torch.zeros(n_total, dtype=dtype, device=device)
-    log_bf_sum.scatter_add_(0, lbl, flat_lbf)
-    post_sum = torch.zeros(n_total, dtype=dtype, device=device)
-    post_sum.scatter_add_(0, lbl, flat_post)
 
-    intensity_max = torch.full((n_total,), float("-inf"), dtype=dtype, device=device)
-    intensity_max = intensity_max.scatter_reduce(
-        0, lbl, flat_excess, reduce="amax", include_self=True
+    # per-blob maxima of (excess, z), fused into one amax scatter
+    amax = torch.full((n_total, 2), float("-inf"), dtype=dtype, device=device)
+    amax.scatter_reduce_(
+        0,
+        lbl2.expand(-1, 2),
+        torch.stack([flat_excess, flat_z], dim=1),
+        reduce="amax",
+        include_self=True,
     )
-    z_max = torch.full((n_total,), float("-inf"), dtype=dtype, device=device)
-    z_max = z_max.scatter_reduce(0, lbl, flat_z, reduce="amax", include_self=True)
+    intensity_max, z_max = amax[:, 0], amax[:, 1]
 
-    # bbox min/max in float (row/col indices are exact in float32), cast to long
-    bbox_r0 = torch.full((n_total,), float(H), dtype=dtype, device=device)
-    bbox_r0.scatter_reduce_(0, lbl, rows, reduce="amin", include_self=True)
-    bbox_r1 = torch.zeros(n_total, dtype=dtype, device=device)
-    bbox_r1.scatter_reduce_(0, lbl, rows + 1, reduce="amax", include_self=True)
-    bbox_c0 = torch.full((n_total,), float(W), dtype=dtype, device=device)
-    bbox_c0.scatter_reduce_(0, lbl, cols, reduce="amin", include_self=True)
-    bbox_c1 = torch.zeros(n_total, dtype=dtype, device=device)
-    bbox_c1.scatter_reduce_(0, lbl, cols + 1, reduce="amax", include_self=True)
-    bbox_r0 = bbox_r0.to(torch.long)
-    bbox_r1 = bbox_r1.to(torch.long)
-    bbox_c0 = bbox_c0.to(torch.long)
-    bbox_c1 = bbox_c1.to(torch.long)
+    # bbox min/max in float (row/col indices exact in float32), cast to long.
+    bbox_lo = torch.empty(n_total, 2, dtype=dtype, device=device)
+    bbox_lo[:, 0] = float(H)
+    bbox_lo[:, 1] = float(W)
+    bbox_lo.scatter_reduce_(
+        0,
+        lbl2.expand(-1, 2),
+        torch.stack([rows, cols], dim=1),
+        reduce="amin",
+        include_self=True,
+    )
+    bbox_hi = torch.zeros(n_total, 2, dtype=dtype, device=device)
+    bbox_hi.scatter_reduce_(
+        0,
+        lbl2.expand(-1, 2),
+        torch.stack([rows + 1, cols + 1], dim=1),
+        reduce="amax",
+        include_self=True,
+    )
+    bbox_r0 = bbox_lo[:, 0].to(torch.long)
+    bbox_c0 = bbox_lo[:, 1].to(torch.long)
+    bbox_r1 = bbox_hi[:, 0].to(torch.long)
+    bbox_c1 = bbox_hi[:, 1].to(torch.long)
 
     intensity_mean = intensity_sum / size_f
     # peakedness = max/mean (>= 1); gate to 0 for non-positive mean (undefined)

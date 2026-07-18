@@ -148,20 +148,20 @@ def matched_filter_z(
     kernel: Tensor,
     mask: Tensor,
     den: Optional[Tensor] = None,
+    zm: Optional[Tensor] = None,
 ) -> Tensor:
     # u = K/||K|| = outer(uhat, uhat); numerator is two 1D convs
     u = (kernel / kernel.norm().clamp_min(1e-12)).to(z)
     kH, kW = u.shape
     uhat = _separable_1d(u)
-    squeeze = z.ndim == 2
-    zb = z.view(1, 1, *z.shape) if squeeze else z.unsqueeze(1)
-    m = mask.to(z)
-    num = _sep_correlate(zb * m.view(1, 1, *mask.shape), uhat, "constant")
+    if zm is None:
+        zb = z.view(1, 1, *z.shape) if z.ndim == 2 else z.unsqueeze(1)
+        zm = zb * mask.to(z).view(1, 1, *mask.shape)
+    num = _sep_correlate(zm, uhat, "constant")
     if den is None:
         pad = (kW // 2, kW // 2, kH // 2, kH // 2)
-        den = F.conv2d(
-            F.pad(m.view(1, 1, *mask.shape), pad), (u * u).view(1, 1, kH, kW)
-        ).reshape(mask.shape)
+        m = mask.to(z).view(1, 1, *mask.shape)
+        den = F.conv2d(F.pad(m, pad), (u * u).view(1, 1, kH, kW)).reshape(mask.shape)
     return num.reshape(z.shape) / den.clamp_min(1e-12).sqrt()
 
 
