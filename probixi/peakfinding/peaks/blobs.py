@@ -101,6 +101,8 @@ def label_connected_components(
             [-1, 0, 1, -1, 1, -1, 0, 1], dtype=torch.long, device=device
         )
 
+    r2 = rows[:, None] + doff[None, :]
+    c2 = cols[:, None] + coff[None, :]
     valid = (r2 >= 0) & (r2 < H) & (c2 >= 0) & (c2 < W)
     nflat = (r2 * W + c2).clamp_(0, H * W - 1)
     nbr_c = torch.searchsorted(fg, nflat).clamp_(max=K - 1)  # in [0, K-1]
