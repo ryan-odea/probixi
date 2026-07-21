@@ -434,10 +434,12 @@ class PeakFinder:
 
     @torch.no_grad()
     def _mf_scale_max(self, z: Tensor, mask: Tensor) -> Tensor:
+        zb = z.view(1, 1, *z.shape) if z.ndim == 2 else z.unsqueeze(1)
+        zm = zb * mask.to(z).view(1, 1, *mask.shape)
         stat: Optional[Tensor] = None
         dens = self._mf_bank_den or [None] * len(self._mf_kernels)
         for k, den in zip(self._mf_kernels, dens):
-            t = matched_filter_z(z, k, mask, den=den)
+            t = matched_filter_z(z, k, mask, den=den, zm=zm)
             stat = t if stat is None else torch.maximum(stat, t)
         assert stat is not None, "matched filter requires at least one kernel scale"
         return stat

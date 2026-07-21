@@ -62,8 +62,12 @@ def integrate_boxes(
         min_d.scatter_reduce_(0, p_flat, d_flat, reduce="amin", include_self=True)
         win = valid & (dist2 <= min_d[flat] + 1e-6)
         # tie-break by lowest centre index
-        cid = torch.arange(M, device=device).unsqueeze(1).expand_as(dist2)
-        min_cid = torch.full((npix,), M, device=device, dtype=torch.long)
+        cid = (
+            torch.arange(M, device=device, dtype=torch.int32)
+            .unsqueeze(1)
+            .expand_as(dist2)
+        )
+        min_cid = torch.full((npix,), M, device=device, dtype=torch.int32)
         min_cid.scatter_reduce_(
             0,
             p_flat,
