@@ -1,0 +1,38 @@
+Bootstrap: docker
+From: python:3.11-slim-bookworm
+
+# Needs ./dist/*.whl; build from repo root. See deploy/README.md.
+%files
+    dist /opt/probixi-dist
+
+%post
+    set -eu
+    apt-get update
+    apt-get install -y --no-install-recommends libgomp1  # OpenMP for sci wheels
+    rm -rf /var/lib/apt/lists/*
+    python -m pip install --no-cache-dir --upgrade pip
+    python -m pip install --no-cache-dir /opt/probixi-dist/*.whl
+    rm -rf /opt/probixi-dist
+
+%environment
+    export PYTHONUNBUFFERED=1
+    export MPLBACKEND=Agg
+
+%runscript
+    exec probixi "$@"
+
+%labels
+    org.opencontainers.image.title probixi
+    org.opencontainers.image.description Self-calibrating probabilistic peak finding for serial X-ray crystallography
+    org.opencontainers.image.source https://github.com/ryan-odea/probixi
+    org.opencontainers.image.licenses MIT
+
+%help
+    Probixi -- probabilistic peak finding for serial X-ray crystallography.
+
+    GPU:  apptainer run --nv probixi.sif -i <input> ...
+    CPU:  apptainer run      probixi.sif -i <input> ...
+
+    torch's CUDA runtime is bundled in the image; --nv binds the host NVIDIA
+    driver into the container. Run `apptainer run probixi.sif --help` for the
+    full CLI.

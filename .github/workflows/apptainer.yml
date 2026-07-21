@@ -1,0 +1,46 @@
+name: Build+Push Apptainer image
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  apptainer:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v8.2.0
+
+      - name: Build wheel
+        run: uv build --wheel
+
+      - name: Install Apptainer
+        uses: eWaterCycle/setup-apptainer@v2
+
+      - name: Resolve version and image ref
+        id: meta
+        run: |
+          VER=$(uv version --short)  # from the package, not the git tag
+          REPO=$(echo "${{ github.repository }}" | tr '[:upper:]' '[:lower:]')  # GHCR needs lowercase
+          echo "version=$VER" >> "$GITHUB_OUTPUT"
+          echo "image=oras://ghcr.io/${REPO}" >> "$GITHUB_OUTPUT"
+
+      - name: Build .sif
+        run: apptainer build probixi.sif deploy/probixi.def
+
+      - name: Log in to GHCR
+        run: |
+          echo "${{ secrets.GITHUB_TOKEN }}" \
+            | apptainer registry login -u "${{ github.actor }}" --password-stdin oras://ghcr.io
+
+      - name: Push to GHCR
+        run: |
+          apptainer push probixi.sif "${{ steps.meta.outputs.image }}:${{ steps.meta.outputs.version }}"
+          apptainer push probixi.sif "${{ steps.meta.outputs.image }}:latest"

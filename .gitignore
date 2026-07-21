@@ -223,6 +223,9 @@ uv.lock
 test_data/
 testing.py
 
+# Apptainer / built container images
+*.sif
+
 tests/test_data/
 tests/*.h5
 *.cxi
