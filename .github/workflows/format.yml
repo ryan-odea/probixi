@@ -22,7 +22,7 @@ jobs:
         with:
           python-version: '3.11'
 
-      - name: Sync version into citation files
+      - name: Sync version into citation files and modulefile
         run: |
           python - <<'EOF'
           import pathlib, re
@@ -56,7 +56,23 @@ jobs:
               driver.read_text(),
               flags=re.S,
           ))
-          print(f"Synced version {version} into CITATION.cff, docs/assets/citation.bib, and probixi.py")
+
+          # probixi.lua
+          lua_path = root / "deploy" / "modulefile" / "probixi.lua"
+          lua_path.write_text(re.sub(
+              r'(?m)^(local version\s*=\s*")[^"]*(")',
+              lambda m: m.group(1) + version + m.group(2),
+              lua_path.read_text(),
+          ))
+
+          # deploy/README.md
+          readme = root / "deploy" / "README.md"
+          readme.write_text(re.sub(
+              r"(probixi[:/])\d+(?:\.\d+)*",
+              lambda m: m.group(1) + version,
+              readme.read_text(),
+          ))
+          print(f"Synced version {version} into CITATION.cff, citation.bib, probixi.py, probixi.lua, and deploy")
           EOF
 
       - name: Install formatters
