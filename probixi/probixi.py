@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import random
 from dataclasses import dataclass, field
+from functools import lru_cache
 from itertools import chain, islice
 from pathlib import Path
 from typing import Iterable, Iterator, Literal, Optional, Union
@@ -10,13 +12,18 @@ from torch import Tensor
 
 from .indexer import (
     CellMatchConfig,
+    FrameIndexResult,
+    FrameIndexStream,
     Indexer,
+    IndexStats,
     IndexStream,
     IntegrateConfig,
     RefineConfig,
     SeedConfig,
 )
 from .indexer.forward import detector_to_q
+from .indexer.indexer import MIN_PEAKS_TO_INDEX
+from .indexer.integrate import radial_profile, radii_from_profile
 from .io import (
     CellParams,
     DataLoader,
@@ -51,13 +58,17 @@ _BEAMSTOP_MIN_FRACTION = 0.05
 _BEAMSTOP_MIN_PEAKS = 200
 _BEAMSTOP_MIN_BIN_PEAKS = 5
 
+# Frames pooled, and peaks required, when measuring the integration radii
+_RADII_MAX_FRAMES = 32
+_RADII_MIN_PEAKS = 200
+
 
 # --- BEGIN GENERATED CITATION ---
 _CITATION = r"""
 @software{odea_probixi,
   author  = {O'Dea, Ryan and Weinert, Tobias},
   title   = {{probixi}: Self-Calibrating Probabilistic Peak Finding for Serial X-Ray Crystallographic Data},
-  version = {0.4.0},
+  version = {0.5.0},
   year    = {2026},
   url     = {https://github.com/ryan-odea/probixi}
 }
@@ -71,18 +82,30 @@ _CITATION_URL = (
 __citation__ = _CITATION.strip() + "\n"
 
 
+@lru_cache(maxsize=1)
+def mps_is_usable() -> bool:
+    """Whether this MPS can be used."""
+    try:
+        torch.linalg.inv(torch.eye(3, device="mps"))
+    except Exception:
+        return False
+    return True
+
+
 def auto_device() -> torch.device:
     """Pick the best available torch device.
 
     Returns
     -------
     torch.device
-        ``cuda``, ``mps`` or ``cpu``.
+        ``cuda``, ``mps`` or ``cpu``. MPS is chosen only when it is both
+        available and able to run the pipeline's kernels; see
+        :func:`mps_is_usable`.
     """
     if torch.cuda.is_available():
         return torch.device("cuda")
     mps = getattr(torch.backends, "mps", None)
-    if mps is not None and mps.is_available():
+    if mps is not None and mps.is_available() and mps_is_usable():
         return torch.device("mps")
     return torch.device("cpu")
 
@@ -135,6 +158,10 @@ class Probixi:
         Replace the frozen variance floor with a learned photon-transfer curve
         so dim/low-flux shots are whitened against their own Poisson noise.
         Opt-in; intended for XFEL/SFX or jet-intensity-variable data.
+    peak_size_max : int, default 30
+        Maximum connected-component size accepted as a peak.
+    random_seed : int, default 1988
+        Seed for the draw of calibration and radii-training frames.
     seed, refine, cell_match, integrate
         Optional indexer configuration objects.
     device, dtype
@@ -154,6 +181,7 @@ class Probixi:
     noise_mode: Literal["per_frame", "online"] = "online"
     warmup_frames: int = 16
     finder_kappa: float = 10.0
+    peak_size_max: int = 30
     posterior_threshold: float = 0.5
     candidate_threshold: Optional[float] = None
     matched_filter: bool = True
@@ -161,6 +189,7 @@ class Probixi:
     mf_threshold: float = 5.0
     flux_variance: bool = False
     flux_var_floor: float = 0.15
+    random_seed: int = 1988
     seed: Optional[SeedConfig] = None
     refine: Optional[RefineConfig] = None
     cell_match: Optional[CellMatchConfig] = None
@@ -177,6 +206,8 @@ class Probixi:
     _finder: Optional[PeakFinder] = field(default=None, init=False, repr=False)
     _scale_ref: Optional[ScaleReference] = field(default=None, init=False, repr=False)
     _frame_scales: dict = field(default_factory=dict, init=False, repr=False)
+    _calibration_options: dict = field(default_factory=dict, init=False, repr=False)
+    _calibration_boundary: int = field(default=0, init=False, repr=False)
     _h5_mask: Optional[Tensor] = field(default=None, init=False, repr=False)
     _h5_mask_loaded: bool = field(default=False, init=False, repr=False)
     _beamstop_qmin: Optional[float] = field(default=None, init=False, repr=False)
@@ -280,6 +311,16 @@ class Probixi:
             prefetch=prefetch,
         )
 
+    def _sample_frame_indices(self, k: int, exclude: Iterable[int] = ()) -> list[int]:
+        skip = set(exclude)
+        pool = [i for i in range(int(self.metadata.n_frames)) if i not in skip]
+        return sorted(random.Random(self.random_seed).sample(pool, min(k, len(pool))))
+
+    def _frames_at(self, indices: Iterable[int]) -> Iterator[Tensor]:
+        # the loader streams contiguous ranges only; scattered frames go one by one
+        for i in indices:
+            yield next(iter(self.frames(start=i, stop=i + 1)))
+
     def _resolve_frame_index(self, frame: Union[int, str, tuple]) -> int:
         # int -> absolute index; "file//event" or (file, event) -> cumulative index
         if isinstance(frame, int):
@@ -294,8 +335,10 @@ class Probixi:
         base = Path(filename).name
         offset = 0
         for info in self.metadata.files.values():
-            if str(info.filename) == filename or Path(info.filename).name == base:
-                return offset + event
+            if (
+                str(info.filename) == filename or Path(info.filename).name == base
+            ) and info.event_start <= event < info.event_start + info.n_frames:
+                return offset + event - info.event_start
             offset += int(info.n_frames)
         raise KeyError(f"frame source not found: {filename}")
 
@@ -383,6 +426,7 @@ class Probixi:
         self._finder = PeakFinder(
             self._noise,
             kappa=self.finder_kappa,
+            size_max=self.peak_size_max,
             posterior_threshold=self.posterior_threshold,
             candidate_threshold=self.candidate_threshold,
             matched_filter=self.matched_filter,
@@ -499,6 +543,30 @@ class Probixi:
         if float((allq < q_min).sum()) / allq.numel() < _BEAMSTOP_MIN_FRACTION:
             return None
         return q_min
+
+    def _learn_integration_radii(
+        self, exclude: Iterable[int]
+    ) -> Optional[tuple[float, float, float]]:
+        profile = None
+        n_peaks = 0
+        for res in self.peak_stream(
+            self._frames_at(self._sample_frame_indices(_RADII_MAX_FRAMES, exclude)),
+            update_noise=False,
+            estimate_scale=False,
+        ):
+            excess = res.scores.get("excess") if res.scores else None
+            ks = res.kept_stats
+            if excess is None or ks is None or ks.row_centroid.numel() == 0:
+                continue
+            positions = torch.stack([ks.row_centroid, ks.col_centroid], dim=-1).to(
+                excess
+            )
+            one = radial_profile(excess, positions, pixel_valid=res.valid_mask)
+            profile = one if profile is None else profile + one
+            n_peaks += int(positions.shape[0])
+        if profile is None or n_peaks < _RADII_MIN_PEAKS:
+            return None
+        return radii_from_profile(profile)
 
     def _apply_beamstop_qmin(self, q_min: float) -> None:
         # AND a |q| >= q_min beam-center exclusion into the noise model's masks so
@@ -620,7 +688,8 @@ class Probixi:
         Parameters
         ----------
         n_seed : int, default 32
-            Leading frames to calibrate on when ``seed_frames`` is not given.
+            Frames drawn at random from the run to calibrate on when
+            ``seed_frames`` is not given.
         seed_frames : iterable of torch.Tensor, optional
             Explicit calibration frames; overrides ``n_seed``.
         eigen_modes : int, default 0
@@ -638,13 +707,21 @@ class Probixi:
         CalibrationResult
             The applied noise calibration.
         """
-        seed = (
-            list(seed_frames)
-            if seed_frames is not None
-            else list(islice(self.frames(), n_seed))
-        )
+        seed_indices: list[int] = []
+        if seed_frames is not None:
+            seed = list(seed_frames)
+        else:
+            seed_indices = self._sample_frame_indices(n_seed)
+            seed = list(self._frames_at(seed_indices))
         if not seed:
             raise ValueError("no seed frames available to calibrate on")
+        self._calibration_options = dict(
+            n_seed=n_seed,
+            eigen_modes=eigen_modes,
+            target_noise_peaks=target_noise_peaks,
+            threshold_opts=threshold_opts,
+            **opts,
+        )
         self.fit_noise(seed)
         result = calibrate_noise(self.noise, seed, warm=False, **opts)
         result.apply(self.noise, self.finder)
@@ -668,6 +745,8 @@ class Probixi:
             self.indexer._measured_gain = self.noise.gain
         if self.indexer is not None:
             self.indexer._bg_annulus_pixels = self.finder.background_annulus_pixels()
+        if self.indexer is not None:
+            self.indexer._measured_radii = self._learn_integration_radii(seed_indices)
         self._beamstop_qmin = self._infer_beamstop_qmin(seed)
         if self._beamstop_qmin:
             self._apply_beamstop_qmin(self._beamstop_qmin)
@@ -749,51 +828,151 @@ class Probixi:
         batch_size: int = 8,
         start_index: int = 0,
         update_noise: bool = True,
-    ) -> IndexStream:
-        """Open a lazy stream of indexing solutions over ``frames``.
-
-        Runs the full pipeline per frame: detect peaks, lift to reciprocal
-        space, seed and refine an orientation whose cell matches the target, then
-        predict and integrate the lattice.
+        recalibrate_every: Optional[int] = None,
+        enrich_alpha: Optional[float] = None,
+    ) -> IndexStream[FrameIndexResult]:
+        """Yield individual lattices from ``index_frame_stream``.
 
         Parameters
         ----------
-        frames : iterable of torch.Tensor
-            Frames to process.
-        batch_size : int, default 8
-            Frames per batched refinement pass.
-        start_index : int, default 0
-            Absolute index assigned to the first frame.
-        update_noise : bool, default True
-            Fold each frame into the running noise model as it passes.
+        frames, batch_size, start_index, update_noise, recalibrate_every, enrich_alpha
+            See ``index_frame_stream``.
 
         Returns
         -------
         IndexStream
-            Lazy stream of ``IndexResult``, one per indexed frame.
+            Accepted lattices, sharing physical-frame statistics.
+        """
+        return self.index_frame_stream(
+            frames,
+            batch_size,
+            start_index,
+            update_noise,
+            recalibrate_every,
+            enrich_alpha,
+        ).flatten()
+
+    def index_frame_stream(
+        self,
+        frames: Iterable[Tensor],
+        batch_size: int = 8,
+        start_index: int = 0,
+        update_noise: bool = True,
+        recalibrate_every: Optional[int] = None,
+        enrich_alpha: Optional[float] = None,
+    ) -> FrameIndexStream:
+        """Yield every input image with its accepted lattices.
+
+        Parameters
+        ----------
+        frames : iterable of Tensor
+            Images in input-list order, starting at ``start_index``.
+        batch_size : int
+            Frames per indexing batch.
+        start_index : int
+            Absolute input-list offset.
+        update_noise : bool
+            Update running statistics when ``recalibrate_every`` is None.
+        recalibrate_every : int, optional
+            None preserves running updates; zero freezes calibration. Positive
+            intervals rebuild noise and thresholds from the leading seed frames
+            at input-list boundaries, freezing statistics between boundaries.
+            Call ``calibrate`` first to set seed count and threshold options.
+        enrich_alpha : float, optional
+            Gate lattices before cross-lattice overlap exclusion.
+
+        Returns
+        -------
+        FrameIndexStream
+            Includes unindexed images and physical-frame statistics.
         """
         if self.indexer is None:
             raise RuntimeError(
-                "index_stream requires a target cell; construct Probixi with a "
-                "cell_file (omit it only for peak-only use via peak_stream)"
+                "index_frame_stream requires a target cell; construct Probixi "
+                "with a cell_file (omit it only for peak-only use via "
+                "peak_stream)"
             )
+        indexer = self.indexer
+        if recalibrate_every is not None:
+            if recalibrate_every < 0:
+                raise ValueError("recalibrate_every must be nonnegative")
+            if not self._calibration_options:
+                raise RuntimeError("call calibrate before scheduled or frozen indexing")
         self._frame_scales.clear()
-        tc = self.threshold_calibration
-        bright_threshold = tc.threshold if tc is not None else self.mf_threshold
-        base = self.indexer.index_stream(
-            self.peak_stream(
-                frames, start_index=start_index, update_noise=update_noise
-            ),
-            batch_size=batch_size,
-            bright_threshold=bright_threshold,
-        )
+        stats = IndexStats()
 
-        def _attach(r) -> None:
-            fs = self._frame_scales.pop(r.frame_index, None)
-            if fs is not None:
-                r.scale, r.scale_sigma = fs.scale, fs.sigma
+        # a recalibration boundary can fall inside a batch, so split batched
+        # input into single frames whenever a schedule is in force
+        def _individual() -> Iterator[Tensor]:
+            for item in frames:
+                yield from item if item.ndim == 3 else (item,)
 
-        return base.tap(_attach)
+        def _gen() -> Iterator[FrameIndexResult]:
+            source = iter(frames) if recalibrate_every is None else iter(_individual())
+            index = start_index
+            while True:
+                try:
+                    first = next(source)
+                except StopIteration:
+                    break
+                limit = None
+                if recalibrate_every:
+                    boundary = index // recalibrate_every * recalibrate_every
+                    if boundary != self._calibration_boundary:
+                        self._recalibrate(boundary)
+                    limit = boundary + recalibrate_every - index
+                segment = chain(
+                    (first,), islice(source, limit - 1) if limit else source
+                )
+                tc = self.threshold_calibration
+                base = indexer.index_frame_stream(
+                    self.peak_stream(
+                        segment,
+                        start_index=index,
+                        update_noise=(
+                            update_noise if recalibrate_every is None else False
+                        ),
+                    ),
+                    batch_size=batch_size,
+                    bright_threshold=(
+                        tc.threshold if tc is not None else self.mf_threshold
+                    ),
+                    enrich_alpha=enrich_alpha,
+                )
+                for result in base:
+                    fs = self._frame_scales.pop(result.frame_index, None)
+                    for crystal in result.crystals:
+                        if fs is not None:
+                            crystal.scale, crystal.scale_sigma = fs.scale, fs.sigma
+                    stats.frames += 1
+                    stats.hits += result.n_peaks >= MIN_PEAKS_TO_INDEX
+                    stats.indexed += bool(result.crystals)
+                    stats.crystals += len(result.crystals)
+                    index += 1
+                    yield result
+                if limit is None:
+                    break
+
+        return FrameIndexStream(_gen(), stats=stats)
+
+    def _recalibrate(self, boundary: int) -> None:
+        options = self._calibration_options.copy()
+        reference = self._scale_ref
+        self._noise = self._finder = None
+        self._beamstop_qmin = None
+        self.threshold_calibration = None
+        device = torch.device(self.device or "cpu")
+        devices = [device.index or 0] if device.type == "cuda" else []
+        with torch.random.fork_rng(devices=devices):
+            torch.manual_seed(boundary)
+            self.calibrate(
+                seed_frames=self.frames(
+                    start=boundary, stop=boundary + options["n_seed"]
+                ),
+                **options,
+            )
+        self._scale_ref = reference
+        self._calibration_boundary = boundary
 
     def scale_stream(
         self,

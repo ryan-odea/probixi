@@ -209,7 +209,10 @@ def test_index_stream_stats_track_frames_hits_and_indexed(run_files, geom_path):
     )
     # funnel starts empty; the tap wrapper in Probixi.index_stream must not drop it
     assert stream.stats.frames == 0
-    n = len(stream.collect())
+    n = 0
+    for _ in stream:
+        n += 1
+        assert stream.stats.frames >= stream.stats.hits >= stream.stats.indexed
     # every planted frame is a hit (many peaks) and indexes here
     assert stream.stats.frames == N_PLANTED
     assert stream.stats.hits == N_PLANTED
@@ -448,3 +451,54 @@ def test_pipeline_normalises_a_string_device(run_files, geom_path):
         device="cpu",
     )
     assert px.device == torch.device("cpu")
+
+
+def _run_with_diffraction(tmp_path, geom_path, pipeline_cell, planted_U, n_planted):
+    # N_NOISE blank frames plus n_planted frames that actually diffract, which
+    # is what the radius measurement needs. Calibration draws its frames at
+    # random, so the diffracting frames have to outnumber the blanks.
+    geom = read_geometry(geom_path).to_dict()
+    frame, _ = sim.simulate_indexable_frame(
+        geom,
+        pipeline_cell,
+        planted_U,
+        peak_intensity=PEAK_INTENSITY,
+        psf_sigma=PSF_SIGMA,
+        seed=1,
+    )
+    noise = sim.simulate_noise_frames((DET, DET), N_NOISE, seed=100)
+    frames = np.concatenate([noise, np.repeat(frame[None], n_planted, axis=0)], axis=0)
+    _, lst = sim.write_run(tmp_path / "diffraction", frames)
+    return lst
+
+
+def test_calibrate_measures_the_integration_radii(
+    tmp_path, geom_path, pipeline_cell, planted_U
+):
+    # Measured on the frames carrying diffraction, disjoint from the ones
+    # calibration consumed, and ordered so IntegrateConfig accepts them.
+    lst_path = _run_with_diffraction(
+        tmp_path, geom_path, pipeline_cell, planted_U, n_planted=20
+    )
+    px = _build_pipeline(lst_path, geom_path)
+    assert px.indexer._measured_radii is None
+    px.calibrate(n_seed=N_NOISE, target_noise_peaks=5.0)
+    radii = px.indexer._measured_radii
+    assert radii is not None
+    assert 0 < radii[0] < radii[1] < radii[2]
+    # a few-pixel spot, not the whole detector
+    assert 1.0 <= radii[0] <= 12.0
+
+
+def test_too_few_diffraction_frames_leave_the_radii_unmeasured(tmp_path, geom_path):
+    # Nothing to measure a profile on: the radii stay None and integration
+    # falls back to the documented default rather than inventing a size off a
+    # handful of blobs.
+    from probixi.indexer.indexer import FALLBACK_RADII
+
+    noise = sim.simulate_noise_frames((DET, DET), N_NOISE + 8, seed=101)
+    _, lst = sim.write_run(tmp_path / "blank", noise)
+    px = _build_pipeline(lst, geom_path)
+    px.calibrate(n_seed=N_NOISE, target_noise_peaks=5.0)
+    assert px.indexer._measured_radii is None
+    assert px.indexer._radii() == FALLBACK_RADII

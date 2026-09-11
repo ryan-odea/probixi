@@ -1,6 +1,13 @@
 from __future__ import annotations
 
-from .indexer import CellMatchConfig, IntegrateConfig, RefineConfig, SeedConfig
+from .indexer import (
+    CellMatchConfig,
+    FrameIndexResult,
+    FrameIndexStream,
+    IntegrateConfig,
+    RefineConfig,
+    SeedConfig,
+)
 from .io import DataOffloader, DuckDBOffloader, PeakOffloader
 from .multigpu import BlockConfig, merge_streams, run_block_from_env, run_data_parallel
 from .probixi import Probixi, __citation__, auto_device, citation
@@ -13,6 +20,8 @@ __all__ = [
     "citation",
     "__citation__",
     # indexer config
+    "FrameIndexResult",
+    "FrameIndexStream",
     "SeedConfig",
     "RefineConfig",
     "CellMatchConfig",

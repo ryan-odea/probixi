@@ -53,6 +53,9 @@ class PeakOffloader:
         self.out_dir = Path(path)
         self._geometry_file = Path(geometry_file) if geometry_file else None
         self._ranges = _build_frame_ranges(files)
+        self._event_starts = [
+            getattr(info, "event_start", 0) for info in (files or {}).values()
+        ]
         self._info = {}
         for fname, info in (files or {}).items():
             self._info[str(getattr(info, "filename", fname))] = info
@@ -74,9 +77,9 @@ class PeakOffloader:
     def _locate(self, frame_index: Optional[int]) -> tuple[str, int]:
         if frame_index is None:
             return "unknown", 0
-        for start, stop, fname in self._ranges:
+        for i, (start, stop, fname) in enumerate(self._ranges):
             if start <= frame_index < stop:
-                return fname, frame_index - start
+                return fname, frame_index - start + self._event_starts[i]
         return "unknown", int(frame_index)
 
     def write(self, result) -> None:
@@ -110,7 +113,9 @@ class PeakOffloader:
         self._buf.clear()
 
     def _write_cxi(self, cxi_path, raw_file, info, events) -> None:
-        n_frames = int(getattr(info, "n_frames", 0)) or (max(events) + 1)
+        n_frames = int(
+            getattr(info, "source_n_frames", None) or getattr(info, "n_frames", 0)
+        ) or (max(events) + 1)
         dataset = str(getattr(info, "dataset", "/entry/data/data"))
         max_peaks = max((len(fs) for fs, _, _ in events.values()), default=1)
         max_peaks = max(max_peaks, 1)

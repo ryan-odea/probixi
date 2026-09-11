@@ -9,6 +9,7 @@ from typing import Any, Optional, Sequence, Union
 import torch
 from torch.multiprocessing.spawn import spawn
 
+from .indexer import IntegrateConfig, SeedConfig
 from .io import DataLoader, DataOffloader, DuckDBOffloader, is_duckdb_path
 from .probixi import Probixi, auto_device
 
@@ -17,7 +18,7 @@ PathLike = Union[str, Path]
 _CHUNK_MARKER = "----- Begin chunk -----"
 _SERIAL_PREFIX = "Image serial number:"
 _STREAM_VERSION_PREFIX = "CrystFEL stream format"
-_DB_DATA_TABLES = ("frames", "reflections", "peaks")
+_DB_DATA_TABLES = ("frames", "crystals", "reflections", "peaks")
 _DB_META_TABLES = ("geometry", "panels", "cell")
 
 __all__ = [
@@ -161,7 +162,13 @@ class BlockConfig:
     start: int
     stop: int
     batch_size: int = 8
+    seed: Optional[SeedConfig] = None
+    integrate: Optional[IntegrateConfig] = None
+    peak_size_max: int = 30
+    recalibrate_every: Optional[int] = None
+    calibration_seed: int = 0
     seed_frames: int = 32
+    random_seed: int = 1988
     target_noise_peaks: Optional[float] = 5.0
     noise_mode: str = "online"
     warmup_frames: int = 16
@@ -209,11 +216,17 @@ def run_block(
         flux_variance=cfg.flux_variance,
         flux_var_floor=cfg.flux_var_floor,
         device=dev,
+        random_seed=cfg.random_seed,
+        seed=cfg.seed,
+        integrate=cfg.integrate,
+        peak_size_max=cfg.peak_size_max,
     )
     if p.indexer is None:
         raise RuntimeError("multi-GPU indexing requires a cell_file")
     # deterministic calibration -> every rank recovers identical detector params
-    p.calibrate(n_seed=cfg.seed_frames, target_noise_peaks=cfg.target_noise_peaks)
+    with torch.random.fork_rng(devices=[dev.index or 0] if dev.type == "cuda" else []):
+        torch.manual_seed(cfg.calibration_seed)
+        p.calibrate(n_seed=cfg.seed_frames, target_noise_peaks=cfg.target_noise_peaks)
 
     lo, hi = block_bounds(cfg.start, cfg.stop, rank, world_size)
     if not cfg.quiet:
@@ -221,11 +234,13 @@ def run_block(
             f"[rank {rank}/{world_size}] device={dev} frames [{lo}, {hi})", flush=True
         )
 
-    stream = p.index_stream(
-        p.frames(start=lo, stop=hi), batch_size=cfg.batch_size, start_index=lo
+    stream = p.index_frame_stream(
+        p.frames(start=lo, stop=hi),
+        batch_size=cfg.batch_size,
+        start_index=lo,
+        recalibrate_every=cfg.recalibrate_every,
+        enrich_alpha=cfg.enrich_alpha if cfg.enrich_gate else None,
     )
-    if cfg.enrich_gate:
-        stream = stream.enrich_gate(cfg.enrich_alpha)
 
     n = 0
     offload_kwargs: dict[str, Any] = dict(
@@ -244,7 +259,7 @@ def run_block(
     with offloader(part_path, **offload_kwargs) as off:
         for result in stream:
             off.write(result)
-            n += 1
+            n += bool(result.crystals)
 
     stats = {
         "rank": rank,
@@ -254,6 +269,7 @@ def run_block(
         "frames": stream.stats.frames,
         "hits": stream.stats.hits,
         "indexed": n,
+        "crystals": stream.stats.crystals,
     }
     Path(f"{part_path}.stats.json").write_text(json.dumps(stats))
     if not cfg.quiet:
@@ -285,7 +301,12 @@ def run_data_parallel(
     start: Optional[int] = None,
     stop: Optional[int] = None,
     batch_size: int = 8,
+    seed: Optional[SeedConfig] = None,
+    integrate: Optional[IntegrateConfig] = None,
+    peak_size_max: int = 30,
+    recalibrate_every: Optional[int] = None,
     seed_frames: int = 32,
+    random_seed: int = 1988,
     target_noise_peaks: Optional[float] = 5.0,
     noise_mode: str = "online",
     warmup_frames: int = 16,
@@ -321,7 +342,13 @@ def run_data_parallel(
         start=lo,
         stop=hi,
         batch_size=batch_size,
+        seed=seed,
+        integrate=integrate,
+        peak_size_max=peak_size_max,
+        recalibrate_every=recalibrate_every,
         seed_frames=seed_frames,
+        random_seed=random_seed,
+        calibration_seed=torch.initial_seed(),
         target_noise_peaks=target_noise_peaks,
         noise_mode=noise_mode,
         warmup_frames=warmup_frames,
@@ -349,12 +376,11 @@ def run_data_parallel(
             join=True,
         )
 
-    n_chunks = (
-        merge_dbs(part_paths, output) if cfg.db else merge_streams(part_paths, output)
-    )
+    merge = merge_dbs if cfg.db else merge_streams
+    merge(part_paths, output)
 
     # aggregate block stats, then remove the per-rank parts
-    totals = {"frames": 0, "hits": 0, "indexed": 0}
+    totals = {"frames": 0, "hits": 0, "indexed": 0, "crystals": 0}
     for part in part_paths:
         sidecar = Path(f"{part}.stats.json")
         if sidecar.exists():
@@ -364,7 +390,7 @@ def run_data_parallel(
     if not quiet:
         print(
             f"Merged {world} block(s) -> {output}: {totals['frames']} frames, "
-            f"{totals['hits']} hits, {n_chunks} indexed",
+            f"{totals['hits']} hits, {totals['indexed']} indexed, {totals['crystals']} crystals",
             flush=True,
         )
     if not keep_parts:

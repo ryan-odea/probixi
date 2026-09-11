@@ -6,6 +6,7 @@ import struct
 import threading
 import warnings
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import replace
 from pathlib import Path
 from typing import Iterator, Optional, Sequence, Union
 
@@ -40,7 +41,8 @@ class DataLoader:
     Parameters
     ----------
     list_file : str or Path
-        Text file listing one HDF5 path per line (``#``/``;`` comments allowed).
+        Text file listing HDF5 paths or ``path //event`` entries in processing order
+        (``#``/``;`` comments allowed). Consecutive events share batched IO.
     geometry_file : str or Path, optional
         CrystFEL ``.geom`` file to parse.
     cell_file : str or Path, optional
@@ -89,9 +91,16 @@ class DataLoader:
         frame_size: Optional[tuple] = None
         total_frames = 0
         skipped = 0
-        for path in self._read_list():
+        cache = {}
+        previous = None
+        for entry in self._read_list():
+            parts = entry.rsplit(" //", 1)
+            path = parts[0]
+            event = int(parts[1]) if len(parts) == 2 else None
             try:
-                info = scan_h5(path, geometry)
+                if path not in cache:
+                    cache[path] = scan_h5(path, geometry)
+                info = cache[path]
             except Exception as exc:
                 warnings.warn(f"skipping unreadable file {path!r}: {exc}")
                 skipped += 1
@@ -105,8 +114,26 @@ class DataLoader:
                 )
                 skipped += 1
                 continue
+            if event is not None:
+                if not 0 <= event < info.n_frames:
+                    raise ValueError(
+                        f"event {event} outside {path} ({info.n_frames} frames)"
+                    )
+                info = replace(
+                    info, event_start=event, source_n_frames=info.n_frames, n_frames=1
+                )
             total_frames += info.n_frames
-            files[info.filename] = info
+            if (
+                event is not None
+                and previous is not None
+                and previous.filename == info.filename
+                and previous.event_start + previous.n_frames == event
+            ):
+                previous.n_frames += 1
+            else:
+                key = entry if entry not in files else f"{entry}#{len(files)}"
+                files[key] = replace(info)
+                previous = files[key]
         if skipped:
             warnings.warn(
                 f"skipped {skipped} unreadable file(s); "
@@ -139,7 +166,7 @@ class DataLoader:
             geometry=geometry,
             cell=self._parse_cell(),
             frame_size=frame_size,
-            n_files=len(files),
+            n_files=len({info.filename for info in files.values()}),
             n_frames=total_frames,
         )
 
@@ -175,6 +202,8 @@ def _bshuf_lz4_decoder(dset: h5py.Dataset, frame_shape):
 
 
 def _iter_file_frames(info, f_lo, f_hi, pool, window, stop, fast_state):
+    f_lo += info.event_start
+    f_hi += info.event_start
     with h5py.File(info.filename, "r") as f:
         decoder = None
         dset = None

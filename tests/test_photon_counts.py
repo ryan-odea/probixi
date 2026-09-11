@@ -103,3 +103,69 @@ def test_gain_rejects_nonsense_values(tmp_path):
     for bad in ({}, {"adu_per_photon": None}, {"adu_per_photon": 0.0}):
         off = DuckDBOffloader(tmp_path / "x.db", bad)
         assert off._gain() == 1.0
+
+
+def test_peak_photometry_survives_the_index_peak_cap(geometry_dict, cell):
+    # The cap keeps the brightest peaks by topk, whose indices are not in
+    # position order, so the photometry has to be reindexed with them rather
+    # than truncated. Truncation would pair a peak with another peak's counts.
+    from probixi.indexer.indexer import Indexer, SeedConfig
+
+    idxr = Indexer(geometry_dict, cell, seed=SeedConfig(max_index_peaks=6))
+    n = 10
+    positions = torch.stack([torch.arange(n).float()] * 2, dim=-1)
+    # ascending, so topk picks the LAST six: its indices are not a prefix, and a
+    # truncating implementation would hand peaks the wrong counts
+    intensities = torch.arange(n).float()
+    bg = intensities * 10.0  # tie each peak's photometry to its intensity
+    npix = intensities + 100.0
+    pos, inten, _, _, out_bg, out_npix = idxr._cap_peak_data(
+        positions, intensities, None, None, bg, npix
+    )
+    assert len(pos) == 6 and len(out_bg) == 6 and len(out_npix) == 6
+    # every surviving peak still carries its own photometry
+    assert torch.equal(out_bg, inten * 10.0)
+    assert torch.equal(out_npix, inten + 100.0)
+
+
+def test_peak_photometry_follows_each_peeled_lattice(geometry_dict, cell):
+    # Two lattices on one frame: peeling hands the second lattice the residue,
+    # so each result's photometry must match its own surviving peaks.
+    import sim
+
+    from probixi.indexer.indexer import Indexer, RefineConfig, SeedConfig
+
+    idxr = Indexer(
+        geometry_dict,
+        cell,
+        seed=SeedConfig(
+            n_directions=1500,
+            n_spin=60,
+            top_directions=12,
+            max_candidates=32,
+            max_lattices=2,
+        ),
+        refine=RefineConfig(max_iters=150, reassign_every=10),
+    )
+    p1, _ = sim.lattice_peaks(geometry_dict, cell, sim.proper_rotation(0, 8.0))
+    p2, _ = sim.lattice_peaks(geometry_dict, cell, sim.proper_rotation(7, 8.0))
+    positions = torch.cat([p1, p2]).to(torch.float32)
+    n = len(positions)
+    intensities = torch.arange(n).float() + 1.0
+    found = idxr.index_lattices(
+        {0: positions},
+        intensities_by_frame={0: intensities},
+        sigmas_by_frame={0: torch.ones(n)},
+        weights_by_frame={0: torch.ones(n)},
+        peak_bg_by_frame={0: intensities * 10.0},
+        peak_npix_by_frame={0: intensities + 100.0},
+    )
+    lattices = found.get(0, [])
+    assert len(lattices) == 2
+    for r in lattices:
+        assert r.peak_background_sum is not None
+        assert len(r.peak_background_sum) == len(r.positions)
+        assert len(r.peak_n_pixels) == len(r.positions)
+        # the invariant that a truncating implementation would break
+        assert torch.equal(r.peak_background_sum, r.intensities * 10.0)
+        assert torch.equal(r.peak_n_pixels, r.intensities + 100.0)

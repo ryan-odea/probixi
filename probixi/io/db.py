@@ -13,7 +13,7 @@ from .geometry import EV_ANGSTROM
 from .writer import A_INV_TO_NM_INV, _panel_bounds, _profile_radius, _StreamWriter
 
 if TYPE_CHECKING:
-    from ..indexer.indexer import IndexResult
+    from ..indexer.indexer import FrameIndexResult, IndexResult
     from .cell import CellParams
 
 PathLike = Union[str, Path]
@@ -34,19 +34,25 @@ _FRAME_COLUMNS = (
     "indexed",
     "serial",
     "n_peaks",
-    "n_indexed",
-    "rmsd",
+    "peak_resolution_nm_inv",
     "scale",
     "scale_sigma",
+    "num_reflections",
+    "adu_per_photon",
+)
+_CRYSTAL_COLUMNS = (
+    "crystal_id",
+    "frame_id",
+    "lattice_index",
+    "n_indexed",
+    "rmsd",
     "mosaicity_deg",
     "profile_radius_nm_inv",
     "enrichment",
     "n_bright",
     "enrich_p",
     "diffraction_limit_nm_inv",
-    "peak_resolution_nm_inv",
     "num_reflections",
-    "adu_per_photon",
     "cell_a_A",
     "cell_b_A",
     "cell_c_A",
@@ -62,6 +68,22 @@ _FRAME_COLUMNS = (
     "cstar_x",
     "cstar_y",
     "cstar_z",
+)
+
+_REFLECTION_COLUMNS = (
+    "crystal_id",
+    "frame_id",
+    "h",
+    "k",
+    "l",
+    "intensity",
+    "sigma",
+    "peak",
+    "background",
+    "fs",
+    "ss",
+    "panel",
+    "resolution_nm_inv",
 )
 
 _SCHEMA = """
@@ -106,19 +128,26 @@ CREATE TABLE frames (
     indexed                  BOOLEAN,
     serial                   BIGINT,
     n_peaks                  INTEGER,
-    n_indexed                INTEGER,
-    rmsd                     DOUBLE,
+    peak_resolution_nm_inv   DOUBLE,
     scale                    DOUBLE,
     scale_sigma              DOUBLE,
+    num_reflections          INTEGER,
+    adu_per_photon           DOUBLE
+);
+
+CREATE TABLE crystals (
+    crystal_id               VARCHAR PRIMARY KEY,
+    frame_id                 VARCHAR,
+    lattice_index            INTEGER,
+    n_indexed                INTEGER,
+    rmsd                     DOUBLE,
     mosaicity_deg            DOUBLE,
     profile_radius_nm_inv    DOUBLE,
     enrichment               DOUBLE,
     n_bright                 INTEGER,
     enrich_p                 DOUBLE,
     diffraction_limit_nm_inv DOUBLE,
-    peak_resolution_nm_inv   DOUBLE,
     num_reflections          INTEGER,
-    adu_per_photon           DOUBLE,
     cell_a_A                 DOUBLE,
     cell_b_A                 DOUBLE,
     cell_c_A                 DOUBLE,
@@ -137,6 +166,7 @@ CREATE TABLE frames (
 );
 
 CREATE TABLE reflections (
+    crystal_id        VARCHAR,
     frame_id          VARCHAR,
     h                 INTEGER,
     k                 INTEGER,
@@ -166,6 +196,8 @@ CREATE TABLE peaks (
 
 _INDEXES = """
 CREATE INDEX idx_reflections_frame ON reflections(frame_id);
+CREATE INDEX idx_reflections_crystal ON reflections(crystal_id);
+CREATE INDEX idx_crystals_frame ON crystals(frame_id);
 CREATE INDEX idx_peaks_frame ON peaks(frame_id);
 """
 
@@ -180,12 +212,12 @@ class DuckDBOffloader(_StreamWriter):
 
     A relational alternative to the CrystFEL ``.stream``: run metadata lands in
     small ``geometry``/``panels``/``cell`` tables, every file-event becomes a row
-    in ``frames`` (flagged indexed or not, with its per-frame statistics), and
-    the integrated ``reflections`` and searched ``peaks`` are stored keyed by the
-    frame's :func:`frame_id`.
+    in ``frames`` (flagged indexed or not, with its peak search and fluence),
+    and each accepted lattice becomes a row in ``crystals`` keyed to it. The
+    searched ``peaks`` are keyed by the frame's :func:`frame_id` and the
+    integrated ``reflections`` by both ``crystal_id`` and ``frame_id``.
 
-    Same interface as :class:`~probixi.io.writer.DataOffloader`, so it drops into
-    the same driver loop::
+    Same interface as :class:`~probixi.io.writer.DataOffloader`::
 
         with DuckDBOffloader(out, geometry=geom, cell=cell, files=files) as off:
             stream.to_stream(off)
@@ -246,6 +278,7 @@ class DuckDBOffloader(_StreamWriter):
             panel=panel,
         )
         self.cell = cell
+        self._crystal_rows: list[tuple] = []
         self._frame_range = frame_range
         self._conn = None
         self._frame_rows: list[tuple] = []
@@ -272,37 +305,58 @@ class DuckDBOffloader(_StreamWriter):
             self._conn.close()
             self._conn = None
 
-    def write(self, result: "IndexResult") -> None:
-        """Buffer one indexed frame (its stats, reflections and peaks)."""
+    def write(self, result: Union["IndexResult", "FrameIndexResult"]) -> None:
+        """Buffer one image and its lattices.
+
+        Parameters
+        ----------
+        result : IndexResult or FrameIndexResult
+        """
         if self._conn is None:
             raise RuntimeError("DuckDBOffloader must be used as a context manager")
+        crystals = getattr(result, "crystals", [result])
         self._serial += 1
         filename, event = self._locate(result.frame_index)
         fid = frame_id(filename, event)
-
         peak_recip = self._append_peaks(result, fid)
-        refl = self._reflections(result)
-        for (row, col), miller, intensity, sigma, peak, background in refl:
-            h, k, l = miller  # noqa: E741
-            self._refl_rows.append(
-                (
-                    fid,
-                    int(h),
-                    int(k),
-                    int(l),
-                    float(intensity),
-                    float(sigma),
-                    float(peak),
-                    float(background),
-                    float(col),
-                    float(row),
-                    self._panel_for(col, row),
-                    self._resolution_nm_inv(row, col),
+        total = 0
+        for lattice_index, crystal in enumerate(crystals):
+            cid = f"{fid}:{lattice_index}"
+            refl = self._reflections(crystal)
+            total += len(refl)
+            for (row, col), miller, intensity, sigma, peak, background in refl:
+                self._refl_rows.append(
+                    (
+                        cid,
+                        fid,
+                        *(int(h) for h in miller),
+                        float(intensity),
+                        float(sigma),
+                        float(peak),
+                        float(background),
+                        float(col),
+                        float(row),
+                        self._panel_for(col, row),
+                        self._resolution_nm_inv(row, col),
+                    )
                 )
+            self._crystal_rows.append(
+                self._crystal_row(crystal, cid, fid, lattice_index, len(refl))
             )
-
         self._frame_rows.append(
-            self._frame_row(result, fid, filename, event, len(refl), peak_recip)
+            self._frame_row(
+                fid,
+                filename,
+                event,
+                result.frame_index,
+                result.n_peaks,
+                peak_recip,
+                indexed=bool(crystals),
+                num_reflections=total if crystals else None,
+                scale=crystals[0].scale if crystals else None,
+                scale_sigma=crystals[0].scale_sigma if crystals else None,
+                gain=self._gain(crystals[0] if crystals else None),
+            )
         )
         if result.frame_index is not None:
             self._seen.add(int(result.frame_index))
@@ -359,8 +413,15 @@ class DuckDBOffloader(_StreamWriter):
             )
 
         self._frame_rows.append(
-            self._peaks_frame_row(
-                fid, filename, event, result.frame_index, len(rows), max_recip
+            self._frame_row(
+                fid,
+                filename,
+                event,
+                result.frame_index,
+                len(rows),
+                max_recip,
+                indexed=False,
+                gain=self._gain(),
             )
         )
         if result.frame_index is not None:
@@ -506,12 +567,41 @@ class DuckDBOffloader(_StreamWriter):
 
     def _frame_row(
         self,
-        result: "IndexResult",
         fid: str,
         filename: str,
         event: int,
+        frame_index: Optional[int],
+        n_peaks: int,
+        peak_recip: Optional[float],
+        *,
+        indexed: bool,
+        num_reflections: Optional[int] = None,
+        scale: Optional[float] = None,
+        scale_sigma: Optional[float] = None,
+        gain: Optional[float] = None,
+    ) -> tuple:
+        return (
+            fid,
+            None if frame_index is None else int(frame_index),
+            filename,
+            int(event),
+            indexed,
+            int(self._serial),
+            int(n_peaks),
+            peak_recip,
+            _as_float(scale),
+            _as_float(scale_sigma),
+            None if num_reflections is None else int(num_reflections),
+            _as_float(gain),
+        )
+
+    def _crystal_row(
+        self,
+        result: "IndexResult",
+        cid: str,
+        fid: str,
+        lattice_index: int,
         num_reflections: int,
-        peak_recip: float,
     ) -> tuple:
         recovered = B_to_cell(result.A)
         A = result.A.detach().cpu().tolist()
@@ -522,26 +612,18 @@ class DuckDBOffloader(_StreamWriter):
         limit = result.diffraction_limit
         drl = limit if (limit is not None and math.isfinite(limit)) else None
         return (
+            cid,
             fid,
-            None if result.frame_index is None else int(result.frame_index),
-            filename,
-            int(event),
-            True,
-            int(self._serial),
-            int(result.n_peaks),
+            int(lattice_index),
             int(result.n_indexed),
             float(result.rmsd),
-            _as_float(result.scale),
-            _as_float(result.scale_sigma),
             None if result.mosaicity is None else math.degrees(result.mosaicity),
             _profile_radius(result),
             _as_float(result.enrichment),
             None if result.n_bright is None else int(result.n_bright),
             _as_float(result.enrich_p),
             drl,
-            peak_recip,
             int(num_reflections),
-            self._gain(result),
             recovered.a,  # B_to_cell returns edges in Angstroms
             recovered.b,
             recovered.c,
@@ -559,31 +641,6 @@ class DuckDBOffloader(_StreamWriter):
             cstar[2],
         )
 
-    def _peaks_frame_row(
-        self,
-        fid: str,
-        filename: str,
-        event: int,
-        frame_index: Optional[int],
-        n_peaks: int,
-        peak_recip: float,
-    ) -> tuple:
-        # peaks-only frame: no indexing, so only the peak count/resolution are set
-        row: list = [None] * len(_FRAME_COLUMNS)
-        for name, value in (
-            ("frame_id", fid),
-            ("frame_index", None if frame_index is None else int(frame_index)),
-            ("filename", filename),
-            ("event", int(event)),
-            ("indexed", False),
-            ("serial", int(self._serial)),
-            ("n_peaks", int(n_peaks)),
-            ("peak_resolution_nm_inv", peak_recip),
-            ("adu_per_photon", self._gain()),
-        ):
-            row[_FRAME_COLUMNS.index(name)] = value
-        return tuple(row)
-
     def _emit_unindexed(self) -> None:
         assert self._conn is not None
         lo, hi = self._frame_range if self._frame_range is not None else (None, None)
@@ -594,26 +651,41 @@ class DuckDBOffloader(_StreamWriter):
                     continue
                 if idx in self._seen:
                     continue
+                filename, physical_event = self._locate(idx)
                 self._frame_rows.append(
-                    _unindexed_frame_row(frame_id(fname, event), idx, fname, event)
+                    _unindexed_frame_row(
+                        frame_id(filename, physical_event),
+                        idx,
+                        filename,
+                        physical_event,
+                    )
                 )
                 if len(self._frame_rows) >= _FLUSH_ROWS:
                     self._flush()
 
     def _flush(self) -> None:
         assert self._conn is not None
-        if self._frame_rows:
-            self._conn.executemany(
-                f"INSERT INTO frames VALUES ({', '.join('?' * len(_FRAME_COLUMNS))})",
-                self._frame_rows,
-            )
-            self._frame_rows.clear()
-        if self._refl_rows:
-            self._conn.executemany(
-                "INSERT INTO reflections VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                self._refl_rows,
-            )
-            self._refl_rows.clear()
+        self._conn.execute("BEGIN TRANSACTION")
+        try:
+            self._flush_rows()
+            self._conn.execute("COMMIT")
+        except Exception:
+            self._conn.execute("ROLLBACK")
+            raise
+
+    def _flush_rows(self) -> None:
+        assert self._conn is not None
+        for table, columns, rows in (
+            ("frames", _FRAME_COLUMNS, self._frame_rows),
+            ("crystals", _CRYSTAL_COLUMNS, self._crystal_rows),
+            ("reflections", _REFLECTION_COLUMNS, self._refl_rows),
+        ):
+            if rows:
+                self._conn.executemany(
+                    f"INSERT INTO {table} VALUES " f"({', '.join('?' * len(columns))})",
+                    rows,
+                )
+                rows.clear()
         if self._peak_rows:
             self._conn.executemany(
                 "INSERT INTO peaks VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",

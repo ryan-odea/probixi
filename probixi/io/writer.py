@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+from bisect import bisect_right
 from pathlib import Path
 from typing import TYPE_CHECKING, Optional, Union
 
@@ -59,6 +60,10 @@ class _StreamWriter:
         self._panels = _panel_bounds(geometry.get("panels"))
         self._geometry_file = Path(geometry_file) if geometry_file else None
         self._ranges = _build_frame_ranges(files)
+        self._range_starts = [r[0] for r in self._ranges]
+        self._event_starts = [
+            getattr(info, "event_start", 0) for info in (files or {}).values()
+        ]
         self._fh = None
         self._serial = 0
 
@@ -153,9 +158,11 @@ class _StreamWriter:
     def _locate(self, frame_index: Optional[int]) -> tuple[str, int]:
         if frame_index is None:
             return "unknown", 0
-        for start, stop, fname in self._ranges:
-            if start <= frame_index < stop:
-                return fname, frame_index - start
+        i = bisect_right(self._range_starts, frame_index) - 1
+        if i >= 0:
+            start, stop, fname = self._ranges[i]
+            if frame_index < stop:
+                return fname, frame_index - start + self._event_starts[i]
         return "unknown", int(frame_index)
 
 
@@ -224,23 +231,27 @@ class DataOffloader(_StreamWriter):
         self._fh.write(self._format_chunk(result))
 
     def _format_chunk(self, result: "IndexResult") -> str:
+        crystals = getattr(result, "crystals", [result])
         positions = result.positions.detach().cpu().tolist()
         intensities = result.intensities.detach().cpu().tolist()
-        sigmas = result.sigmas.detach().cpu().tolist()
-        indexed = result.indexed_mask.detach().cpu().tolist()
-        hkl = result.hkl.detach().cpu().tolist()
-        A = result.A.detach().cpu().tolist()
-
         out = self._peak_search_lines(
             result.frame_index,
             positions,
             intensities,
             result.n_peaks,
-            "fromfile",
+            "fromfile" if crystals else "none",
         )
-        out += self._format_crystal(
-            result, A, hkl, indexed, positions, intensities, sigmas
-        )
+        out[out.index("hit = 1")] = f"hit = {int(result.n_peaks >= 5)}"
+        for crystal in crystals:
+            out += self._format_crystal(
+                crystal,
+                crystal.A.detach().cpu().tolist(),
+                crystal.hkl.detach().cpu().tolist(),
+                crystal.indexed_mask.detach().cpu().tolist(),
+                crystal.positions.detach().cpu().tolist(),
+                crystal.intensities.detach().cpu().tolist(),
+                crystal.sigmas.detach().cpu().tolist(),
+            )
         out.append("----- End chunk -----")
         return "\n".join(out) + "\n"
 
