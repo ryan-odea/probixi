@@ -32,6 +32,7 @@ _CLEN_MM_THRESHOLD_M = 2.0
 DETECTOR_KEYS = ("detector", "detector_type", "type")
 PANEL_REQUIRED = {"min_fs", "max_fs", "min_ss", "max_ss", "corner_x", "corner_y"}
 MASK_REQUIRED = {"min_fs", "max_fs", "min_ss", "max_ss"}
+LAB_MASK_REQUIRED = {"min_x", "max_x", "min_y", "max_y"}
 _MASK_KEYS = ("mask", "mask_file", "mask_good", "mask_bad")
 
 
@@ -59,10 +60,19 @@ class MaskSpec:
 @dataclass
 class BadRegion:
     name: str
-    min_fs: int
-    max_fs: int
-    min_ss: int
-    max_ss: int
+    min_fs: Optional[int] = None
+    max_fs: Optional[int] = None
+    min_ss: Optional[int] = None
+    max_ss: Optional[int] = None
+    min_x: Optional[float] = None
+    max_x: Optional[float] = None
+    min_y: Optional[float] = None
+    max_y: Optional[float] = None
+    panel: Optional[str] = None
+
+    @property
+    def is_lab_frame(self) -> bool:
+        return self.min_x is not None
 
 
 @dataclass
@@ -178,7 +188,26 @@ def read_geometry(path: PathLike) -> Geometry:
                     max_fs=int(data["max_fs"]),
                     min_ss=int(data["min_ss"]),
                     max_ss=int(data["max_ss"]),
+                    panel=str(data["panel"]) if "panel" in data else None,
                 )
+            )
+        elif LAB_MASK_REQUIRED.issubset(data.keys()):
+            bad_regions.append(
+                BadRegion(
+                    name=name,
+                    min_x=float(data["min_x"]),
+                    max_x=float(data["max_x"]),
+                    min_y=float(data["min_y"]),
+                    max_y=float(data["max_y"]),
+                    panel=str(data["panel"]) if "panel" in data else None,
+                )
+            )
+        elif _looks_like_bad_region(name, data):
+            warnings.warn(
+                f"geometry: ignoring bad region {name!r} with keys "
+                f"{sorted(data)} -- expected either {sorted(MASK_REQUIRED)} or "
+                f"{sorted(LAB_MASK_REQUIRED)}",
+                stacklevel=2,
             )
 
     distance = parameters.get("clen")
@@ -265,6 +294,12 @@ def _build_data_layout(
         fs_axis=fs_axis,
         fixed=fixed,
     )
+
+
+def _looks_like_bad_region(name: str, data: dict) -> bool:
+    if name.lower().startswith("bad"):
+        return True
+    return any(k.startswith(("min_", "max_")) for k in data)
 
 
 def _parse_mask_bits(value: object, default: int = 0) -> int:

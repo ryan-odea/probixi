@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, Optional, Union
 
 import torch
 
+from ..indexer.forward import detector_to_q
 from ..indexer.lattice import B_to_cell
 from .geometry import EV_ANGSTROM
 
@@ -106,10 +107,9 @@ class _StreamWriter:
         filename, event = self._locate(frame_index)
 
         peak_rows: list[str] = []
-        max_recip = 0.0
-        for (row, col), intensity in zip(positions, intensities):
-            recip = self._resolution_nm_inv(row, col)
-            max_recip = max(max_recip, recip)
+        recips = self._resolution_nm_inv_many(positions)
+        max_recip = max(recips, default=0.0)
+        for (row, col), intensity, recip in zip(positions, intensities, recips):
             # fs = column (fast scan), ss = row (slow scan)
             peak_rows.append(
                 f"{col:7.2f} {row:7.2f} {recip:10.2f} {intensity:10.2f}   "
@@ -139,14 +139,17 @@ class _StreamWriter:
             "End of peak list",
         ]
 
+    def _resolution_nm_inv_many(self, positions) -> list[float]:
+        pos = [(float(row), float(col)) for row, col in positions]
+        if not pos:
+            return []
+        q = detector_to_q(
+            torch.tensor(pos, dtype=torch.float32), self.geometry, dtype=torch.float32
+        )
+        return (torch.linalg.vector_norm(q, dim=-1) * A_INV_TO_NM_INV).tolist()
+
     def _resolution_nm_inv(self, row: float, col: float) -> float:
-        # q = 1/d = 2 sin(theta)/lambda; lambda_nm = 0.1 lambda_A -> nm^-1
-        g = self.geometry
-        bc = g["beam_center"]
-        dr = (row - float(bc[0])) * float(g["pixel_size"])
-        dc = (col - float(bc[1])) * float(g["pixel_size"])
-        two_theta = math.atan2(math.hypot(dr, dc), float(g["clen"]))
-        return 2.0 * math.sin(0.5 * two_theta) / (float(g["wavelength"]) * 0.1)
+        return self._resolution_nm_inv_many([(row, col)])[0]
 
     def _panel_for(self, fs: float, ss: float) -> str:
         # Panel containing (fs, ss), else the fallback name.
@@ -317,8 +320,7 @@ class DataOffloader(_StreamWriter):
         refl = [r for r in refl if math.isfinite(r[3]) and r[3] > 0.0]
 
         max_recip = max(
-            (self._resolution_nm_inv(row, col) for (row, col), *_ in refl),
-            default=0.0,
+            self._resolution_nm_inv_many([rc for rc, *_ in refl]), default=0.0
         )
         limit = result.diffraction_limit
         drl_recip = limit if (limit is not None and math.isfinite(limit)) else max_recip

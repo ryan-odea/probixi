@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import random
+import warnings
 from dataclasses import dataclass, field
 from functools import lru_cache
 from itertools import chain, islice
@@ -21,7 +22,7 @@ from .indexer import (
     RefineConfig,
     SeedConfig,
 )
-from .indexer.forward import detector_to_q
+from .indexer.forward import _lab_xy_pixels, _panel_bases, detector_to_q
 from .indexer.indexer import MIN_PEAKS_TO_INDEX
 from .indexer.integrate import radial_profile, radii_from_profile
 from .io import (
@@ -57,6 +58,9 @@ _BEAMSTOP_EDGE_FRACTION = 0.1
 _BEAMSTOP_MIN_FRACTION = 0.05
 _BEAMSTOP_MIN_PEAKS = 200
 _BEAMSTOP_MIN_BIN_PEAKS = 5
+
+# pixels per chunk when building the per-pixel lab-radius map
+_LAB_RADIUS_CHUNK_PIXELS = 1 << 18
 
 # Frames pooled, and peaks required, when measuring the integration radii
 _RADII_MAX_FRAMES = 32
@@ -415,10 +419,22 @@ class Probixi:
             return
         frame_size = (int(item.shape[-2]), int(item.shape[-1]))
         first = item[0] if item.ndim == 3 else item
+        geom = self.loader.metadata.geometry
+        radius = _lab_radius_map(geom, frame_size, device=self.device)
+        if radius is None and len(getattr(geom, "panels", None) or {}) > 1:
+            warnings.warn(
+                "geometry: could not build a lab-frame radius map (panels are "
+                "missing fs/ss or corner_x/corner_y); the radial background "
+                "model will bin on array radius, which is wrong for a tiled "
+                "detector",
+                stacklevel=2,
+            )
         self._noise = NoiseModel(
             frame_size=frame_size,
             mode=self.noise_mode,
             warmup_frames=self.warmup_frames,
+            beam_center=geom.beam_center if geom is not None else None,
+            radial_radius=radius,
             valid_mask=self._static_mask(first, frame_size),
             device=self.device,
             dtype=self.dtype,
@@ -437,18 +453,25 @@ class Probixi:
         )
 
     def _static_mask(self, frame: Tensor, frame_size: tuple[int, int]) -> Tensor:
-        # a-priori bad pixels: at/above max_adu (gaps/dead/saturated) + geometry
-        # bad regions, kept out of the background and detection.
+        # a-priori bad pixels: at/above max_adu (gaps/dead/saturated), panel-edge
+        # pixels, and geometry bad regions in either coordinate form -- all kept
+        # out of the background model and detection.
         mask = torch.ones(frame_size, dtype=torch.bool, device=frame.device)
         geom = self.loader.metadata.geometry
         max_adu = geom.parameters.get("max_adu") if geom else None
         if isinstance(max_adu, (int, float)):
             mask &= frame < float(max_adu)
+        if geom is not None:
+            _mask_panel_edges(mask, geom)
         for br in geom.bad_regions if geom else []:
+            if br.is_lab_frame:
+                continue
             r0, r1 = max(0, br.min_ss), min(frame_size[0] - 1, br.max_ss)
             c0, c1 = max(0, br.min_fs), min(frame_size[1] - 1, br.max_fs)
             if r0 <= r1 and c0 <= c1:
                 mask[r0 : r1 + 1, c0 : c1 + 1] = False
+        if geom is not None:
+            _mask_lab_bad_regions(mask, geom)
         h5_mask = self._hdf5_valid_mask(frame_size)
         if h5_mask is not None:
             mask &= h5_mask.to(device=mask.device)
@@ -1005,3 +1028,90 @@ class Probixi:
         for offset, item in enumerate(frames):
             frame = item[0] if item.ndim == 3 else item
             yield ref.estimate(frame, start_index + offset)
+
+
+def _lab_radius_map(geom, frame_size: tuple[int, int], device=None) -> Optional[Tensor]:
+    if geom is None:
+        return None
+    g = geom.to_dict()
+    bases = _panel_bases(g, device, torch.float32)
+    if bases is None:
+        return None
+    rows, cols = frame_size
+    out = torch.empty(frame_size, dtype=torch.float32, device=device)
+    cc = torch.arange(cols, dtype=torch.float32, device=device)
+    step = max(1, _LAB_RADIUS_CHUNK_PIXELS // max(cols, 1))
+    for r0 in range(0, rows, step):
+        r1 = min(rows, r0 + step)
+        n = r1 - r0
+        rr = torch.arange(r0, r1, dtype=torch.float32, device=device)
+        pos = torch.stack(
+            [
+                rr.view(-1, 1).expand(n, cols).reshape(-1),
+                cc.view(1, -1).expand(n, cols).reshape(-1),
+            ],
+            dim=-1,
+        )
+        xy = _lab_xy_pixels(pos, g, bases)
+        out[r0:r1] = torch.linalg.vector_norm(xy, dim=-1).view(n, cols)
+    return out
+
+
+def _mask_panel_edges(mask: Tensor, geom) -> None:
+    # mask ``mask_edge_pixels`` pixels around the border of every panel
+    n = geom.parameters.get("mask_edge_pixels")
+    if not isinstance(n, (int, float)) or isinstance(n, bool):
+        return
+    n = int(n)
+    if n <= 0:
+        return
+    rows, cols = int(mask.shape[0]), int(mask.shape[1])
+    for panel in (geom.panels or {}).values():
+        try:
+            r0, r1 = int(panel["min_ss"]), int(panel["max_ss"])
+            c0, c1 = int(panel["min_fs"]), int(panel["max_fs"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        r0, r1 = max(0, r0), min(rows - 1, r1)
+        c0, c1 = max(0, c0), min(cols - 1, c1)
+        if r0 > r1 or c0 > c1:
+            continue
+        mask[r0 : min(r0 + n, r1 + 1), c0 : c1 + 1] = False
+        mask[max(r1 - n + 1, r0) : r1 + 1, c0 : c1 + 1] = False
+        mask[r0 : r1 + 1, c0 : min(c0 + n, c1 + 1)] = False
+        mask[r0 : r1 + 1, max(c1 - n + 1, c0) : c1 + 1] = False
+
+
+def _mask_lab_bad_regions(mask: Tensor, geom) -> None:
+    # mask abd regions defined in lab-frame coordinates (e.g. beamstop, guard ring, etc.)
+    regions = [br for br in geom.bad_regions if br.is_lab_frame]
+    if not regions:
+        return
+    bases = _panel_bases(geom.to_dict(), mask.device, torch.float32)
+    if bases is None:
+        return
+    rows, cols = int(mask.shape[0]), int(mask.shape[1])
+    for name, basis in zip((geom.panels or {}).keys(), bases):
+        min_ss, max_ss = int(basis[0]), int(basis[1])
+        min_fs, max_fs = int(basis[2]), int(basis[3])
+        cx, cy = float(basis[4]), float(basis[5])
+        fsx, fsy = float(basis[6]), float(basis[7])
+        ssx, ssy = float(basis[8]), float(basis[9])
+        r0, r1 = max(0, min_ss), min(rows - 1, max_ss)
+        c0, c1 = max(0, min_fs), min(cols - 1, max_fs)
+        if r0 > r1 or c0 > c1:
+            continue
+        ss_i = torch.arange(
+            r0 - min_ss, r1 - min_ss + 1, device=mask.device, dtype=torch.float32
+        )[:, None]
+        fs_j = torch.arange(
+            c0 - min_fs, c1 - min_fs + 1, device=mask.device, dtype=torch.float32
+        )[None, :]
+        x = cx + fs_j * fsx + ss_i * ssx
+        y = cy + fs_j * fsy + ss_i * ssy
+        for br in regions:
+            if br.panel is not None and br.panel != name:
+                continue
+            hit = (x >= br.min_x) & (x <= br.max_x) & (y >= br.min_y) & (y <= br.max_y)
+            if bool(hit.any()):
+                mask[r0 : r1 + 1, c0 : c1 + 1] &= ~hit
