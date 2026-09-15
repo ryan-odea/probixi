@@ -1,5 +1,7 @@
 from .indexer import (
     CellMatchConfig,
+    FrameIndexResult,
+    FrameIndexStream,
     Indexer,
     IndexResult,
     IndexStats,
@@ -14,6 +16,8 @@ __all__ = [
     "IndexStream",
     "IndexStats",
     "IndexResult",
+    "FrameIndexResult",
+    "FrameIndexStream",
     "CellMatchConfig",
     "IntegrateConfig",
     "RefineConfig",

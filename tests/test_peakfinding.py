@@ -159,6 +159,7 @@ def test_size_min_rejects_a_single_pixel_blob():
         posterior_mean=torch.tensor([0.9]),
         eccentricity=torch.tensor([1.0]),
         peakedness=torch.tensor([1.5]),
+        background_sum=torch.tensor([0.0]),
     )
     # passes every other filter; size_min=2 is the only thing that can reject it
     assert (

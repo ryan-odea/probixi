@@ -628,6 +628,7 @@ class PeakFinder:
                 keep=torch.zeros(0, dtype=torch.bool, device=device),
             )
         var_eff = scores.get("var_eff", self._pred()["var"])
+        mean_eff = scores.get("mean_eff", self._pred()["mean"])
         stats = compute_blob_stats(
             labels,
             n_blobs,
@@ -636,6 +637,7 @@ class PeakFinder:
             log_bf=scores["log_bf"],
             posterior=scores["posterior"],
             var=var_eff,
+            mean=mean_eff,
         )
         keep = filter_blobs(
             stats,
@@ -652,7 +654,7 @@ class PeakFinder:
             keep=keep,
             var=var_eff,
             valid_mask=mask,
-            mean=scores.get("mean_eff", self._pred()["mean"]),
+            mean=mean_eff,
         )
 
 

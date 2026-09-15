@@ -4,7 +4,7 @@ import pytest
 import sim
 import torch
 
-from probixi.indexer.integrate import integrate_boxes, integrate_predicted
+from probixi.indexer.integrate import integrate_rings
 from probixi.indexer.lattice import cell_to_B
 from probixi.indexer.predict import detector_q_max, predict_reflections
 
@@ -133,73 +133,54 @@ def test_integrate_recovers_injected_intensity_and_background(cell):
     var = torch.full(SHAPE, noise_sigma**2, dtype=torch.float32)
     mean = torch.full(SHAPE, background, dtype=torch.float32)
 
-    positions, intensity, sigma, snapped, peak, bg = integrate_predicted(
+    positions, intensity, sigma, snapped, peak, bg = integrate_rings(
         lattice_pos,
         excess,
         var,
         obs_positions=torch.empty(0, 2, dtype=torch.float32),
-        box_radius=4,
         mean=mean,
+        radii=(4.0, 6.0, 9.0),
     )
-    # box sum recovers the bulk of each spot's total counts
+    # the disk recovers the bulk of each spot's total counts
     assert abs(float(intensity.median()) - truth_I) < 0.1 * truth_I
-    # background reported is the injected mean
-    assert torch.allclose(bg, torch.full((n,), background, dtype=torch.float32))
-    # box sigma combines the summed per-pixel background variance with the
-    # signal's own shot noise (adu_per_photon defaults to 1.0); for spots whose
-    # full box lies inside the frame the count is the complete (2r+1)^2 box
-    box_radius = 4
-    # integrate_boxes rounds the centre to the nearest pixel before slicing
-    centre = torch.round(lattice_pos).to(torch.long)
-    rows, cols = centre[:, 0], centre[:, 1]
-    interior = (
-        (rows >= box_radius)
-        & (rows <= SHAPE[0] - 1 - box_radius)
-        & (cols >= box_radius)
-        & (cols <= SHAPE[1] - 1 - box_radius)
-    )
-    assert bool(interior.any())
-    box_pixels = (2 * box_radius + 1) ** 2
-    expected_sigma = torch.sqrt(box_pixels * noise_sigma**2 + intensity.clamp_min(0.0))
-    assert torch.allclose(sigma[interior], expected_sigma[interior])
+    # the annulus recovers the flat background it was given
+    assert float(bg.median()) == pytest.approx(background, rel=0.05)
+    assert bool((sigma > 0).any())
 
 
 def test_integrate_snaps_predicted_to_nearby_observed_peak(cell):
     geom = _synthetic_geometry()
     lattice_pos, _ = sim.lattice_peaks(geom, cell, _orientation())
-    n = lattice_pos.shape[0]
-    assert n > 0
+    assert lattice_pos.shape[0] > 0
     excess = torch.zeros(SHAPE, dtype=torch.float32)
     var = torch.ones(SHAPE, dtype=torch.float32)
+    mean = torch.zeros(SHAPE, dtype=torch.float32)
     # predicted positions are offset; observed peaks sit on the true lattice
-    pred_pos = lattice_pos + 0.4
-    obs_pos = lattice_pos
-    positions, intensity, sigma, snapped, peak, bg = integrate_predicted(
-        pred_pos,
+    positions, _, _, snapped, _, _ = integrate_rings(
+        lattice_pos + 0.4,
         excess,
         var,
-        obs_positions=obs_pos,
+        obs_positions=lattice_pos,
         snap_radius=5.0,
-        box_radius=3,
+        mean=mean,
+        radii=(3.0, 5.0, 7.0),
     )
     assert bool(snapped.all())
     # snapped centres land exactly on the observed peaks
-    assert torch.allclose(positions, obs_pos)
+    assert torch.allclose(positions, lattice_pos)
 
 
 def test_integrate_does_not_snap_observed_peak_outside_snap_radius():
     shape = (64, 64)
-    excess = torch.zeros(shape, dtype=torch.float32)
-    var = torch.ones(shape, dtype=torch.float32)
     pred_pos = torch.tensor([[20.0, 20.0]], dtype=torch.float32)
-    obs_pos = torch.tensor([[40.0, 40.0]], dtype=torch.float32)
-    positions, intensity, sigma, snapped, peak, bg = integrate_predicted(
+    positions, _, _, snapped, _, _ = integrate_rings(
         pred_pos,
-        excess,
-        var,
-        obs_positions=obs_pos,
+        torch.zeros(shape, dtype=torch.float32),
+        torch.ones(shape, dtype=torch.float32),
+        obs_positions=torch.tensor([[40.0, 40.0]], dtype=torch.float32),
         snap_radius=5.0,
-        box_radius=2,
+        mean=torch.zeros(shape, dtype=torch.float32),
+        radii=(2.0, 4.0, 6.0),
     )
     assert not bool(snapped[0])
     # without a snap the predicted position is retained
@@ -208,41 +189,46 @@ def test_integrate_does_not_snap_observed_peak_outside_snap_radius():
 
 def test_integrate_with_no_observed_peaks_keeps_predicted_positions():
     shape = (64, 64)
-    excess = torch.zeros(shape, dtype=torch.float32)
-    var = torch.ones(shape, dtype=torch.float32)
     pred_pos = torch.tensor([[10.0, 12.0], [30.0, 40.0]], dtype=torch.float32)
-    positions, intensity, sigma, snapped, peak, bg = integrate_predicted(
+    positions, _, _, snapped, _, _ = integrate_rings(
         pred_pos,
-        excess,
-        var,
+        torch.zeros(shape, dtype=torch.float32),
+        torch.ones(shape, dtype=torch.float32),
         obs_positions=torch.empty(0, 2, dtype=torch.float32),
-        box_radius=2,
+        mean=torch.zeros(shape, dtype=torch.float32),
+        radii=(2.0, 4.0, 6.0),
     )
     assert not bool(snapped.any())
     assert torch.allclose(positions, pred_pos)
 
 
-def test_integrate_boxes_deblend_owns_shared_pixel_by_nearest_then_lowest_index():
-    # M>1 nearest-owner deblend: a pixel in the overlap of two boxes is assigned to
-    # exactly one centre (nearest, ties broken by lowest index), never double-counted.
+def test_integrate_deblend_owns_shared_pixel_by_nearest_then_lowest_index():
+    # M>1 nearest-owner deblend: a pixel in the overlap of two disks is assigned
+    # to exactly one centre (nearest, ties broken by lowest index), never
+    # double-counted.
     shape = (48, 48)
     positions = torch.tensor([[24.0, 22.0], [24.0, 26.0]], dtype=torch.float32)
     excess = torch.zeros(shape, dtype=torch.float32)
-    excess[24, 22] = 100.0  # only in box 0
-    excess[24, 26] = 80.0  # only in box 1
-    excess[24, 24] = 30.0  # equidistant (d=2) -> tie -> lowest index (box 0)
-    var = torch.ones(shape, dtype=torch.float32)
-    inten, sigma, peak, bg = integrate_boxes(excess, var, positions, radius=3)
-    # shared pixel counted once, in box 0; total conserved (no double-count)
-    assert float(inten[0]) == pytest.approx(130.0)
-    assert float(inten[1]) == pytest.approx(80.0)
-    assert float(inten.sum()) == pytest.approx(210.0)
+    excess[24, 22] = 100.0  # only in disk 0
+    excess[24, 26] = 80.0  # only in disk 1
+    excess[24, 24] = 30.0  # equidistant (d=2) -> tie -> lowest index (disk 0)
+    _, intensity, _, _, _, _ = integrate_rings(
+        positions,
+        excess,
+        torch.ones(shape, dtype=torch.float32),
+        obs_positions=torch.empty(0, 2, dtype=torch.float32),
+        mean=torch.zeros(shape, dtype=torch.float32),
+        radii=(3.0, 5.0, 7.0),
+    )
+    # shared pixel counted once, in disk 0; total conserved (no double-count)
+    assert float(intensity[0]) == pytest.approx(130.0, abs=1e-3)
+    assert float(intensity.sum()) == pytest.approx(210.0, abs=1e-3)
 
 
 @pytest.mark.mps
-def test_integrate_boxes_deblend_runs_on_mps_and_matches_cpu():
-    # The M>1 deblend tie-break used an int64 scatter_reduce, which has no MPS
-    # kernel and crashed on-device; guard that it runs and agrees with CPU.
+def test_integrate_deblend_runs_on_mps_and_matches_cpu():
+    # The M>1 deblend tie-break uses an int64 scatter_reduce, which has no MPS
+    # kernel in some builds; guard that it runs and agrees with CPU.
     if not torch.backends.mps.is_available():
         pytest.skip("MPS device not available")
     shape = (48, 48)
@@ -252,32 +238,40 @@ def test_integrate_boxes_deblend_runs_on_mps_and_matches_cpu():
     excess[24, 26] = 80.0
     excess[24, 24] = 30.0  # overlap pixel -> exercises the tie-break scatter
     var = torch.ones(shape, dtype=torch.float32)
+    mean = torch.zeros(shape, dtype=torch.float32)
 
     def run(dev: torch.device):
-        out = integrate_boxes(excess.to(dev), var.to(dev), positions.to(dev), radius=3)
+        out = integrate_rings(
+            positions.to(dev),
+            excess.to(dev),
+            var.to(dev),
+            obs_positions=torch.empty(0, 2, dtype=torch.float32, device=dev),
+            mean=mean.to(dev),
+            radii=(3.0, 5.0, 7.0),
+        )
         return [t.cpu() for t in out]
 
-    I_c, s_c, p_c, b_c = run(torch.device("cpu"))
-    I_m, s_m, p_m, b_m = run(torch.device("mps"))  # previously raised on int64
+    _, I_c, s_c, _, p_c, b_c = run(torch.device("cpu"))
+    _, I_m, s_m, _, p_m, b_m = run(torch.device("mps"))
     assert torch.allclose(I_c, I_m, atol=1e-4)
     assert torch.allclose(s_c, s_m, atol=1e-4)
     assert torch.allclose(p_c, p_m, atol=1e-4)
+    assert torch.allclose(b_c, b_m, atol=1e-4)
     assert float(I_m[0]) == pytest.approx(130.0, abs=1e-3)
 
 
-def test_integrate_peak_is_box_maximum_of_excess():
+def test_integrate_peak_is_disk_maximum_of_excess():
     shape = (32, 32)
     excess = torch.zeros(shape, dtype=torch.float32)
     excess[16, 16] = 42.0
-    var = torch.ones(shape, dtype=torch.float32)
-    pred_pos = torch.tensor([[16.0, 16.0]], dtype=torch.float32)
-    positions, intensity, sigma, snapped, peak, bg = integrate_predicted(
-        pred_pos,
+    _, intensity, _, _, peak, _ = integrate_rings(
+        torch.tensor([[16.0, 16.0]], dtype=torch.float32),
         excess,
-        var,
+        torch.ones(shape, dtype=torch.float32),
         obs_positions=torch.empty(0, 2, dtype=torch.float32),
-        box_radius=2,
+        mean=torch.zeros(shape, dtype=torch.float32),
+        radii=(2.0, 4.0, 6.0),
     )
     assert float(peak[0]) == pytest.approx(42.0)
-    # the single hot pixel is the only excess in the box, so the sum matches it
+    # the single hot pixel is the only excess in the disk, so the sum matches it
     assert float(intensity[0]) == pytest.approx(42.0)

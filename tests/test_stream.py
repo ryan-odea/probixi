@@ -7,9 +7,10 @@ import torch
 
 from probixi.indexer.indexer import IndexResult
 from probixi.indexer.lattice import B_to_cell
+from probixi.io import read_geometry
 from probixi.io.cxi import PeakOffloader
 from probixi.io.metadata import H5Info
-from probixi.io.writer import DataOffloader
+from probixi.io.writer import DataOffloader, _StreamWriter
 from probixi.peakfinding.peaks.blobs import BlobStats
 from probixi.peakfinding.peaks.peakfinder import PeakResult
 
@@ -75,6 +76,7 @@ def _make_peak_result() -> PeakResult:
         posterior_mean=z,
         eccentricity=z,
         peakedness=z,
+        background_sum=z,
     )
     return PeakResult(
         frame_index=0,
@@ -253,3 +255,96 @@ def test_peak_offloader_write_before_context_manager_raises(tmp_path):
     off = PeakOffloader(tmp_path / "x.stream")
     with pytest.raises(RuntimeError):
         off.write(_make_peak_result())
+
+
+# --- peak resolution must come from the panel geometry -----------------------
+
+
+def _folded_geom_file(tmp_path):
+    # Two 4x4 panels stacked in ss in the array, mirrored about the beam in the
+    # lab frame: array pixel (ss, fs) on panel 0 and (ss + 4, fs) on panel 1 are
+    # at the same scattering angle.
+    lines = [
+        "clen = 0.1",
+        "photon_energy = 12398.0",
+        "res = 13333.3",
+        "data = /entry/data/data",
+        "dim0 = %",
+        "dim1 = ss",
+        "dim2 = fs",
+        "0/min_fs = 0",
+        "0/max_fs = 3",
+        "0/min_ss = 0",
+        "0/max_ss = 3",
+        "0/corner_x = 10.0",
+        "0/corner_y = -1.5",
+        "0/fs = +1.0x +0.0y",
+        "0/ss = +0.0x +1.0y",
+        "1/min_fs = 0",
+        "1/max_fs = 3",
+        "1/min_ss = 4",
+        "1/max_ss = 7",
+        "1/corner_x = -10.0",
+        "1/corner_y = -1.5",
+        "1/fs = -1.0x +0.0y",
+        "1/ss = +0.0x +1.0y",
+    ]
+    path = tmp_path / "folded.geom"
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return path
+
+
+def _writer_for(geometry_dict):
+    w = _StreamWriter.__new__(_StreamWriter)
+    w.geometry = geometry_dict
+    return w
+
+
+def test_peak_resolution_uses_panel_geometry(tmp_path):
+    geom = read_geometry(_folded_geom_file(tmp_path))
+    w = _writer_for(geom.to_dict())
+
+    # mirror pixels are at one scattering angle, so one 1/d
+    for ss in range(4):
+        for fs in range(4):
+            a = w._resolution_nm_inv(float(ss), float(fs))
+            b = w._resolution_nm_inv(float(ss + 4), float(fs))
+            assert a == pytest.approx(b, rel=1e-5), f"({ss}, {fs}) vs ({ss + 4}, {fs})"
+
+    # and the value is the geometry's: panel 0 (0, 0) sits at lab (+10, -1.5) px
+    g = geom.to_dict()
+    r_m = math.hypot(10.0, 1.5) * float(g["pixel_size"])
+    want = (
+        2.0
+        * math.sin(0.5 * math.atan2(r_m, float(g["clen"])))
+        / (float(g["wavelength"]) * 0.1)
+    )
+    assert w._resolution_nm_inv(0.0, 0.0) == pytest.approx(want, rel=1e-5)
+
+
+def test_peak_resolution_is_not_array_radius(tmp_path):
+    # the pre-fix formula measured the radius in array coordinates about the
+    # beam centre; on a tiled detector that is a different number
+    geom = read_geometry(_folded_geom_file(tmp_path))
+    g = geom.to_dict()
+    w = _writer_for(g)
+    bc = g["beam_center"]
+    row, col = 4.0, 0.0
+    dr = (row - float(bc[0])) * float(g["pixel_size"])
+    dc = (col - float(bc[1])) * float(g["pixel_size"])
+    array_form = (
+        2.0
+        * math.sin(0.5 * math.atan2(math.hypot(dr, dc), float(g["clen"])))
+        / (float(g["wavelength"]) * 0.1)
+    )
+    assert w._resolution_nm_inv(row, col) != pytest.approx(array_form, rel=1e-3)
+
+
+def test_resolution_many_matches_scalar(tmp_path):
+    geom = read_geometry(_folded_geom_file(tmp_path))
+    w = _writer_for(geom.to_dict())
+    pos = [(0.0, 0.0), (2.0, 3.0), (6.0, 1.0)]
+    assert w._resolution_nm_inv_many(pos) == pytest.approx(
+        [w._resolution_nm_inv(r, c) for r, c in pos], rel=1e-6
+    )
+    assert w._resolution_nm_inv_many([]) == []

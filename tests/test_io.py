@@ -207,3 +207,46 @@ def test_iter_frames_full_consumption_joins_worker(tmp_path):
     assert sum(t.shape[0] for t in out) == 6
     # the daemon prefetch thread is joined on clean termination
     assert threading.active_count() == before
+
+
+def test_event_list_preserves_order_and_physical_identity(tmp_path, geometry_dict):
+    from probixi.io.writer import DataOffloader
+
+    data = _frames(7, 8, 6)
+    h5_path, lst = sim.write_run(tmp_path, data)
+    selection = [4, 5, 1, 3]
+    lst.write_text("".join(f"{h5_path} //{event}\n" for event in selection))
+    loader = DataLoader(lst)
+    actual = torch.stack(list(iter_frames(loader, start=1, stop=4)))
+    np.testing.assert_array_equal(actual.numpy(), data[selection[1:]])
+    assert len(loader) == 4
+    assert len(loader.files) == 3
+    writer = DataOffloader(
+        tmp_path / "unused.stream", geometry_dict, files=loader.files
+    )
+    assert [writer._locate(i) for i in range(4)] == [
+        (str(h5_path), e) for e in selection
+    ]
+
+
+def test_event_list_cxi_uses_original_event_axis(tmp_path):
+    from types import SimpleNamespace
+
+    import h5py
+
+    from probixi.io.cxi import PeakOffloader
+
+    data = _frames(7, 8, 6)
+    h5_path, lst = sim.write_run(tmp_path, data)
+    lst.write_text(f"{h5_path} //4\n{h5_path} //1\n")
+    loader = DataLoader(lst)
+    stats = SimpleNamespace(
+        row_centroid=torch.tensor([2.0]),
+        col_centroid=torch.tensor([3.0]),
+        intensity_sum=torch.tensor([10.0]),
+    )
+    with PeakOffloader(tmp_path / "peaks", files=loader.files) as out:
+        out.write(SimpleNamespace(frame_index=0, kept_stats=stats))
+    with h5py.File(tmp_path / "peaks" / (h5_path.stem + ".cxi")) as f:
+        assert f["/entry_1/result_1/nPeaks"].shape == (7,)
+        assert f["/entry_1/result_1/nPeaks"][:].tolist() == [0, 0, 0, 0, 1, 0, 0]

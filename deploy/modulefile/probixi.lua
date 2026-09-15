@@ -1,7 +1,7 @@
 -- Lmod modulefile template for Probixi. Layout + setup: deploy/README.md
 -- Image at $PROBIXI_ROOT/<version>/probixi.sif; install as probixi/<version>.lua
 
-local version = "0.4.0"  -- auto-synced by format.yml
+local version = "0.5.0"  -- auto-synced by format.yml
 local root    = os.getenv("PROBIXI_ROOT") or "/opt/software/probixi"
 local sif     = pathJoin(root, version, "probixi.sif")
 

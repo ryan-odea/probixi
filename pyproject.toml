@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "probixi"
-version = "0.4.0"
+version = "0.5.0"
 description = "Self-Calibrating Probabilistic Peak Finding for Serial X-Ray Crystallographic Data"
 readme = "README.md"
 license = { text = "MIT" }
@@ -86,3 +86,9 @@ generated-members = ["torch.*"]
 
 [tool.pylint.messages_control]
 disable = ["abstract-method", "not-callable"]
+
+[tool.isort]
+profile = "black"
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F"]

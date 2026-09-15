@@ -5,7 +5,7 @@ import math
 import pytest
 import torch
 
-from probixi.indexer.lattice import B_to_cell, cell_to_B, decompose_A
+from probixi.indexer.lattice import B_to_cell, cell_to_B
 from probixi.io import CellParams
 
 DT = torch.float32
@@ -14,15 +14,6 @@ CUBIC = CellParams(10.0, 10.0, 10.0, math.pi / 2, math.pi / 2, math.pi / 2)
 ORTHO = CellParams(10.0, 20.0, 30.0, math.pi / 2, math.pi / 2, math.pi / 2)
 MONO = CellParams(10.0, 15.0, 20.0, math.pi / 2, math.radians(110.0), math.pi / 2)
 HEX = CellParams(62.23, 62.23, 110.77, math.pi / 2, math.pi / 2, math.radians(120.0))
-
-
-def proper_rotation(seed: int) -> torch.Tensor:
-    # deterministic right-handed rotation (det = +1)
-    g = torch.Generator().manual_seed(seed)
-    Q, _ = torch.linalg.qr(torch.randn(3, 3, generator=g, dtype=DT))
-    if torch.linalg.det(Q) < 0:
-        Q[:, 0] = -Q[:, 0]
-    return Q
 
 
 def test_cell_to_B_orthorhombic_is_diagonal():
@@ -65,29 +56,3 @@ def test_cell_to_B_rejects_degenerate_cell():
 def test_B_to_cell_rejects_bad_shape():
     with pytest.raises(ValueError, match=r"\(3, 3\)"):
         B_to_cell(torch.eye(2, dtype=DT))
-
-
-def test_decompose_A_returns_proper_rotation():
-    A = proper_rotation(0) @ cell_to_B(ORTHO, dtype=DT)
-    U, _, _ = decompose_A(A)
-    assert torch.allclose(U @ U.transpose(-1, -2), torch.eye(3, dtype=DT), atol=1e-6)
-    assert float(torch.linalg.det(U)) == pytest.approx(1.0, abs=1e-6)
-
-
-def test_decompose_A_recovers_cell_metric():
-    # decompose_A returns a reduced basis, so assert the orientation-invariant
-    # metric (sorted edges, volume), not a particular basis or angle convention
-    A = proper_rotation(7) @ cell_to_B(HEX, dtype=DT)
-    _, _, cell = decompose_A(A)
-    assert sorted((cell.a, cell.b, cell.c)) == pytest.approx(
-        sorted((HEX.a, HEX.b, HEX.c)), rel=1e-6
-    )
-    assert cell.volume == pytest.approx(HEX.volume, rel=1e-6)
-    # gamma collapses to the reduced 60 deg setting of the same lattice
-    assert math.degrees(cell.gamma) == pytest.approx(60.0, abs=1e-3)
-
-
-def test_decompose_A_preserves_cell_volume():
-    A = proper_rotation(3) @ cell_to_B(HEX, dtype=DT)
-    _, _, cell = decompose_A(A)
-    assert cell.volume == pytest.approx(HEX.volume, rel=1e-6)

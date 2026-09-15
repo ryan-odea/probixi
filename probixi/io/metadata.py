@@ -30,6 +30,10 @@ class H5Info:
         Shape of a single assembled frame ``(ss, fs)`` in data space.
     raw_shape : tuple[int, ...]
         Full shape of the source HDF5 array (before assembly).
+    source_n_frames : int, optional
+        Original stack length when this entry selects only some source events.
+    event_start : int, default 0
+        First source event for a contiguous selection from an event list.
     placements : list[PanelPlacement], optional
         Panel placement records for the assembly path; ``None`` selects the fast
         contiguous-slice path for a plain ``(N, ss, fs)`` stack.
@@ -41,6 +45,8 @@ class H5Info:
     frame_shape: tuple[int, ...]
     raw_shape: tuple[int, ...] = ()
     placements: Optional[list[PanelPlacement]] = None
+    event_start: int = 0
+    source_n_frames: Optional[int] = None
 
 
 @dataclass

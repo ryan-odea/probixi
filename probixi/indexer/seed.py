@@ -124,13 +124,14 @@ def sphere_seed_candidates(
 
     # 1/2 from aboev: score a-axis directions by integer-projection fitness
     dirs = _fibonacci_hemisphere(n_directions, device, work)
+    dirs = torch.cat((dirs, -dirs))
     proj = (La * dirs) @ q.T  # (D, N) = t . q over observed peaks
     cos = torch.cos(2.0 * math.pi * proj)
     if w is None:
         fitness = cos.mean(dim=1)
     else:
         fitness = (cos * w.unsqueeze(0)).sum(dim=1) / w.sum().clamp_min(1e-12)
-    M = min(top_directions, dirs.shape[0])
+    M = min(2 * top_directions, dirs.shape[0])
     top_dirs = dirs[torch.topk(fitness, k=M).indices]
 
     # 3 from above: land the reference a-axis on each kept direction, then spin through

@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import math
+from bisect import bisect_right
 from pathlib import Path
 from typing import TYPE_CHECKING, Optional, Union
 
 import torch
 
+from ..indexer.forward import detector_to_q
 from ..indexer.lattice import B_to_cell
 from .geometry import EV_ANGSTROM
 
@@ -59,6 +61,10 @@ class _StreamWriter:
         self._panels = _panel_bounds(geometry.get("panels"))
         self._geometry_file = Path(geometry_file) if geometry_file else None
         self._ranges = _build_frame_ranges(files)
+        self._range_starts = [r[0] for r in self._ranges]
+        self._event_starts = [
+            getattr(info, "event_start", 0) for info in (files or {}).values()
+        ]
         self._fh = None
         self._serial = 0
 
@@ -101,10 +107,9 @@ class _StreamWriter:
         filename, event = self._locate(frame_index)
 
         peak_rows: list[str] = []
-        max_recip = 0.0
-        for (row, col), intensity in zip(positions, intensities):
-            recip = self._resolution_nm_inv(row, col)
-            max_recip = max(max_recip, recip)
+        recips = self._resolution_nm_inv_many(positions)
+        max_recip = max(recips, default=0.0)
+        for (row, col), intensity, recip in zip(positions, intensities, recips):
             # fs = column (fast scan), ss = row (slow scan)
             peak_rows.append(
                 f"{col:7.2f} {row:7.2f} {recip:10.2f} {intensity:10.2f}   "
@@ -134,14 +139,17 @@ class _StreamWriter:
             "End of peak list",
         ]
 
+    def _resolution_nm_inv_many(self, positions) -> list[float]:
+        pos = [(float(row), float(col)) for row, col in positions]
+        if not pos:
+            return []
+        q = detector_to_q(
+            torch.tensor(pos, dtype=torch.float32), self.geometry, dtype=torch.float32
+        )
+        return (torch.linalg.vector_norm(q, dim=-1) * A_INV_TO_NM_INV).tolist()
+
     def _resolution_nm_inv(self, row: float, col: float) -> float:
-        # q = 1/d = 2 sin(theta)/lambda; lambda_nm = 0.1 lambda_A -> nm^-1
-        g = self.geometry
-        bc = g["beam_center"]
-        dr = (row - float(bc[0])) * float(g["pixel_size"])
-        dc = (col - float(bc[1])) * float(g["pixel_size"])
-        two_theta = math.atan2(math.hypot(dr, dc), float(g["clen"]))
-        return 2.0 * math.sin(0.5 * two_theta) / (float(g["wavelength"]) * 0.1)
+        return self._resolution_nm_inv_many([(row, col)])[0]
 
     def _panel_for(self, fs: float, ss: float) -> str:
         # Panel containing (fs, ss), else the fallback name.
@@ -153,9 +161,11 @@ class _StreamWriter:
     def _locate(self, frame_index: Optional[int]) -> tuple[str, int]:
         if frame_index is None:
             return "unknown", 0
-        for start, stop, fname in self._ranges:
-            if start <= frame_index < stop:
-                return fname, frame_index - start
+        i = bisect_right(self._range_starts, frame_index) - 1
+        if i >= 0:
+            start, stop, fname = self._ranges[i]
+            if frame_index < stop:
+                return fname, frame_index - start + self._event_starts[i]
         return "unknown", int(frame_index)
 
 
@@ -224,23 +234,27 @@ class DataOffloader(_StreamWriter):
         self._fh.write(self._format_chunk(result))
 
     def _format_chunk(self, result: "IndexResult") -> str:
+        crystals = getattr(result, "crystals", [result])
         positions = result.positions.detach().cpu().tolist()
         intensities = result.intensities.detach().cpu().tolist()
-        sigmas = result.sigmas.detach().cpu().tolist()
-        indexed = result.indexed_mask.detach().cpu().tolist()
-        hkl = result.hkl.detach().cpu().tolist()
-        A = result.A.detach().cpu().tolist()
-
         out = self._peak_search_lines(
             result.frame_index,
             positions,
             intensities,
             result.n_peaks,
-            "fromfile",
+            "fromfile" if crystals else "none",
         )
-        out += self._format_crystal(
-            result, A, hkl, indexed, positions, intensities, sigmas
-        )
+        out[out.index("hit = 1")] = f"hit = {int(result.n_peaks >= 5)}"
+        for crystal in crystals:
+            out += self._format_crystal(
+                crystal,
+                crystal.A.detach().cpu().tolist(),
+                crystal.hkl.detach().cpu().tolist(),
+                crystal.indexed_mask.detach().cpu().tolist(),
+                crystal.positions.detach().cpu().tolist(),
+                crystal.intensities.detach().cpu().tolist(),
+                crystal.sigmas.detach().cpu().tolist(),
+            )
         out.append("----- End chunk -----")
         return "\n".join(out) + "\n"
 
@@ -306,8 +320,7 @@ class DataOffloader(_StreamWriter):
         refl = [r for r in refl if math.isfinite(r[3]) and r[3] > 0.0]
 
         max_recip = max(
-            (self._resolution_nm_inv(row, col) for (row, col), *_ in refl),
-            default=0.0,
+            self._resolution_nm_inv_many([rc for rc, *_ in refl]), default=0.0
         )
         limit = result.diffraction_limit
         drl_recip = limit if (limit is not None and math.isfinite(limit)) else max_recip

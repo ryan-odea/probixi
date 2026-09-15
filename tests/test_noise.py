@@ -1,15 +1,21 @@
 from __future__ import annotations
 
+import math
+
 import numpy as np
+import pytest
 import sim
 import torch
 
+from probixi.io import read_geometry
+from probixi.peakfinding.noise._radial import RotationalNoise
 from probixi.peakfinding.noise.calibrate import (
     calibrate_noise,
     calibrate_threshold,
     fit_photon_transfer,
 )
 from probixi.peakfinding.noise.model import NoiseModel
+from probixi.probixi import _lab_radius_map
 
 DTYPE = torch.float32
 
@@ -161,3 +167,82 @@ def test_fit_photon_transfer_recovers_positive_gain():
     assert 0.5 * gain < fit_gain < 2.0 * gain
     assert nm.gain == fit_gain
     assert nm.read_var == read_var
+
+
+# --- radial annuli must follow the panel geometry, not the array index -------
+
+
+def _folded_geom(tmp_path):
+    # Two 4x4 panels stacked in ss in the array but placed mirrored about the
+    # beam in the lab frame, so array row distance and lab radius disagree:
+    # array pixel (ss, fs) on panel 0 has the same lab radius as (ss + 4, fs)
+    # on panel 1.
+    lines = [
+        "clen = 0.1",
+        "photon_energy = 12398.0",
+        "res = 13333.3",
+        "data = /entry/data/data",
+        "dim0 = %",
+        "dim1 = ss",
+        "dim2 = fs",
+        "0/min_fs = 0",
+        "0/max_fs = 3",
+        "0/min_ss = 0",
+        "0/max_ss = 3",
+        "0/corner_x = 10.0",
+        "0/corner_y = -1.5",
+        "0/fs = +1.0x +0.0y",
+        "0/ss = +0.0x +1.0y",
+        "1/min_fs = 0",
+        "1/max_fs = 3",
+        "1/min_ss = 4",
+        "1/max_ss = 7",
+        "1/corner_x = -10.0",
+        "1/corner_y = -1.5",
+        "1/fs = -1.0x +0.0y",
+        "1/ss = +0.0x +1.0y",
+    ]
+    path = tmp_path / "folded.geom"
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return path
+
+
+def test_lab_radius_map_follows_panel_placement_not_array_index(tmp_path):
+    geom = read_geometry(_folded_geom(tmp_path))
+    R = _lab_radius_map(geom, (8, 4))
+    assert R is not None and tuple(R.shape) == (8, 4)
+
+    # panel 0 pixel (0, 0) sits at lab (+10, -1.5)
+    assert float(R[0, 0]) == pytest.approx(math.hypot(10.0, 1.5), abs=1e-4)
+    # mirror pairs: equal lab radius from array rows four apart
+    for ss in range(4):
+        for fs in range(4):
+            assert float(R[ss, fs]) == pytest.approx(
+                float(R[ss + 4, fs]), abs=1e-4
+            ), f"({ss}, {fs}) and ({ss + 4}, {fs}) are mirror pixels"
+
+    # the array radius the old code binned on does NOT have that symmetry, so
+    # the assertion above is a real discriminator
+    rr = torch.arange(8, dtype=torch.float32).view(-1, 1)
+    cc = torch.arange(4, dtype=torch.float32).view(1, -1)
+    array_r = torch.sqrt((rr - 3.5) ** 2 + (cc - 1.5) ** 2)
+    assert float(array_r[0, 0]) != pytest.approx(float(array_r[4, 0]), abs=1e-4)
+
+
+def test_rotational_noise_bins_on_supplied_radius(tmp_path):
+    geom = read_geometry(_folded_geom(tmp_path))
+    R = _lab_radius_map(geom, (8, 4))
+
+    lab = RotationalNoise(frame_size=(8, 4), radius=R, bin_width=1.0)
+    assert torch.equal(lab.bin_idx, torch.floor(R).long())
+    # mirror pixels land in one annulus
+    assert int(lab.bin_idx[0, 0]) == int(lab.bin_idx[4, 0])
+
+    # without a radius map the annuli follow the array, which splits them
+    array_only = RotationalNoise(frame_size=(8, 4), bin_width=1.0)
+    assert int(array_only.bin_idx[0, 0]) != int(array_only.bin_idx[4, 0])
+
+
+def test_rotational_noise_rejects_mismatched_radius_shape():
+    with pytest.raises(ValueError, match="radius shape"):
+        RotationalNoise(frame_size=(8, 4), radius=torch.zeros(4, 8))

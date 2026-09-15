@@ -1,141 +1,221 @@
 from __future__ import annotations
 
+import math
+
 import torch
 from torch import Tensor
 
 A_INV_TO_NM_INV = 10.0
-
-# Box integration of background-subtracted intensity at predicted positions. The
-# excess map is already background-subtracted, so integrated intensity is the sum
-# of excess over a small box and its variance is the summed per-pixel background
-# noise inflated by the gross-minus-background factor 1 + n_peak/n_bg (the shared
-# local-background estimate) plus the signal shot noise I*gain. Ensure box ownership is
-# to the nearest predicted centre, so that overlapping boxes do not double-count pixels.
+MIN_ANNULUS_PIXELS = 10
 
 
-@torch.no_grad()
-def integrate_boxes(
-    excess: Tensor,
-    var: Tensor,
+def snap_positions(
+    positions: Tensor, observed: Tensor, radius: float
+) -> tuple[Tensor, Tensor]:
+    # Move each prediction onto the nearest observed centroid within radius px
+    snapped = torch.zeros(len(positions), dtype=torch.bool, device=positions.device)
+    if len(positions) and len(observed):
+        distance, index = torch.cdist(positions, observed.to(positions)).min(1)
+        snapped = distance < radius
+        positions = torch.where(
+            snapped[:, None], observed.to(positions)[index], positions
+        )
+    return positions, snapped
+
+
+def keep_non_overlapping(
     positions: Tensor,
-    radius: int = 4,
-    mean: Tensor | None = None,
-    pixel_valid: Tensor | None = None,
-    adu_per_photon: float = 1.0,
-    n_bg: float | None = None,
-) -> tuple[Tensor, Tensor, Tensor, Tensor]:
-    # Integrate intensity (sum excess), sigma (sqrt of summed background noise
-    # plus signal shot noise), peak (max excess) and background (mean per-pixel
-    # noise) in a (2*radius+1)^2 box at each centre
-    H, W = excess.shape
-    device = excess.device
-    M = positions.shape[0]
-    if M == 0:
-        z = positions.new_zeros(0)
-        return z, z, z, z
-
-    centre = torch.round(positions).to(torch.long)
-    r0, c0 = centre[:, 0], centre[:, 1]
-    # gather the whole (2r+1)^2 box for every centre at once (M, K), vectorised
-    off = torch.arange(-radius, radius + 1, device=device)
-    off_r, off_c = torch.meshgrid(off, off, indexing="ij")
-    off_r = off_r.reshape(-1)
-    off_c = off_c.reshape(-1)
-    rr = r0[:, None] + off_r[None, :]
-    cc = c0[:, None] + off_c[None, :]
-    valid = (rr >= 0) & (rr < H) & (cc >= 0) & (cc < W)
-    flat = rr.clamp(0, H - 1) * W + cc.clamp(0, W - 1)
-    if pixel_valid is not None:
-        valid = valid & pixel_valid.reshape(-1)[flat]
-    # Nearest-owner deblend: assign each pixel to its nearest predicted centre
-    if M > 1:
-        posf = positions.to(excess.dtype)
-        d_r = rr.to(excess.dtype) - posf[:, 0:1]
-        d_c = cc.to(excess.dtype) - posf[:, 1:2]
-        dist2 = d_r * d_r + d_c * d_c
-        p_flat = flat.reshape(-1)
-        d_flat = torch.where(
-            valid, dist2, torch.full_like(dist2, float("inf"))
-        ).reshape(-1)
-        npix = H * W
-        min_d = torch.full((npix,), float("inf"), device=device, dtype=dist2.dtype)
-        min_d.scatter_reduce_(0, p_flat, d_flat, reduce="amin", include_self=True)
-        win = valid & (dist2 <= min_d[flat] + 1e-6)
-        # tie-break by lowest centre index
-        cid = (
-            torch.arange(M, device=device, dtype=torch.int32)
-            .unsqueeze(1)
-            .expand_as(dist2)
-        )
-        min_cid = torch.full((npix,), M, device=device, dtype=torch.int32)
-        min_cid.scatter_reduce_(
-            0,
-            p_flat,
-            torch.where(win, cid, torch.full_like(cid, M)).reshape(-1),
-            reduce="amin",
-            include_self=True,
-        )
-        own = win & (cid == min_cid[flat])
-    else:
-        own = valid
-
-    e = excess.reshape(-1)[flat]
-    v = var.reshape(-1)[flat]
-    zero = torch.zeros_like(e)
-    I = torch.where(own, e, zero).sum(dim=1)  # noqa: E741
-    var_sum = torch.where(own, v, zero).sum(dim=1)
-    n_peak = own.to(excess.dtype).sum(dim=1)
-    peak = torch.where(own, e, torch.full_like(e, float("-inf"))).amax(dim=1)
-    # boxes with no valid pixel
-    peak = torch.where(torch.isfinite(peak), peak, torch.zeros_like(peak))
-    if mean is not None:
-        m = mean.reshape(-1)[flat]
-        bg_sum = torch.where(own, m, zero).sum(dim=1)
-        background = bg_sum / n_peak.clamp_min(1.0)
-    else:
-        background = torch.zeros(M, dtype=excess.dtype, device=device)
-    bg_var = var_sum.clamp_min(0.0)
-    if n_bg is not None and n_bg > 0:
-        bg_var = bg_var * (1.0 + n_peak / float(n_bg))
-    total_var = bg_var + I.clamp_min(0.0) * adu_per_photon
-    return I, total_var.sqrt(), peak, background
+    integration_radius_px: float,
+    panels: Tensor | None = None,
+) -> Tensor:
+    if positions.ndim != 2 or positions.shape[1] != 2:
+        raise ValueError("positions must have shape (N, 2)")
+    if not math.isfinite(integration_radius_px) or integration_radius_px <= 0:
+        raise ValueError("integration radius must be finite and positive")
+    keep = torch.ones(len(positions), dtype=torch.bool, device=positions.device)
+    positions = positions.float()
+    cutoff2 = (1.5 * integration_radius_px) ** 2
+    for start in range(0, len(positions), 512):
+        block = positions[start : start + 512]
+        distance2 = (block[:, None] - positions[None]).square().sum(-1)
+        row = torch.arange(len(block), device=positions.device)
+        distance2[row, start + row] = float("inf")  # ignore self-distance
+        if panels is not None:
+            distance2.masked_fill_(
+                panels[start : start + 512, None] != panels[None], float("inf")
+            )
+        keep[start : start + 512] = distance2.amin(1) >= cutoff2
+    return keep
 
 
 @torch.no_grad()
-def integrate_predicted(
+def radial_profile(
+    excess: Tensor,
+    positions: Tensor,
+    pixel_valid: Tensor | None = None,
+    max_radius: int = 16,
+) -> Tensor:
+    out = excess.new_zeros(max_radius + 1)
+    if not len(positions):
+        return out
+    off = torch.arange(-max_radius, max_radius + 1, device=excess.device)
+    dr, dc = torch.meshgrid(off, off, indexing="ij")
+    dr = dr.flatten()
+    dc = dc.flatten()
+    rbin = torch.sqrt((dr * dr + dc * dc).to(excess.dtype)).round().long()
+    inside = rbin <= max_radius
+    centre = positions.round().long()
+    rr = centre[:, 0, None] + dr
+    cc = centre[:, 1, None] + dc
+    ok = (
+        inside & (rr >= 0) & (rr < excess.shape[0]) & (cc >= 0) & (cc < excess.shape[1])
+    )
+    flat = rr.clamp(0, excess.shape[0] - 1) * excess.shape[1] + cc.clamp(
+        0, excess.shape[1] - 1
+    )
+    if pixel_valid is not None:
+        ok &= pixel_valid.flatten()[flat]
+    values = torch.where(
+        ok, excess.flatten()[flat], torch.zeros_like(excess.flatten()[flat])
+    )
+    # corners of the square stamp exceed max_radius but are already zeroed by
+    # `ok`, so clamping their bin index is harmless
+    index = rbin.clamp(0, max_radius).expand_as(values)
+    total = excess.new_zeros(len(positions), max_radius + 1)
+    total.scatter_add_(1, index, values)
+    counts = excess.new_zeros(len(positions), max_radius + 1)
+    counts.scatter_add_(1, index, ok.to(excess.dtype))
+    return (total / counts.clamp_min(1.0)).median(dim=0).values
+
+
+def radii_from_profile(
+    profile: Tensor,
+    floor: float = 0.02,
+    gap: float = 1.0,
+    background_pixels: float = 120.0,
+    fit_above: float = 0.1,
+) -> tuple[float, float, float] | None:
+    if not 0.0 < floor < 1.0:
+        raise ValueError("floor must be in (0, 1)")
+    if not 0.0 < fit_above < 1.0:
+        raise ValueError("fit_above must be in (0, 1)")
+    if gap <= 0 or background_pixels <= 0:
+        raise ValueError("gap and background_pixels must be positive")
+    p = profile.detach().float()
+    p = p - p.min()
+    centre = float(p[0])
+    if not math.isfinite(centre) or centre <= 0.0:
+        return None
+    r_sig = None
+    ok = (p >= fit_above * centre) & (p > 0)
+    failed = (~ok).nonzero()
+    n = int(failed[0, 0]) if len(failed) else len(p)
+    if n >= 3:
+        x = torch.arange(n, device=p.device, dtype=p.dtype) ** 2
+        y = torch.log(p[:n])
+        dx = x - x.mean()
+        denom = float((dx * dx).sum())
+        if denom > 0.0:
+            slope = float((dx * (y - y.mean())).sum()) / denom
+            if slope < 0.0:
+                sigma = math.sqrt(-1.0 / (2.0 * slope))
+                r_sig = sigma * math.sqrt(-2.0 * math.log(floor))
+    if r_sig is None:
+        below = (p <= floor * centre).nonzero()
+        if not len(below):
+            return None
+        r_sig = float(below[0, 0])
+    if not math.isfinite(r_sig):
+        return None
+    r_sig = min(max(r_sig, 1.0), float(len(p) - 1))
+    r_in = r_sig + gap
+    r_out = math.sqrt(r_in * r_in + background_pixels / math.pi)
+    return r_sig, r_in, r_out
+
+
+@torch.no_grad()
+def integrate_rings(
     pred_positions: Tensor,
     excess: Tensor,
     var: Tensor,
     obs_positions: Tensor,
     snap_radius: float = 5.0,
-    box_radius: int = 3,
     mean: Tensor | None = None,
     pixel_valid: Tensor | None = None,
     adu_per_photon: float = 1.0,
     n_bg: float | None = None,
+    *,
+    radii: tuple[float, float, float],
 ) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor, Tensor]:
-    M = pred_positions.shape[0]
-    positions = pred_positions
-    snapped = torch.zeros(M, dtype=torch.bool, device=pred_positions.device)
-    if obs_positions.shape[0] > 0:
-        d = torch.cdist(pred_positions, obs_positions.to(pred_positions.dtype))
-        nn_dist, nn_idx = d.min(dim=1)
-        snapped = nn_dist < snap_radius
-        positions = torch.where(
-            snapped.unsqueeze(-1),
-            obs_positions.to(pred_positions.dtype)[nn_idx],
-            pred_positions,
-        )
-    intensity, sigma, peak, background = integrate_boxes(
-        excess,
-        var,
-        positions,
-        box_radius,
-        mean=mean,
-        pixel_valid=pixel_valid,
-        adu_per_photon=adu_per_photon,
-        n_bg=n_bg,
+    if mean is None:
+        raise ValueError("circular integration requires the background mean image")
+    positions, snapped = snap_positions(pred_positions, obs_positions, snap_radius)
+    if not len(positions):
+        empty = excess.new_empty(0)
+        return positions, empty, empty, snapped, empty, empty
+    raw = excess + mean
+    # gather one (2*ceil(outer)+1)^2 stamp per centre
+    extent = math.ceil(radii[2])
+    off = torch.arange(-extent, extent + 1, device=raw.device)
+    dr, dc = torch.meshgrid(off, off, indexing="ij")
+    dr = dr.flatten()
+    dc = dc.flatten()
+    radius = dr**2 + dc**2
+    center = positions.round().long()
+    rr = center[:, 0, None] + dr
+    cc = center[:, 1, None] + dc
+    ok = (rr >= 0) & (rr < raw.shape[0]) & (cc >= 0) & (cc < raw.shape[1])
+    flat = rr.clamp(0, raw.shape[0] - 1) * raw.shape[1] + cc.clamp(0, raw.shape[1] - 1)
+    if pixel_valid is not None:
+        ok &= pixel_valid.flatten()[flat]
+    pixels = raw.flatten()[flat]
+    # background level and spread from the annulus
+    bgmask = ok & (radius >= radii[1] ** 2) & (radius <= radii[2] ** 2)
+    nb = bgmask.sum(1)
+    background = torch.where(bgmask, pixels, 0).sum(1) / nb.clamp_min(1)
+    bgvariance = torch.where(bgmask, (pixels - background[:, None]) ** 2, 0).sum(1) / (
+        nb - 1
+    ).clamp_min(1)
+    use = ok & (radius <= radii[0] ** 2)
+    # Sparse nearest-owner reduction prevents double counting overlapping disks.
+    unique, inverse = torch.unique(flat.flatten(), return_inverse=True)
+    inverse = inverse.reshape_as(flat)
+    distance = (rr - positions[:, 0, None]) ** 2 + (cc - positions[:, 1, None]) ** 2
+    nearest = torch.full_like(unique, float("inf"), dtype=raw.dtype)
+    nearest.scatter_reduce_(
+        0,
+        inverse.flatten(),
+        torch.where(use, distance, float("inf")).flatten(),
+        reduce="amin",
     )
+    wins = use & (distance <= nearest[inverse] + 1e-6)
+    # break ties between equidistant centres by lowest index
+    cid = torch.arange(len(positions), device=raw.device)[:, None].expand_as(flat)
+    owner = torch.full_like(unique, len(positions))
+    owner.scatter_reduce_(
+        0,
+        inverse.flatten(),
+        torch.where(wins, cid, len(positions)).flatten(),
+        reduce="amin",
+    )
+    use = wins & (owner[inverse] == cid)
+    n = use.sum(1)
+    intensity = torch.where(use, pixels - background[:, None], 0).sum(1)
+    totalvar = (
+        n * bgvariance * (1 + n / nb.clamp_min(1))
+        + intensity.clamp_min(0) * adu_per_photon
+    )
+    sigma = totalvar.clamp_min(1e-12).sqrt()
+    model_var = torch.where(use, var.flatten()[flat], torch.zeros_like(pixels)).sum(1)
+    if n_bg is not None and n_bg > 0:
+        model_var = model_var * (1.0 + n / float(n_bg))
+    fallback = (
+        (model_var + intensity.clamp_min(0) * adu_per_photon).clamp_min(1e-12).sqrt()
+    )
+    sigma = torch.where(nb >= MIN_ANNULUS_PIXELS, sigma, fallback)
+    sigma = torch.where(n > 0, sigma, torch.zeros_like(sigma))
+    peak = torch.where(use, pixels - background[:, None], float("-inf")).amax(1)
+    peak = torch.where(torch.isfinite(peak), peak, 0)
     return positions, intensity, sigma, snapped, peak, background
 
 

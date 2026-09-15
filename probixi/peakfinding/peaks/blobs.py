@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, fields
+from typing import Optional
 
 import torch
 from torch import Tensor
@@ -40,7 +41,8 @@ class BlobStats:
     (intensity-weighted), bbox_{r0,r1,c0,c1} (r1/c1 exclusive), intensity_sum
     (excess), intensity_sigma (sqrt of summed per-pixel variance), intensity_max,
     z_max, log_bf_sum, posterior_mean, eccentricity (lambda_max/lambda_min >= 1),
-    peakedness (intensity_max / mean intensity).
+    peakedness (intensity_max / mean intensity), background_sum (noise-model
+    mean summed over the blob's own pixels; 0 when no mean map was supplied).
     """
 
     label_id: Tensor
@@ -59,6 +61,7 @@ class BlobStats:
     posterior_mean: Tensor
     eccentricity: Tensor
     peakedness: Tensor
+    background_sum: Tensor
 
     def __len__(self) -> int:
         return int(self.label_id.numel())
@@ -146,6 +149,7 @@ def empty_stats(device: torch.device, dtype: torch.dtype) -> BlobStats:
         posterior_mean=ef,
         eccentricity=ef,
         peakedness=ef,
+        background_sum=ef,
     )
 
 
@@ -168,6 +172,7 @@ def compute_blob_stats(
     log_bf: Tensor,
     posterior: Tensor,
     var: Tensor,
+    mean: Optional[Tensor] = None,
 ) -> BlobStats:
     if n_blobs == 0:
         return empty_stats(labels.device, excess.dtype)
@@ -187,6 +192,11 @@ def compute_blob_stats(
     flat_lbf = log_bf.flatten()[fg]
     flat_post = posterior.flatten()[fg]
     flat_var = var.flatten()[fg]
+    # background over the blob's own pixels: paired with intensity_sum (excess)
+    # this gives the observed counts without a second pass over the frame
+    flat_mean = (
+        mean.flatten()[fg] if mean is not None else torch.zeros_like(flat_excess)
+    )
     w = flat_excess.clamp_min(0)
 
     _, _, grid_rows_f, grid_cols_f = _coord_grids(H, W, device, dtype)
@@ -209,6 +219,7 @@ def compute_blob_stats(
             flat_var.clamp_min(0),
             flat_lbf,
             flat_post,
+            flat_mean,
         ],
         dim=1,
     )
@@ -221,11 +232,12 @@ def compute_blob_stats(
         add1[:, 3],
         add1[:, 4],
     )
-    intensity_sum, var_sum, log_bf_sum, post_sum = (
+    intensity_sum, var_sum, log_bf_sum, post_sum, background_sum = (
         add1[:, 5],
         add1[:, 6],
         add1[:, 7],
         add1[:, 8],
+        add1[:, 9],
     )
 
     has_w = w_sum > 0
@@ -315,6 +327,7 @@ def compute_blob_stats(
         posterior_mean=post_sum[idx] / size_f[idx],
         eccentricity=eccentricity[idx],
         peakedness=peakedness[idx],
+        background_sum=background_sum[idx],
     )
 
 

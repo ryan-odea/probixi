@@ -7,6 +7,7 @@ from typing import Any, Literal, Optional, cast
 import click
 import torch
 
+from probixi.indexer import SeedConfig
 from probixi.io import DataOffloader, DuckDBOffloader, PeakOffloader, is_duckdb_path
 from probixi.probixi import Probixi
 
@@ -23,7 +24,8 @@ def _resolve_cli_devices(
 ) -> Optional[list]:
     # Translate the --device / --devices / --gpus flags into a device list, or
     # None to keep the single-device path. --devices/--gpus imply multi-GPU.
-    picked = [f for f in (bool(device), bool(devices), gpus) if f]
+    explicit = bool(device) and device.strip().lower() != "auto"
+    picked = [f for f in (explicit, bool(devices), gpus) if f]
     if len(picked) > 1:
         raise click.UsageError("pass only one of --device / --devices / --gpus")
     if devices:
@@ -32,7 +34,7 @@ def _resolve_cli_devices(
         if gpus < 1:
             raise click.UsageError("--gpus must be >= 1")
         return [torch.device(f"cuda:{i}") for i in range(gpus)]
-    if device:
+    if device and device.strip().lower() != "auto":
         return [torch.device(device)]
     return None
 
@@ -59,6 +61,7 @@ def _run_multi_gpu(device_list: list, **kw) -> None:
         stop=kw["stop"],
         batch_size=kw["batch_size"],
         seed_frames=kw["seed_frames"],
+        random_seed=kw["random_seed"],
         target_noise_peaks=kw["target_noise_peaks"],
         noise_mode=kw["noise_mode"],
         warmup_frames=kw["warmup_frames"],
@@ -69,6 +72,8 @@ def _run_multi_gpu(device_list: list, **kw) -> None:
         enrich_alpha=kw["enrich_alpha"],
         threads_per_worker=kw["threads_per_worker"],
         quiet=kw["quiet"],
+        seed=SeedConfig(max_lattices=kw["max_lattices"]),
+        recalibrate_every=kw["recalibrate_every"],
     )
 
 
@@ -132,7 +137,24 @@ def _run_multi_gpu(device_list: list, **kw) -> None:
     show_default=True,
     help="Frames per batched refinement pass.",
 )
-@click.option("--device", default=None, help="Torch device (default: auto).")
+@click.option(
+    "--max-lattices",
+    type=click.IntRange(min=1),
+    default=1,
+    show_default=True,
+    help="Lattices to search per frame, peeling indexed peaks between passes.",
+)
+@click.option(
+    "--recalibrate-every",
+    type=click.IntRange(min=0),
+    default=None,
+    help="Input frames between fresh calibrations; 0 freezes the initial estimate.",
+)
+@click.option(
+    "--device",
+    default=None,
+    help="Torch device, or 'auto' (the default)",
+)
 @click.option(
     "--devices",
     default=None,
@@ -174,6 +196,13 @@ def _run_multi_gpu(device_list: list, **kw) -> None:
     default=32,
     show_default=True,
     help="Frames used to calibrate the noise model and detection threshold.",
+)
+@click.option(
+    "--random-seed",
+    type=int,
+    default=1988,
+    show_default=True,
+    help="Seed for the random draw of calibration and radii-training frames.",
 )
 @click.option(
     "--target-noise-peaks",
@@ -247,6 +276,8 @@ def main(
     start: Optional[int],
     stop: Optional[int],
     batch_size: int,
+    max_lattices: int,
+    recalibrate_every: Optional[int],
     device: Optional[str],
     devices: Optional[str],
     gpus: Optional[int],
@@ -254,6 +285,7 @@ def main(
     noise_mode: str,
     warmup_frames: int,
     seed_frames: int,
+    random_seed: int,
     target_noise_peaks: float,
     flux_variance: bool,
     flux_var_floor: float,
@@ -291,7 +323,10 @@ def main(
             start=start,
             stop=stop,
             batch_size=batch_size,
+            max_lattices=max_lattices,
+            recalibrate_every=recalibrate_every,
             seed_frames=seed_frames,
+            random_seed=random_seed,
             target_noise_peaks=target_noise_peaks,
             noise_mode=noise_mode,
             warmup_frames=warmup_frames,
@@ -315,6 +350,8 @@ def main(
         flux_variance=flux_variance,
         flux_var_floor=flux_var_floor,
         device=dev,
+        random_seed=random_seed,
+        seed=SeedConfig(max_lattices=max_lattices),
     )
 
     meta = probixi.metadata
@@ -389,9 +426,13 @@ def main(
         click.echo(f"Wrote peaks for {n} frame(s) to {output}")
         return
 
-    stream = probixi.index_stream(frames, batch_size=batch_size, start_index=start or 0)
-    if enrich_gate:
-        stream = stream.enrich_gate(enrich_alpha)
+    stream = probixi.index_frame_stream(
+        frames,
+        batch_size=batch_size,
+        start_index=start or 0,
+        recalibrate_every=recalibrate_every,
+        enrich_alpha=enrich_alpha if enrich_gate else None,
+    )
     stats = stream.stats
     last_log = time.monotonic() - _PROGRESS_INTERVAL_S
     offload_kwargs: dict[str, Any] = dict(
@@ -413,7 +454,7 @@ def main(
         n = 0
         for result in stream:
             off.write(result)
-            n += 1
+            n += bool(result.crystals)
             now = time.monotonic()
             if not quiet and now - last_log >= _PROGRESS_INTERVAL_S:
                 last_log = now
@@ -430,7 +471,7 @@ def main(
             f"{n} indexed ({_pct(n, stats.frames)}, "
             f"{_pct(n, stats.hits)} of hits)"
         )
-    click.echo(f"Wrote {n} indexed frame(s) to {output}")
+    click.echo(f"Wrote {n} indexed frame(s), {stats.crystals} crystals to {output}")
 
 
 if __name__ == "__main__":

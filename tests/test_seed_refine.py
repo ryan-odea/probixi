@@ -86,7 +86,7 @@ def test_best_candidate_maps_integer_hkl_within_tolerance(cell):
 
 
 def test_best_candidate_reproduces_lattice_metric(cell):
-    from probixi.indexer.lattice import decompose_A
+    from probixi.indexer.lattice import B_to_cell
 
     U = sim.proper_rotation(2, max_angle_deg=10)
     q, _ = _synthetic_q(cell, U)
@@ -102,7 +102,7 @@ def test_best_candidate_reproduces_lattice_metric(cell):
         top_k=32,
     )
     A = _best_candidate(cands, q, q_tol).to(DT)
-    _, _, rec = decompose_A(A)
+    rec = B_to_cell(A)
     # orientation-invariant metric: sorted edges and volume match the target cell
     assert sorted((rec.a, rec.b, rec.c)) == pytest.approx(
         sorted((cell.a, cell.b, cell.c)), rel=1e-3

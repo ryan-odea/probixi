@@ -30,10 +30,12 @@ And that's it! There are a few more advanced parameters provided in detail below
 | --flux-variance | NA (flag) | Fit a photon-transfer curve during calibration and whiten each pixel against its own Poisson noise, instead of a frozen variance floor. Intended for XFEL/SFX or jet-intensity-variable data |
 | --gif | str/Path | Returns a gif of the noise model evolution over the seed frames |
 | --gpus | int | Multi-gpu indexing across first N devices (the same as --devices cuda:0,cuda:1...) |
+| --max-lattices | int | Lattices to search per frame, removing indexed peaks between passes (default 1). Above 1, each image can own several `crystals` rows |
 | --noise-mode | str | `online` (continuously updated) or `per_frame` built noise models |
 | --panel | str | Fallback panel name for peaks that fall **outside** every geometry panel (inter-panel gaps, or a geometry with no named panels). Peaks inside a defined panel already carry that panel's name; this only labels the rest. Default `0`. |
 | --peaks-only | NA (flag) | Returns crystfel readable .cxi peaks, or a duckdb, depending on `-o` |
 | -q/--quiet | NA (flag) | Suppress logger lines |
+| --recalibrate-every | int | Input frames between fresh calibrations; 0 freezes the initial estimate. Requires calibration to have run first |
 | --render | str/int | Recall a frame and write a peaks/index overlay. Either index or 'image_filename//event' |
 | --render-out | str/Path | `--render` destination |
 | --seed-frames | int | Number of frames used to calibrate the noise model and detection threshold |
@@ -51,7 +53,7 @@ Given your output options, a `.stream` or `.db` file has been generated. The str
 
 #### Database
 
-Output to a database allows for faster parsing to other libraries, as well as semi-archival storage of all data used in the process. The `.db` (or `.duckdb`) output is a [DuckDB](https://duckdb.org/) file written by `IndexStream.to_db` (via `DuckDBOffloader`), and it is a relational alternative to the CrystFEL `.stream`: the run's metadata, every frame's per-frame statistics, and the integrated reflections and searched peaks all live in one queryable file.
+Output to a database allows for faster parsing to other libraries, as well as semi-archival storage of all data used in the process. The `.db` (or `.duckdb`) output is a [DuckDB](https://duckdb.org/) file written by `IndexStream.to_db` (via `DuckDBOffloader`), and it is a relational alternative to the CrystFEL `.stream`: the run's metadata, every image, every lattice indexed on it, and the integrated reflections and searched peaks all live in one queryable file.
 
 It is organized into six tables. Three small **metadata** tables are written once, up front:
 
@@ -61,18 +63,20 @@ It is organized into six tables. Three small **metadata** tables are written onc
 | `panels` | one per panel | Each panel's `name` and fast/slow-scan pixel bounds (`min_fs`, `max_fs`, `min_ss`, `max_ss`). |
 | `cell` | one | The target unit cell: edges `a_A`/`b_A`/`c_A`, angles `alpha_deg`/`beta_deg`/`gamma_deg`, `volume_A3`, and the symmetry labels `lattice_type`, `centering`, `unique_axis`. |
 
-The remaining three **per-frame** tables hold the results, linked by `frame_id` — a 16-character SHA-1 hash of `filename//event` that uniquely identifies each frame:
+The remaining four **result** tables are linked by `frame_id` — a 16-character SHA-1 hash of `filename//event` that uniquely identifies each physical image — and, for anything per-lattice, by `crystal_id`:
 
 | Table | Rows | What it stores |
 | --- | --- | --- |
-| `frames` | one per file-event | The row for every frame, keyed by `frame_id` (primary key). Provenance (`frame_index`, `filename`, `event`, `serial`) and an `indexed` boolean, plus per-frame statistics when indexed: peak/reflection counts (`n_peaks`, `n_indexed`, `num_reflections`), fit quality (`rmsd`, `mosaicity_deg`, `profile_radius_nm_inv`), scale (`scale`, `scale_sigma`), enrichment gate values (`enrichment`, `n_bright`, `enrich_p`), resolution (`diffraction_limit_nm_inv`, `peak_resolution_nm_inv`), the recovered cell (`cell_*`), and the reciprocal basis vectors (`astar_*`, `bstar_*`, `cstar_*`, in nm⁻¹). |
-| `reflections` | one per integrated reflection | The indexed, box-integrated reflections keyed by `frame_id`: Miller indices `h`/`k`/`l`, `intensity`, `sigma`, `peak`, `background`, detector position (`fs`, `ss`, `panel`), and `resolution_nm_inv`. |
+| `frames` | one per file-event | One row per physical image, keyed by `frame_id` (primary key). Provenance (`frame_index`, `filename`, `event`, `serial`), an `indexed` boolean, the peak search (`n_peaks`, `peak_resolution_nm_inv`), the per-image fluence scale (`scale`, `scale_sigma`), and `num_reflections` integrated across every lattice on the image. |
+| `crystals` | one per accepted lattice | One row per indexed lattice, keyed by `crystal_id` (primary key) and joined to its image by `frame_id`. `lattice_index` orders the lattices found on one image (0 first). Carries that lattice's peak/reflection counts (`n_indexed`, `num_reflections`), fit quality (`rmsd`, `mosaicity_deg`, `profile_radius_nm_inv`), enrichment gate values (`enrichment`, `n_bright`, `enrich_p`), resolution (`diffraction_limit_nm_inv`), the recovered cell (`cell_*`), and the reciprocal basis vectors (`astar_*`, `bstar_*`, `cstar_*`, in nm⁻¹). |
+| `reflections` | one per integrated reflection | The indexed, integrated reflections keyed by both `crystal_id` and `frame_id`: Miller indices `h`/`k`/`l`, `intensity`, `sigma`, `peak`, `background`, detector position (`fs`, `ss`, `panel`), and `resolution_nm_inv`. |
 | `peaks` | one per searched peak | The peaks found by the peak-search keyed by `frame_id`: detector position (`fs`, `ss`, `panel`), `intensity`, and `resolution_nm_inv`. |
 
 A few things worth knowing when querying:
 
-- Frames that never indexed still get a `frames` row with `indexed = FALSE` and null statistics, so the indexed rate is simply `SELECT AVG(indexed::INT) FROM frames`. (Under `--start`/`--stop` or multi-GPU runs, each writer only backfills the frame range it owns.)
-- **`--peaks-only` populates `peaks`, not `reflections`.** Those frames are written with `indexed = FALSE` and their `n_peaks`/`peak_resolution_nm_inv` set; the `reflections` table stays empty.
+- Frames that never indexed still get a `frames` row with `indexed = FALSE`, no `crystals` rows, and null statistics, so the indexed rate is simply `SELECT AVG(indexed::INT) FROM frames`. (Under `--start`/`--stop` or multi-GPU runs, each writer only backfills the frame range it owns.)
+- **A frame keeps one `frames` row however many lattices it yields.** With `--max-lattices` above 1 an image can own several `crystals` rows, so count lattices with `SELECT COUNT(*) FROM crystals` and images with `SELECT COUNT(*) FROM frames WHERE indexed`. Per-lattice statistics such as `rmsd` and the recovered cell live on `crystals`, not `frames`.
+- **`--peaks-only` populates `peaks`, not `reflections`.** Those frames are written with `indexed = FALSE` and their `n_peaks`/`peak_resolution_nm_inv` set; the `reflections` and `crystals` tables stay empty.
 
 ## Using `probixi` with Python
 
