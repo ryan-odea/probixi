@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import math
-
 from dataclasses import dataclass, fields
 from typing import Optional
 
