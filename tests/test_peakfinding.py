@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import math
+
 import numpy as np
 import pytest
 import sim
@@ -8,6 +10,7 @@ import torch
 from probixi.peakfinding.noise.calibrate import calibrate_noise
 from probixi.peakfinding.noise.model import NoiseModel
 from probixi.peakfinding.peaks.blobs import (
+    footprint_cap,
     BlobStats,
     compute_blob_stats,
     filter_blobs,
@@ -15,6 +18,10 @@ from probixi.peakfinding.peaks.blobs import (
 )
 from probixi.peakfinding.peaks.neighborhood import gaussian_kernel_2d
 from probixi.peakfinding.peaks.peakfinder import PeakFinder
+from probixi.probixi import (
+    _BEAMSTOP_MAX_EXTEND_BINS,
+    _beamstop_qmin_from_histogram,
+)
 
 SHAPE = (160, 160)
 BG = 100.0
@@ -412,3 +419,200 @@ def test_compute_blob_stats_every_field_matches_per_blob_reference():
         assert int(stats.bbox_r1[i]) == int(idx[:, 0].max()) + 1
         assert int(stats.bbox_c0[i]) == int(idx[:, 1].min())
         assert int(stats.bbox_c1[i]) == int(idx[:, 1].max()) + 1
+
+
+# --- the beamstop learner is anchored on the geometry's own mask -------------
+
+_BS_BINS = 40
+_BS_QMAX = 0.552
+
+
+def _b2ar_run0061_histogram():
+    # measured on b2ar run0061: bins 0-1 masked out by the geometry, bin 2 a
+    # sliver of surviving pixels, real low-angle reflections in bins 3-8.
+    ph = [0, 0, 6, 14, 15, 29, 27, 48, 30, 19, 12, 19, 11, 9] + [8] * 26
+    pix = [
+        0,
+        0,
+        1746,
+        12845,
+        20049,
+        25621,
+        31167,
+        36265,
+        41723,
+        47170,
+        53127,
+        56936,
+        64344,
+        71563,
+    ]
+    pix += [71563 + 3000 * i for i in range(26)]
+    return (
+        torch.tensor(ph, dtype=torch.float32),
+        torch.tensor(pix, dtype=torch.float32),
+    )
+
+
+def _bs_edges():
+    return torch.linspace(0.0, _BS_QMAX, _BS_BINS + 1)
+
+
+def test_beamstop_not_inferred_from_real_low_angle_reflections():
+    # Six real reflections in a bin that is 81% masked divided by almost
+    # nothing, which the old rule read as an artifact ring and answered with a
+    # 9.1 A exclusion -- discarding every peak inside 1/d = 1.1 nm^-1.
+    ph, pix = _b2ar_run0061_histogram()
+    assert _beamstop_qmin_from_histogram(ph, pix, _bs_edges(), _BS_BINS) is None
+
+
+def test_beamstop_decision_does_not_move_with_seed_count():
+    # Scaling every bin together must not change the decision. The old rule
+    # zeroed bins under a peak-count floor before taking its reference median,
+    # so more seed frames admitted sparse outer bins, pulled the median down
+    # and made a spurious spike MORE likely.
+    ph, pix = _b2ar_run0061_histogram()
+    edges = _bs_edges()
+    base = _beamstop_qmin_from_histogram(ph, pix, edges, _BS_BINS)
+    for scale in (0.5, 3.3, 10.0):
+        assert (
+            _beamstop_qmin_from_histogram(ph * scale, pix, edges, _BS_BINS) == base
+        ), f"decision moved at scale {scale}"
+
+
+def test_beamstop_still_found_when_the_ring_is_real():
+    # A real beamstop edge: a large pile-up immediately outside the masked
+    # shadow, in a bin with enough pixels to trust.
+    ph, pix = _b2ar_run0061_histogram()
+    ph, pix = ph.clone(), pix.clone()
+    ph[2], pix[2] = 4000.0, 15000.0
+    q = _beamstop_qmin_from_histogram(ph, pix, _bs_edges(), _BS_BINS)
+    assert q is not None
+    # and it stops at the ring, rather than growing out over real reflections
+    assert q == pytest.approx(float(_bs_edges()[3]), rel=1e-6)
+
+
+def test_beamstop_exclusion_is_bounded():
+    # Even with every inner bin elevated, the exclusion may not run away: the
+    # old growth walk went from bin 2 out to bin 8 and swallowed 163 real peaks.
+    ph, pix = _b2ar_run0061_histogram()
+    ph, pix = ph.clone(), pix.clone()
+    pix[2] = 15000.0
+    ph[2:9] = torch.tensor([4000.0] * 7)
+    q = _beamstop_qmin_from_histogram(ph, pix, _bs_edges(), _BS_BINS)
+    assert q is not None
+    max_bin = 2 + _BEAMSTOP_MAX_EXTEND_BINS
+    assert q <= float(_bs_edges()[max_bin]) + 1e-9
+
+
+def test_footprint_cap_keeps_a_bright_broad_spot_under_size_max_30():
+    # size_max=30 alone rejects a bright, broad Bragg peak; the brightness-scaled
+    # footprint cap must keep it while an explicit size_max=30 without the cap
+    # still rejects it
+    _, finder = _calibrated(
+        matched_filter=True,
+        local_background=False,
+        size_min=1,
+        size_max=100000,
+        eccentricity_max=1000.0,
+        peakedness_min=0.0,
+    )
+    big = sim.render_frame(
+        SHAPE,
+        [[80.0, 80.0]],
+        [80000.0],
+        background=BG,
+        noise_sigma=NS,
+        seed=7,
+        psf_sigma=2.5,
+    )
+    stats = _one_result(finder, big).stats
+    assert len(stats) == 1
+    assert int(stats.size[0]) > 30
+    assert stats.response_max is not None and float(stats.response_max[0]) > 0
+    base = dict(size_min=1, size_max=30, eccentricity_max=1000.0, peakedness_min=0.0)
+    assert int(filter_blobs(stats, **base).sum()) == 0
+    kept = filter_blobs(
+        stats,
+        **base,
+        footprint_scale=max(finder.mf_scales),
+        threshold=finder.mf_threshold,
+    )
+    assert int(kept.sum()) == 1
+
+
+def test_footprint_cap_is_brightness_invariant():
+    # the same spot 100x brighter has a bigger footprint but must still pass
+    _, finder = _calibrated(
+        matched_filter=True,
+        local_background=False,
+        size_min=1,
+        size_max=100000,
+        eccentricity_max=1000.0,
+        peakedness_min=0.0,
+    )
+    sizes = []
+    for amp in (3000.0, 300000.0):
+        frame = sim.render_frame(
+            SHAPE,
+            [[80.0, 80.0]],
+            [amp],
+            background=BG,
+            noise_sigma=NS,
+            seed=3,
+            psf_sigma=1.5,
+        )
+        stats = _one_result(finder, frame).stats
+        assert len(stats) == 1
+        sizes.append(int(stats.size[0]))
+        kept = filter_blobs(
+            stats,
+            size_min=1,
+            size_max=30,
+            eccentricity_max=1000.0,
+            peakedness_min=0.0,
+            footprint_scale=max(finder.mf_scales),
+            threshold=finder.mf_threshold,
+        )
+        assert int(kept.sum()) == 1
+    assert sizes[1] > sizes[0]
+
+
+def test_footprint_cap_still_rejects_an_extended_plateau():
+    # a flat 40x40 block is far larger than any spot of its peak response
+    _, finder = _calibrated(
+        matched_filter=True,
+        local_background=False,
+        size_min=1,
+        size_max=100000,
+        eccentricity_max=1000.0,
+        peakedness_min=0.0,
+    )
+    frame = sim.render_frame(
+        SHAPE, [], [], background=BG, noise_sigma=NS, seed=5, psf_sigma=1.0
+    )
+    frame = np.array(frame, copy=True)
+    frame[60:100, 60:100] += 8.0 * NS
+    stats = _one_result(finder, frame).stats
+    assert len(stats) >= 1
+    kept = filter_blobs(
+        stats,
+        size_min=1,
+        size_max=30,
+        eccentricity_max=1000.0,
+        peakedness_min=0.0,
+        footprint_scale=max(finder.mf_scales),
+        threshold=finder.mf_threshold,
+    )
+    big = stats.size >= 1000
+    assert bool(big.any())
+    assert not bool(kept[big].any())
+
+
+def test_footprint_cap_formula():
+    resp = torch.tensor([1.0, math.e, math.e**2])
+    cap = footprint_cap(resp, scale=2.0, threshold=1.0, tolerance=1.0)
+    want = 2.0 * math.pi * 4.0 * torch.tensor([0.0, 1.0, 2.0])
+    assert torch.allclose(cap, want)
+    # responses below threshold never produce a negative cap
+    assert float(footprint_cap(torch.tensor([0.1]), 2.0, 1.0, 1.0)[0]) == 0.0

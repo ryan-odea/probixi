@@ -14,6 +14,7 @@ from probixi.indexer.integrate import (
     radial_profile,
     radii_from_profile,
     snap_positions,
+    snr_disk_radius,
 )
 
 SHAPE = (64, 64)
@@ -396,3 +397,35 @@ def test_radii_from_profile_rejects_bad_settings():
     ):
         with pytest.raises(ValueError):
             radii_from_profile(profile, **kwargs)
+
+
+def test_snr_aperture_shrinks_to_the_3x3_for_a_pixel_wide_spot():
+    # a ~1 px spot: S/sqrt(N) peaks at the 3x3 block, well inside the 2 % radius
+    g = torch.Generator().manual_seed(0)
+    centres = (torch.rand(30, 2, generator=g) * 260 + 30).round()
+    profile = radial_profile(_planted(0.7, centres), centres.float())
+    flux = radii_from_profile(profile)
+    snr = radii_from_profile(profile, snr=True)
+    assert flux is not None and snr is not None
+    assert snr[0] == 1.5
+    assert snr[0] < flux[0]
+    assert snr[1:] == flux[1:]  # annulus unchanged
+
+
+def test_snr_aperture_never_exceeds_the_flux_radius():
+    g = torch.Generator().manual_seed(1)
+    centres = (torch.rand(30, 2, generator=g) * 260 + 30).round()
+    for psf in (1.0, 2.0, 3.0):
+        profile = radial_profile(_planted(psf, centres), centres.float())
+        flux = radii_from_profile(profile)
+        snr = radii_from_profile(profile, snr=True)
+        assert snr[0] <= flux[0]
+        assert snr[0] >= 1.5
+
+
+def test_snr_disk_radius_matches_the_background_limited_optimum():
+    # Gaussian sigma=2: S/sqrt(N) is maximised near r ~ 1.6 sigma
+    g = torch.Generator().manual_seed(2)
+    centres = (torch.rand(30, 2, generator=g) * 260 + 30).round()
+    profile = radial_profile(_planted(2.0, centres), centres.float())
+    assert snr_disk_radius(profile, 16.0) == pytest.approx(3.5, abs=1.0)
