@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import math
+
 from dataclasses import dataclass, fields
 from typing import Optional
 
@@ -42,7 +44,9 @@ class BlobStats:
     (excess), intensity_sigma (sqrt of summed per-pixel variance), intensity_max,
     z_max, log_bf_sum, posterior_mean, eccentricity (lambda_max/lambda_min >= 1),
     peakedness (intensity_max / mean intensity), background_sum (noise-model
-    mean summed over the blob's own pixels; 0 when no mean map was supplied).
+    mean summed over the blob's own pixels; 0 when no mean map was supplied),
+    response_max (peak matched-filter response over the blob; None when the
+    detection ran without a response map).
     """
 
     label_id: Tensor
@@ -62,6 +66,7 @@ class BlobStats:
     eccentricity: Tensor
     peakedness: Tensor
     background_sum: Tensor
+    response_max: Optional[Tensor] = None
 
     def __len__(self) -> int:
         return int(self.label_id.numel())
@@ -150,6 +155,7 @@ def empty_stats(device: torch.device, dtype: torch.dtype) -> BlobStats:
         eccentricity=ef,
         peakedness=ef,
         background_sum=ef,
+        response_max=ef,
     )
 
 
@@ -160,7 +166,12 @@ def select_blobs(stats: BlobStats, keep: Tensor) -> BlobStats:
         if keep.dtype == torch.bool
         else keep
     )
-    return BlobStats(**{f.name: getattr(stats, f.name)[idx] for f in fields(stats)})
+    return BlobStats(
+        **{
+            f.name: (v[idx] if (v := getattr(stats, f.name)) is not None else None)
+            for f in fields(stats)
+        }
+    )
 
 
 @torch.no_grad()
@@ -173,6 +184,7 @@ def compute_blob_stats(
     posterior: Tensor,
     var: Tensor,
     mean: Optional[Tensor] = None,
+    response: Optional[Tensor] = None,
 ) -> BlobStats:
     if n_blobs == 0:
         return empty_stats(labels.device, excess.dtype)
@@ -266,16 +278,22 @@ def compute_blob_stats(
     # sigma(I) = sqrt(sum var)
     intensity_sigma = var_sum.sqrt()
 
-    # per-blob maxima of (excess, z), fused into one amax scatter
-    amax = torch.full((n_total, 2), float("-inf"), dtype=dtype, device=device)
+    # per-blob maxima of (excess, z[, response])
+    max_src = [flat_excess, flat_z]
+    if response is not None:
+        max_src.append(response.flatten()[fg])
+    amax = torch.full(
+        (n_total, len(max_src)), float("-inf"), dtype=dtype, device=device
+    )
     amax.scatter_reduce_(
         0,
-        lbl2.expand(-1, 2),
-        torch.stack([flat_excess, flat_z], dim=1),
+        lbl2.expand(-1, len(max_src)),
+        torch.stack(max_src, dim=1),
         reduce="amax",
         include_self=True,
     )
     intensity_max, z_max = amax[:, 0], amax[:, 1]
+    response_max = amax[:, 2] if response is not None else None
 
     # bbox min/max in float (row/col indices exact in float32), cast to long.
     bbox_lo = torch.empty(n_total, 2, dtype=dtype, device=device)
@@ -328,7 +346,15 @@ def compute_blob_stats(
         eccentricity=eccentricity[idx],
         peakedness=peakedness[idx],
         background_sum=background_sum[idx],
+        response_max=None if response_max is None else response_max[idx],
     )
+
+
+def footprint_cap(
+    response_max: Tensor, scale: float, threshold: float, tolerance: float
+) -> Tensor:
+    ratio = (response_max / threshold).clamp_min(1.0)
+    return tolerance * 2.0 * math.pi * scale * scale * torch.log(ratio)
 
 
 def filter_blobs(
@@ -337,12 +363,30 @@ def filter_blobs(
     size_max: int = 30,
     eccentricity_max: float = 5.0,
     peakedness_min: float = 1.2,
+    footprint_scale: Optional[float] = None,
+    threshold: Optional[float] = None,
+    footprint_tolerance: float = 4.0,
 ) -> Tensor:
     if size_min < 1:
         raise ValueError("size_min must be >= 1")
+    if footprint_tolerance <= 0:
+        raise ValueError("footprint_tolerance must be positive")
+    cap = torch.full_like(stats.size, size_max)
+    if (
+        footprint_scale is not None
+        and threshold is not None
+        and threshold > 0
+        and stats.response_max is not None
+    ):
+        cap = torch.maximum(
+            cap.to(stats.response_max.dtype),
+            footprint_cap(
+                stats.response_max, footprint_scale, threshold, footprint_tolerance
+            ),
+        )
     return (
         (stats.size >= size_min)
-        & (stats.size <= size_max)
+        & (stats.size <= cap)
         & (stats.eccentricity <= eccentricity_max)
         & (stats.peakedness >= peakedness_min)
     )

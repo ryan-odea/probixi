@@ -9,7 +9,7 @@ from typing import Any, Optional, Sequence, Union
 import torch
 from torch.multiprocessing.spawn import spawn
 
-from .indexer import IntegrateConfig, SeedConfig
+from .indexer import IntegrateConfig, RefineConfig, SeedConfig
 from .io import DataLoader, DataOffloader, DuckDBOffloader, is_duckdb_path
 from .probixi import Probixi, auto_device
 
@@ -164,6 +164,7 @@ class BlockConfig:
     batch_size: int = 8
     seed: Optional[SeedConfig] = None
     integrate: Optional[IntegrateConfig] = None
+    refine: Optional[RefineConfig] = None
     peak_size_max: int = 30
     recalibrate_every: Optional[int] = None
     calibration_seed: int = 0
@@ -219,6 +220,7 @@ def run_block(
         random_seed=cfg.random_seed,
         seed=cfg.seed,
         integrate=cfg.integrate,
+        refine=cfg.refine,
         peak_size_max=cfg.peak_size_max,
     )
     if p.indexer is None:
@@ -303,6 +305,7 @@ def run_data_parallel(
     batch_size: int = 8,
     seed: Optional[SeedConfig] = None,
     integrate: Optional[IntegrateConfig] = None,
+    refine: Optional[RefineConfig] = None,
     peak_size_max: int = 30,
     recalibrate_every: Optional[int] = None,
     seed_frames: int = 32,
@@ -344,6 +347,7 @@ def run_data_parallel(
         batch_size=batch_size,
         seed=seed,
         integrate=integrate,
+        refine=refine,
         peak_size_max=peak_size_max,
         recalibrate_every=recalibrate_every,
         seed_frames=seed_frames,

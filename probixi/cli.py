@@ -7,7 +7,7 @@ from typing import Any, Literal, Optional, cast
 import click
 import torch
 
-from probixi.indexer import SeedConfig
+from probixi.indexer import IntegrateConfig, RefineConfig, SeedConfig
 from probixi.io import DataOffloader, DuckDBOffloader, PeakOffloader, is_duckdb_path
 from probixi.probixi import Probixi
 
@@ -72,7 +72,10 @@ def _run_multi_gpu(device_list: list, **kw) -> None:
         enrich_alpha=kw["enrich_alpha"],
         threads_per_worker=kw["threads_per_worker"],
         quiet=kw["quiet"],
+        frame_screen_frac=0.0 if kw["force_all"] else 0.1,
         seed=SeedConfig(max_lattices=kw["max_lattices"]),
+        refine=kw["refine"],
+        integrate=kw["integrate"],
         recalibrate_every=kw["recalibrate_every"],
     )
 
@@ -266,6 +269,25 @@ def _run_multi_gpu(device_list: list, **kw) -> None:
     is_flag=True,
     help="Suppress progress: the periodic frames/hits/indexed rate line",
 )
+@click.option(
+    "--force-all",
+    is_flag=True,
+    help="Disable the blank-shot screen and index every frame, however dark",
+)
+@click.option(
+    "--no-refine-cell",
+    is_flag=True,
+    help="Keep every crystal at the target cell instead of refining the cell "
+    "(and orientation) per crystal against its indexed peaks.",
+)
+@click.option(
+    "--aperture",
+    type=click.Choice(["snr", "flux"]),
+    default="snr",
+    show_default=True,
+    help="Size the learned integration disk for background-limited "
+    "signal-to-noise (smaller on narrow spots) or for total flux (2% profile radius).",
+)
 def main(
     list_file: str,
     geometry_file: str,
@@ -295,6 +317,9 @@ def main(
     render: tuple,
     render_out: Optional[str],
     quiet: bool,
+    force_all: bool,
+    no_refine_cell: bool,
+    aperture: str,
 ) -> None:
     """Run the probixi pipeline and write indexed frames to a CrystFEL stream.
 
@@ -310,9 +335,13 @@ def main(
         raise click.UsageError("-o/--output is required unless only --render is used")
 
     device_list = _resolve_cli_devices(device, devices, gpus)
+    refine_cfg = RefineConfig(cell=not no_refine_cell)
+    integrate_cfg = IntegrateConfig(aperture=aperture)
     if device_list is not None and len(device_list) > 1:
         _run_multi_gpu(
             device_list,
+            refine=refine_cfg,
+            integrate=integrate_cfg,
             list_file=list_file,
             geometry_file=geometry_file,
             cell_file=cell_file,
@@ -352,11 +381,19 @@ def main(
         device=dev,
         random_seed=random_seed,
         seed=SeedConfig(max_lattices=max_lattices),
+        refine=refine_cfg,
+        integrate=integrate_cfg,
     )
 
     meta = probixi.metadata
     if not quiet:
         click.echo(f"Loaded {meta.n_frames} frames from {meta.n_files} file(s).")
+    if force_all:
+        click.echo(
+            "WARNING: --force-all: indexing every frame including blank/no-beam "
+            "shots. Those frames train the background model, which biases the "
+            "per-pixel mean and inflates the variance for every other frame."
+        )
 
     if gif:
         probixi.noise_diagnostics(gif, stop=seed_frames, batch_size=max(1, batch_size))
@@ -375,6 +412,14 @@ def main(
         bmr = probixi.beamstop_min_res
         if bmr is not None:
             msg += f" beamstop_min_res={bmr:.1f}A (learned)"
+        floor = probixi.blank_frame_floor
+        if floor is not None:
+            msg += f" blank_floor={floor:.3g}"
+        radii = probixi.integration_radii
+        if radii is not None:
+            msg += " radii=({:.1f}, {:.1f}, {:.1f})px".format(*radii)
+        else:
+            msg += " radii=fallback"
         click.echo(msg)
 
     if render:
@@ -452,9 +497,19 @@ def main(
         offloader = DataOffloader
     with offloader(output, **offload_kwargs) as off:
         n = 0
+        n_screened = 0
         for result in stream:
             off.write(result)
             n += bool(result.crystals)
+            if not quiet:
+                # screened_frames grows as the stream consumes frames
+                while n_screened < len(probixi.screened_frames):
+                    idx = probixi.screened_frames[n_screened]
+                    n_screened += 1
+                    click.echo(
+                        f"  Frame {probixi.frame_source(idx)} seems "
+                        f"exceptionally dark, not marking for indexing"
+                    )
             now = time.monotonic()
             if not quiet and now - last_log >= _PROGRESS_INTERVAL_S:
                 last_log = now
@@ -470,6 +525,12 @@ def main(
             f"{stats.hits} hits ({_pct(stats.hits, stats.frames)}), "
             f"{n} indexed ({_pct(n, stats.frames)}, "
             f"{_pct(n, stats.hits)} of hits)"
+        )
+    if not quiet and probixi.screened_frames:
+        click.echo(
+            f"Blank-shot screen held back {len(probixi.screened_frames)} frame(s) "
+            f"({_pct(len(probixi.screened_frames), stats.frames)}) from the "
+            f"background model; --force-all to include them"
         )
     click.echo(f"Wrote {n} indexed frame(s), {stats.crystals} crystals to {output}")
 

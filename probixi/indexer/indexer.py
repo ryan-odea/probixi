@@ -21,7 +21,7 @@ from .integrate import (
 )
 from .lattice import B_to_cell, cell_to_B
 from .predict import detector_q_max, predict_reflections
-from .refine import RefineResult, refine_multiframe_known_B
+from .refine import RefineResult, refine_cell, refine_multiframe_known_B
 from .rocking import estimate_mosaicity
 from .seed import sphere_seed_candidates
 
@@ -314,12 +314,21 @@ class RefineConfig:
         Re-assign peak->hkl correspondences every this many steps.
     min_indexed : int
         Minimum indexed peaks for a candidate to be accepted.
+    cell : bool
+        After picking the winning orientation, refine its unit cell (the free
+        parameters of the target lattice type) together with the orientation
+        against the indexed peaks.
+    cell_iters : int
+        Levenberg-Marquardt steps per cell-refinement round (two rounds, with
+        an hkl re-assignment in between).
     """
 
     lr: float = 1e-3
     max_iters: int = 200
     reassign_every: int = 10
     min_indexed: int = 6
+    cell: bool = True
+    cell_iters: int = 8
 
 
 @dataclass(frozen=True)
@@ -376,6 +385,12 @@ class IntegrateConfig:
         Detector gain used for the signal shot-noise term in sigma(I). ``None``
         auto-detects it from the measured photon-transfer gain, else the
         geometry (``adu_per_eV * photon_energy``), else 1.0.
+    aperture : {"snr", "flux"}
+        How the learned signal disk is sized from the measured spot profile.
+        ``"snr"`` (default) takes the radius maximising background-limited
+        signal-to-noise of the disk sum, which is smaller for narrow spots.
+        ``"flux"`` takes the radius where the profile falls to 2 % of its centre
+        (captures ~all the flux)
     """
 
     enabled: bool = True
@@ -394,6 +409,7 @@ class IntegrateConfig:
     resolution_percentile: float = 0.90  # fallback estimator (sparse crystals)
     resolution_snr_floor: float = 0.0
     adu_per_photon: Optional[float] = None
+    aperture: str = "snr"
 
 
 @dataclass
@@ -847,6 +863,13 @@ class Indexer:
             if n_indexed_host[cand] < self.refine.min_indexed:
                 continue
             A_cand = result.A[cand]
+            hkl_c, indexed_c = result.hkl[cand], result.indexed[cand]
+            n_c, rmsd_c = n_indexed_host[cand], float(rmsd[cand])
+            if self.refine.cell:
+                q = self.lift(positions) if q is None else q
+                A_cand, hkl_c, indexed_c, n_c, rmsd_c = self._refine_cell(
+                    A_cand, q, hkl_c, indexed_c, n_c, rmsd_c
+                )
             try:
                 cell = B_to_cell(A_cand)
                 B = cell_to_B(cell, device=A_cand.device, dtype=A_cand.dtype)
@@ -858,14 +881,14 @@ class Indexer:
             return IndexResult(
                 frame_index=frame_index,
                 n_peaks=n_peaks,
-                n_indexed=n_indexed_host[cand],
-                rmsd=float(rmsd[cand]),
+                n_indexed=n_c,
+                rmsd=rmsd_c,
                 A=A_cand,
                 U=U,
                 B=B,
                 cell=cell,
-                indexed_mask=result.indexed[cand],
-                hkl=result.hkl[cand],
+                indexed_mask=indexed_c,
+                hkl=hkl_c,
                 positions=positions,
                 intensities=intensities,
                 sigmas=sigmas,
@@ -875,6 +898,40 @@ class Indexer:
                 adu_per_photon=self._adu_per_photon(),
             )
         return None
+
+    def _refine_cell(
+        self,
+        A: Tensor,
+        q: Tensor,
+        hkl: Tensor,
+        indexed: Tensor,
+        n_indexed: int,
+        rmsd: float,
+    ) -> tuple[Tensor, Tensor, Tensor, int, float]:
+        out = refine_cell(
+            A,
+            q,
+            hkl,
+            indexed,
+            self.target_cell,
+            self.q_tolerance,
+            iters=self.refine.cell_iters,
+            edge_tolerance=self.cell_match.edge_tolerance,
+            angle_tolerance_rad=self.cell_match.angle_tolerance_rad,
+            wavelength=float(self.geometry["wavelength"]),
+        )
+        if out is None:
+            return A, hkl, indexed, n_indexed, rmsd
+        A_r, hkl_r, indexed_r, rmsd_r, improved = out
+        n_r = int(indexed_r.sum())
+        if not improved or n_r < self.refine.min_indexed:
+            return A, hkl, indexed, n_indexed, rmsd
+        try:
+            if not self._cell_matches_target(B_to_cell(A_r)):
+                return A, hkl, indexed, n_indexed, rmsd
+        except Exception:
+            return A, hkl, indexed, n_indexed, rmsd
+        return A_r, hkl_r, indexed_r, n_r, rmsd_r
 
     def _positions_from_frame(
         self, r: PeakResult

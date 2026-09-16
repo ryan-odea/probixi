@@ -224,7 +224,7 @@ class PeakFinder:
     mf_threshold : float, default 5.0
         Sigma threshold on the scale-space matched-filter statistic.
     size_min, size_max : int, default 2, 30
-        Min/max blob pixel count.
+        Pixel-count bounds on a blob
     eccentricity_max : float, default 5.0
         Max allowed second-moment eigenvalue ratio.
     peakedness_min : float, default 1.2
@@ -638,13 +638,18 @@ class PeakFinder:
             posterior=scores["posterior"],
             var=var_eff,
             mean=mean_eff,
+            response=scores.get("mf_max") if self.matched_filter else None,
         )
+        # with the matched filter, the size cap follows each blob's brightness
+        footprint = self.matched_filter and "mf_max" in scores
         keep = filter_blobs(
             stats,
             size_min=self.size_min,
             size_max=self.size_max,
             eccentricity_max=self.eccentricity_max,
             peakedness_min=self.peakedness_min,
+            footprint_scale=max(self.mf_scales) if footprint else None,
+            threshold=self.mf_threshold if footprint else None,
         )
         return PeakResult(
             frame_index=frame_index,

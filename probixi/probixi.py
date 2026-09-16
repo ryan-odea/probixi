@@ -58,12 +58,16 @@ _BEAMSTOP_EDGE_FRACTION = 0.1
 _BEAMSTOP_MIN_FRACTION = 0.05
 _BEAMSTOP_MIN_PEAKS = 200
 _BEAMSTOP_MIN_BIN_PEAKS = 5
+_BEAMSTOP_MIN_BIN_PIXELS = 10_000
+_BEAMSTOP_MAX_EXTEND_BINS = 2
 
-# pixels per chunk when building the per-pixel lab-radius map
+_SEED_LEVEL_OVERSAMPLE = 3
+_SEED_LEVEL_STRIDE = 97
+
 _LAB_RADIUS_CHUNK_PIXELS = 1 << 18
 
-# Frames pooled, and peaks required, when measuring the integration radii
-_RADII_MAX_FRAMES = 32
+_RADII_MIN_FRAMES = 32
+_RADII_MAX_FRAMES = 512
 _RADII_MIN_PEAKS = 200
 
 
@@ -155,6 +159,14 @@ class Probixi:
         the peak prior with learned values.
     matched_filter : bool, default True
         Use the multi-scale matched filter (the recommended operating point).
+    frame_screen_frac : float, default 0.1
+        Keep frames whose median level is below this fraction of the run's own
+        typical level out of the running background model, and report them.
+        ``0`` disables the screen (``--force-all``).
+    seed_level_frac : float, default 0.0 (off)
+        Drop calibration seed frames whose median level falls below this
+        fraction of the seed sample's own median level, i.e. blank/no-beam
+        shots.
     mf_scales, mf_threshold
         Matched-filter kernel scales and the fallback threshold (learned by
         ``calibrate`` when ``target_noise_peaks`` is set).
@@ -191,6 +203,8 @@ class Probixi:
     matched_filter: bool = True
     mf_scales: tuple[float, ...] = (1.0, 1.6, 2.4)
     mf_threshold: float = 5.0
+    seed_level_frac: float = 0.0
+    frame_screen_frac: float = 0.1
     flux_variance: bool = False
     flux_var_floor: float = 0.15
     random_seed: int = 1988
@@ -206,6 +220,8 @@ class Probixi:
     threshold_calibration: Optional[ThresholdCalibration] = field(
         default=None, init=False, repr=False
     )
+    _level_ref: Optional[float] = field(default=None, init=False, repr=False)
+    screened_frames: list = field(default_factory=list, init=False, repr=False)
     _noise: Optional[NoiseModel] = field(default=None, init=False, repr=False)
     _finder: Optional[PeakFinder] = field(default=None, init=False, repr=False)
     _scale_ref: Optional[ScaleReference] = field(default=None, init=False, repr=False)
@@ -238,6 +254,40 @@ class Probixi:
                 integrate=self.integrate,
                 device=self.device,
             )
+
+    @property
+    def integration_radii(self) -> Optional[tuple[float, float, float]]:
+        """Learned ``(disk, annulus_in, annulus_out)`` radii in pixels.
+
+        Measured by :meth:`calibrate` from the radial profile of the seed
+        frames' peaks; ``None`` before calibration or when too few peaks were
+        found to measure it (the indexer then falls back to a fixed triple).
+        """
+        if self.indexer is None:
+            return None
+        return self.indexer._measured_radii
+
+    @property
+    def blank_frame_floor(self) -> Optional[float]:
+        """Median-level cut below which a frame is treated as a blank shot.
+
+        ``None`` when the screen is disabled or the run's reference level is not
+        known yet (it is measured during :meth:`calibrate`).
+        """
+        if self.frame_screen_frac <= 0.0 or not self._level_ref:
+            return None
+        return self.frame_screen_frac * float(self._level_ref)
+
+    def frame_source(self, index: int) -> str:
+        """``path //event`` for an absolute frame index, for log messages."""
+        offset = 0
+        for info in (self.metadata.files or {}).values():
+            n = int(getattr(info, "n_frames", 0))
+            if offset <= index < offset + n:
+                ev = index - offset + int(getattr(info, "event_start", 0))
+                return f"{info.filename} //{ev}"
+            offset += n
+        return f"frame {index}"
 
     @property
     def metadata(self) -> Metadata:
@@ -540,27 +590,9 @@ class Probixi:
         pix = torch.histc(
             qmap[self._noise.valid_mask].float(), bins=n_bins, min=0.0, max=qmax
         )
-        density = ph / pix.clamp_min(1.0)
-        # zero bins with too few peaks to give a trustworthy density
-        density = torch.where(
-            ph >= _BEAMSTOP_MIN_BIN_PEAKS, density, torch.zeros_like(density)
-        )
-        pos_d = density[density > 0]
-        if pos_d.numel() == 0:
+        q_min = _beamstop_qmin_from_histogram(ph, pix, edges, n_bins)
+        if q_min is None:
             return None
-        med = float(pos_d.median())
-        inner = density[: max(1, n_bins // 4)]
-        ref = float(inner.max())
-        if med <= 0 or ref < _BEAMSTOP_SPIKE_RATIO * med:
-            return None
-        amax = int(inner.argmax())
-        thr = _BEAMSTOP_EDGE_FRACTION * ref
-        lo = hi = amax
-        while lo - 1 >= 0 and float(density[lo - 1]) >= thr:
-            lo -= 1
-        while hi + 1 < n_bins and float(density[hi + 1]) >= thr:
-            hi += 1
-        q_min = float(edges[hi + 1])
         if q_min <= 0.0:
             return None
         if float((allq < q_min).sum()) / allq.numel() < _BEAMSTOP_MIN_FRACTION:
@@ -572,11 +604,16 @@ class Probixi:
     ) -> Optional[tuple[float, float, float]]:
         profile = None
         n_peaks = 0
+        n_frames = 0
         for res in self.peak_stream(
             self._frames_at(self._sample_frame_indices(_RADII_MAX_FRAMES, exclude)),
             update_noise=False,
             estimate_scale=False,
         ):
+            n_frames += 1
+            # stop once the profile rests on enough frames and enough peaks
+            if n_frames > _RADII_MIN_FRAMES and n_peaks >= _RADII_MIN_PEAKS:
+                break
             excess = res.scores.get("excess") if res.scores else None
             ks = res.kept_stats
             if excess is None or ks is None or ks.row_centroid.numel() == 0:
@@ -589,7 +626,7 @@ class Probixi:
             n_peaks += int(positions.shape[0])
         if profile is None or n_peaks < _RADII_MIN_PEAKS:
             return None
-        return radii_from_profile(profile)
+        return radii_from_profile(profile, snr=self.indexer.integrate.aperture == "snr")
 
     def _apply_beamstop_qmin(self, q_min: float) -> None:
         # AND a |q| >= q_min beam-center exclusion into the noise model's masks so
@@ -731,8 +768,28 @@ class Probixi:
             The applied noise calibration.
         """
         seed_indices: list[int] = []
+        self.blank_seed_floor = None
+        self.n_blank_seeds_dropped = 0
         if seed_frames is not None:
             seed = list(seed_frames)
+        elif self.seed_level_frac > 0.0:
+            cand = self._sample_frame_indices(n_seed * _SEED_LEVEL_OVERSAMPLE)
+            levels = [_frame_level(f) for f in self._frames_at(cand)]
+            floor = _blank_seed_floor(levels, self.seed_level_frac)
+            keep = [i for i, lv in zip(cand, levels) if lv >= floor]
+            self.blank_seed_floor = floor
+            self.n_blank_seeds_dropped = len(cand) - len(keep)
+            if len(keep) < max(4, n_seed // 4):
+                warnings.warn(
+                    f"calibration: only {len(keep)} of {len(cand)} seed "
+                    f"candidates clear the blank-shot floor {floor:.3g}; "
+                    f"ignoring the level test for this run",
+                    stacklevel=2,
+                )
+                keep = cand
+                self.n_blank_seeds_dropped = 0
+            seed_indices = keep[:n_seed]
+            seed = list(self._frames_at(seed_indices))
         else:
             seed_indices = self._sample_frame_indices(n_seed)
             seed = list(self._frames_at(seed_indices))
@@ -745,6 +802,9 @@ class Probixi:
             threshold_opts=threshold_opts,
             **opts,
         )
+        if self._level_ref is None and seed:
+            lv = sorted(_frame_level(f) for f in seed)
+            self._level_ref = lv[len(lv) // 2]
         self.fit_noise(seed)
         result = calibrate_noise(self.noise, seed, warm=False, **opts)
         result.apply(self.noise, self.finder)
@@ -821,12 +881,17 @@ class Probixi:
             Lazy, composable stream of ``PeakResult`` (torch-resident).
         """
 
+        floor = self.blank_frame_floor
+
         def _tee() -> Iterator[Tensor]:
             offset = 0
             for item in frames:
                 self._ensure_built(item)
                 self.noise.record_drift = False
-                if update_noise:
+                blank = floor is not None and _frame_level(item) < floor
+                if blank:
+                    self.screened_frames.append(start_index + offset)
+                if update_noise and not blank:
                     self._update_noise(item)
                 if estimate_scale and self._scale_ref is not None:
                     subs = item if item.ndim == 3 else item.unsqueeze(0)
@@ -1028,6 +1093,51 @@ class Probixi:
         for offset, item in enumerate(frames):
             frame = item[0] if item.ndim == 3 else item
             yield ref.estimate(frame, start_index + offset)
+
+
+def _beamstop_qmin_from_histogram(
+    ph: Tensor, pix: Tensor, edges: Tensor, n_bins: int
+) -> Optional[float]:
+    density = ph / pix.clamp_min(1.0)
+    big = pix >= _BEAMSTOP_MIN_BIN_PIXELS
+    if not bool(big.any()):
+        return None
+    med = float(density[big].median())
+    if med <= 0:
+        return None
+
+    masked = (pix <= 0).nonzero().flatten().tolist()
+    lo_bin = (max(masked) + 1) if masked else 0
+    hi_cap = min(n_bins - 1, lo_bin + _BEAMSTOP_MAX_EXTEND_BINS - 1)
+    cand = [
+        i
+        for i in range(lo_bin, hi_cap + 1)
+        if float(pix[i]) >= _BEAMSTOP_MIN_BIN_PIXELS
+        and float(ph[i]) >= _BEAMSTOP_MIN_BIN_PEAKS
+    ]
+    if not cand:
+        return None
+    amax = max(cand, key=lambda i: float(density[i]))
+    ref = float(density[amax])
+    if ref < _BEAMSTOP_SPIKE_RATIO * med:
+        return None
+    thr = _BEAMSTOP_EDGE_FRACTION * ref
+    hi = amax
+    while hi + 1 <= hi_cap and float(density[hi + 1]) >= thr:
+        hi += 1
+    return float(edges[hi + 1])
+
+
+def _frame_level(frame: Tensor) -> float:
+    v = frame.flatten()[::_SEED_LEVEL_STRIDE].float()
+    return float(v.median()) if v.numel() else 0.0
+
+
+def _blank_seed_floor(levels: list[float], frac: float) -> float:
+    if not levels or frac <= 0.0:
+        return float("-inf")
+    ref = float(torch.tensor(levels).median())
+    return frac * ref if ref > 0.0 else float("-inf")
 
 
 def _lab_radius_map(geom, frame_size: tuple[int, int], device=None) -> Optional[Tensor]:

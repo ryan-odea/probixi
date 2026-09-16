@@ -88,12 +88,32 @@ def radial_profile(
     return (total / counts.clamp_min(1.0)).median(dim=0).values
 
 
+def _ring_pixel_counts(max_radius: int, device) -> Tensor:
+    off = torch.arange(-max_radius, max_radius + 1, device=device)
+    dr, dc = torch.meshgrid(off, off, indexing="ij")
+    rbin = torch.sqrt((dr * dr + dc * dc).double()).round().long().flatten()
+    return torch.bincount(rbin[rbin <= max_radius], minlength=max_radius + 1).double()
+
+
+def snr_disk_radius(profile: Tensor, r_max: float) -> float:
+    p = profile.detach().double()
+    p = (p - p.min()).clamp_min(0.0)
+    n = _ring_pixel_counts(len(p) - 1, p.device)
+    s = torch.cumsum(p * n, 0)
+    npx = torch.cumsum(n, 0)
+    snr = s / npx.sqrt()
+    k_max = max(1, min(len(p) - 1, int(math.floor(r_max - 0.5))))
+    k = int(torch.argmax(snr[1 : k_max + 1])) + 1
+    return k + 0.5
+
+
 def radii_from_profile(
     profile: Tensor,
     floor: float = 0.02,
     gap: float = 1.0,
     background_pixels: float = 120.0,
     fit_above: float = 0.1,
+    snr: bool = False,
 ) -> tuple[float, float, float] | None:
     if not 0.0 < floor < 1.0:
         raise ValueError("floor must be in (0, 1)")
@@ -130,6 +150,9 @@ def radii_from_profile(
     r_sig = min(max(r_sig, 1.0), float(len(p) - 1))
     r_in = r_sig + gap
     r_out = math.sqrt(r_in * r_in + background_pixels / math.pi)
+    if snr:
+        # annulus still clears the 2 % radius; only the signal disk shrinks
+        r_sig = min(r_sig, snr_disk_radius(profile, r_sig))
     return r_sig, r_in, r_out
 
 
