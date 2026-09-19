@@ -10,10 +10,10 @@ import torch
 from probixi.peakfinding.noise.calibrate import calibrate_noise
 from probixi.peakfinding.noise.model import NoiseModel
 from probixi.peakfinding.peaks.blobs import (
-    footprint_cap,
     BlobStats,
     compute_blob_stats,
     filter_blobs,
+    footprint_cap,
     label_connected_components,
 )
 from probixi.peakfinding.peaks.neighborhood import gaussian_kernel_2d

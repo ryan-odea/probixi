@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import math
-
 from dataclasses import dataclass
 from typing import Optional
 
@@ -136,7 +135,12 @@ def refine_cell(
         return None
     A, q, hkl, indexed = (t.to(device) for t in (A, q, hkl, indexed))
     cell0 = CellParams(
-        c0.a, c0.b, c0.c, c0.alpha, c0.beta, c0.gamma,
+        c0.a,
+        c0.b,
+        c0.c,
+        c0.alpha,
+        c0.beta,
+        c0.gamma,
         lattice_type=template.lattice_type,
         unique_axis=template.unique_axis,
         centering=template.centering,
@@ -153,16 +157,21 @@ def refine_cell(
     def build(th: Tensor) -> Tensor:
         return _axis_angle_to_rotation(th[:3]) @ U0 @ _B_from_params(p0 + T @ th[3:])
 
-    prior_width = torch.tensor(
-        [edge_tolerance * c0.a, edge_tolerance * c0.b, edge_tolerance * c0.c]
-        + [angle_tolerance_rad] * 3,
-        dtype=wd,
-        device=device,
-    ) / 3.0
+    prior_width = (
+        torch.tensor(
+            [edge_tolerance * c0.a, edge_tolerance * c0.b, edge_tolerance * c0.c]
+            + [angle_tolerance_rad] * 3,
+            dtype=wd,
+            device=device,
+        )
+        / 3.0
+    )
 
     khat = None
     if wavelength is not None and wavelength > 0:
-        k_out = q_d + torch.tensor([0.0, 0.0, 1.0 / wavelength], dtype=wd, device=device)
+        k_out = q_d + torch.tensor(
+            [0.0, 0.0, 1.0 / wavelength], dtype=wd, device=device
+        )
         khat = k_out / k_out.norm(dim=-1, keepdim=True).clamp_min(1e-12)
 
     def split(d: Tensor, k: Optional[Tensor]) -> tuple[Tensor, Tensor]:

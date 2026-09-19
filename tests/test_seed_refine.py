@@ -15,8 +15,8 @@ from probixi.indexer.refine import (
     refine_cell,
     refine_multiframe_known_B,
 )
-from probixi.io import CellParams
 from probixi.indexer.seed import sphere_seed_candidates
+from probixi.io import CellParams
 
 DT = torch.float32
 
@@ -246,8 +246,15 @@ def test_axis_angle_rejects_bad_last_dim():
 
 def _monoclinic(a, b, c, beta_deg):
     return CellParams(
-        a, b, c, math.radians(90.0), math.radians(beta_deg), math.radians(90.0),
-        lattice_type="monoclinic", unique_axis="b", centering="C",
+        a,
+        b,
+        c,
+        math.radians(90.0),
+        math.radians(beta_deg),
+        math.radians(90.0),
+        lattice_type="monoclinic",
+        unique_axis="b",
+        centering="C",
     )
 
 
@@ -256,7 +263,9 @@ def _refine_from_target(target, truth, seed=0, max_index=3, noise=0.0):
     U = sim.proper_rotation(seed)
     q, _ = _synthetic_q(truth, U, max_index=max_index)
     if noise:
-        q = q + noise * torch.randn(q.shape, generator=torch.Generator().manual_seed(seed))
+        q = q + noise * torch.randn(
+            q.shape, generator=torch.Generator().manual_seed(seed)
+        )
     A0 = U.to(DT) @ cell_to_B(target, dtype=DT)
     tol = 0.25 * float(torch.linalg.vector_norm(A0, dim=0).min())
     hkl, indexed = _assign_hkls(A0, q, tol)
@@ -288,8 +297,12 @@ def test_refine_cell_recovers_the_free_monoclinic_angle_only():
 
 
 def test_refine_cell_keeps_orthorhombic_angles_fixed_under_noise():
-    target = CellParams(50.0, 60.0, 70.0, *(math.radians(90.0),) * 3, lattice_type="orthorhombic")
-    truth = CellParams(50.3, 60.2, 70.5, *(math.radians(90.0),) * 3, lattice_type="orthorhombic")
+    target = CellParams(
+        50.0, 60.0, 70.0, *(math.radians(90.0),) * 3, lattice_type="orthorhombic"
+    )
+    truth = CellParams(
+        50.3, 60.2, 70.5, *(math.radians(90.0),) * 3, lattice_type="orthorhombic"
+    )
     out, _ = _refine_from_target(target, truth, seed=5, noise=2e-4)
     assert out is not None
     cell = B_to_cell(out[0])
@@ -300,8 +313,22 @@ def test_refine_cell_keeps_orthorhombic_angles_fixed_under_noise():
 
 
 def test_refine_cell_ties_tetragonal_edges():
-    target = CellParams(50.0, 50.0, 70.0, *(math.radians(90.0),) * 3, lattice_type="tetragonal", unique_axis="c")
-    truth = CellParams(50.4, 50.4, 70.6, *(math.radians(90.0),) * 3, lattice_type="tetragonal", unique_axis="c")
+    target = CellParams(
+        50.0,
+        50.0,
+        70.0,
+        *(math.radians(90.0),) * 3,
+        lattice_type="tetragonal",
+        unique_axis="c",
+    )
+    truth = CellParams(
+        50.4,
+        50.4,
+        70.6,
+        *(math.radians(90.0),) * 3,
+        lattice_type="tetragonal",
+        unique_axis="c",
+    )
     out, _ = _refine_from_target(target, truth, seed=7)
     assert out is not None
     cell = B_to_cell(out[0])
