@@ -7,13 +7,16 @@ import pytest
 import sim
 import torch
 
-from probixi.indexer.lattice import cell_to_B
+from probixi.indexer.lattice import B_to_cell, cell_to_B
 from probixi.indexer.refine import (
     RefineResult,
+    _assign_hkls,
     _axis_angle_to_rotation,
+    refine_cell,
     refine_multiframe_known_B,
 )
 from probixi.indexer.seed import sphere_seed_candidates
+from probixi.io import CellParams
 
 DT = torch.float32
 
@@ -86,7 +89,7 @@ def test_best_candidate_maps_integer_hkl_within_tolerance(cell):
 
 
 def test_best_candidate_reproduces_lattice_metric(cell):
-    from probixi.indexer.lattice import decompose_A
+    from probixi.indexer.lattice import B_to_cell
 
     U = sim.proper_rotation(2, max_angle_deg=10)
     q, _ = _synthetic_q(cell, U)
@@ -102,7 +105,7 @@ def test_best_candidate_reproduces_lattice_metric(cell):
         top_k=32,
     )
     A = _best_candidate(cands, q, q_tol).to(DT)
-    _, _, rec = decompose_A(A)
+    rec = B_to_cell(A)
     # orientation-invariant metric: sorted edges and volume match the target cell
     assert sorted((rec.a, rec.b, rec.c)) == pytest.approx(
         sorted((cell.a, cell.b, cell.c)), rel=1e-3
@@ -236,3 +239,126 @@ def test_axis_angle_batched_shape_and_orthonormal():
 def test_axis_angle_rejects_bad_last_dim():
     with pytest.raises(ValueError, match="last dim 3"):
         _axis_angle_to_rotation(torch.zeros(2, dtype=DT))
+
+
+# --- per-crystal cell refinement -------------------------------------------------
+
+
+def _monoclinic(a, b, c, beta_deg):
+    return CellParams(
+        a,
+        b,
+        c,
+        math.radians(90.0),
+        math.radians(beta_deg),
+        math.radians(90.0),
+        lattice_type="monoclinic",
+        unique_axis="b",
+        centering="C",
+    )
+
+
+def _refine_from_target(target, truth, seed=0, max_index=3, noise=0.0):
+    # Peaks from the true cell, start at the target cell in the true orientation
+    U = sim.proper_rotation(seed)
+    q, _ = _synthetic_q(truth, U, max_index=max_index)
+    if noise:
+        q = q + noise * torch.randn(
+            q.shape, generator=torch.Generator().manual_seed(seed)
+        )
+    A0 = U.to(DT) @ cell_to_B(target, dtype=DT)
+    tol = 0.25 * float(torch.linalg.vector_norm(A0, dim=0).min())
+    hkl, indexed = _assign_hkls(A0, q, tol)
+    assert int(indexed.sum()) >= 6
+    return refine_cell(A0, q, hkl, indexed, target, tol), q
+
+
+def test_refine_cell_recovers_a_uniformly_scaled_cell():
+    # a 0.5% larger true cell (the b2ar case) must be recovered from the target
+    target = _monoclinic(111.94, 172.23, 41.23, 106.20)
+    truth = _monoclinic(112.50, 173.09, 41.44, 106.20)
+    out, _ = _refine_from_target(target, truth)
+    assert out is not None
+    cell = B_to_cell(out[0])
+    for got, want in ((cell.a, truth.a), (cell.b, truth.b), (cell.c, truth.c)):
+        assert got == pytest.approx(want, rel=2e-4)
+    assert out[3] < 1e-5
+
+
+def test_refine_cell_recovers_the_free_monoclinic_angle_only():
+    target = _monoclinic(111.94, 172.23, 41.23, 106.20)
+    truth = _monoclinic(112.30, 173.00, 41.50, 106.50)
+    out, _ = _refine_from_target(target, truth, seed=3)
+    assert out is not None
+    cell = B_to_cell(out[0])
+    assert math.degrees(cell.beta) == pytest.approx(106.50, abs=2e-3)
+    assert math.degrees(cell.alpha) == pytest.approx(90.0, abs=1e-4)
+    assert math.degrees(cell.gamma) == pytest.approx(90.0, abs=1e-4)
+
+
+def test_refine_cell_keeps_orthorhombic_angles_fixed_under_noise():
+    target = CellParams(
+        50.0, 60.0, 70.0, *(math.radians(90.0),) * 3, lattice_type="orthorhombic"
+    )
+    truth = CellParams(
+        50.3, 60.2, 70.5, *(math.radians(90.0),) * 3, lattice_type="orthorhombic"
+    )
+    out, _ = _refine_from_target(target, truth, seed=5, noise=2e-4)
+    assert out is not None
+    cell = B_to_cell(out[0])
+    assert cell.a == pytest.approx(truth.a, rel=2e-3)
+    assert cell.c == pytest.approx(truth.c, rel=2e-3)
+    for ang in (cell.alpha, cell.beta, cell.gamma):
+        assert math.degrees(ang) == pytest.approx(90.0, abs=1e-4)
+
+
+def test_refine_cell_ties_tetragonal_edges():
+    target = CellParams(
+        50.0,
+        50.0,
+        70.0,
+        *(math.radians(90.0),) * 3,
+        lattice_type="tetragonal",
+        unique_axis="c",
+    )
+    truth = CellParams(
+        50.4,
+        50.4,
+        70.6,
+        *(math.radians(90.0),) * 3,
+        lattice_type="tetragonal",
+        unique_axis="c",
+    )
+    out, _ = _refine_from_target(target, truth, seed=7)
+    assert out is not None
+    cell = B_to_cell(out[0])
+    assert cell.a == pytest.approx(cell.b, rel=1e-9)
+    assert cell.a == pytest.approx(truth.a, rel=2e-4)
+    assert cell.c == pytest.approx(truth.c, rel=2e-4)
+
+
+def test_refine_cell_also_fixes_a_misorientation():
+    target = _monoclinic(111.94, 172.23, 41.23, 106.20)
+    truth = _monoclinic(112.50, 173.09, 41.44, 106.20)
+    U = sim.proper_rotation(11)
+    q, _ = _synthetic_q(truth, U, max_index=3)
+    tilt = _axis_angle_to_rotation(torch.tensor([2e-3, -1e-3, 1.5e-3], dtype=DT))
+    A0 = tilt @ U.to(DT) @ cell_to_B(target, dtype=DT)
+    tol = 0.25 * float(torch.linalg.vector_norm(A0, dim=0).min())
+    hkl, indexed = _assign_hkls(A0, q, tol)
+    out = refine_cell(A0, q, hkl, indexed, target, tol)
+    assert out is not None
+    A, _, indexed_r, rmsd, improved = out
+    assert improved
+    assert int(indexed_r.sum()) >= int(indexed.sum())
+    assert rmsd < 1e-5
+    assert B_to_cell(A).a == pytest.approx(truth.a, rel=2e-4)
+
+
+def test_refine_cell_returns_none_when_underdetermined():
+    target = _monoclinic(111.94, 172.23, 41.23, 106.20)
+    A0 = sim.proper_rotation(1).to(DT) @ cell_to_B(target, dtype=DT)
+    q = torch.zeros(2, 3, dtype=DT)
+    hkl = torch.zeros(2, 3, dtype=DT)
+    indexed = torch.ones(2, dtype=torch.bool)
+    assert refine_cell(A0, q, hkl, indexed, target, 1e-3) is None

@@ -253,6 +253,8 @@ def _read_batches(entries, chosen, lo, hi, strict):
             info = entries[filename]
             first, last = max(0, lo - offset), min(info.n_frames, hi - offset)
             offset += info.n_frames
+            first += info.event_start
+            last += info.event_start
             if first >= last:
                 continue
             d = (

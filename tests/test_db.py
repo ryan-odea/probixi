@@ -76,6 +76,7 @@ def _make_peak_result(frame_index: int = 0):
         posterior_mean=z,
         eccentricity=z,
         peakedness=z,
+        background_sum=z,
     )
     return PeakResult(
         frame_index=frame_index,
@@ -159,29 +160,35 @@ def test_db_frame_row_and_reflection_join(geometry_dict, cell, tmp_path):
 
     conn = duckdb.connect(str(out), read_only=True)
     try:
-        frame = conn.execute(
-            "SELECT frame_id, indexed, n_peaks, n_indexed, rmsd, scale, "
-            "num_reflections FROM frames"
+        fid, indexed, n_peaks, scale, num_refl = conn.execute(
+            "SELECT frame_id, indexed, n_peaks, scale, num_reflections FROM frames"
         ).fetchone()
-        fid, indexed, n_peaks, n_indexed, rmsd, scale, num_refl = frame
         assert indexed is True
         assert n_peaks == 4
-        assert n_indexed == 3
-        assert rmsd == pytest.approx(0.0042)
         assert scale == pytest.approx(0.97)
         # sigma <= 0 reflection dropped -> only two of the three indexed remain
         assert num_refl == 2
 
+        # the per-lattice statistics live on the crystals row
+        cid, n_indexed, rmsd, crystal_refl = conn.execute(
+            "SELECT crystal_id, n_indexed, rmsd, num_reflections FROM crystals"
+        ).fetchone()
+        assert n_indexed == 3
+        assert rmsd == pytest.approx(0.0042)
+        assert crystal_refl == 2
+
         # recovered cell recorded in Angstroms, matching B_to_cell
         recovered = B_to_cell(result.A)
-        cell_a = conn.execute("SELECT cell_a_A FROM frames").fetchone()[0]
+        cell_a = conn.execute("SELECT cell_a_A FROM crystals").fetchone()[0]
         assert cell_a == pytest.approx(recovered.a)
 
-        # reflections join back to the frame and have positive sigma
+        # reflections join back to both the crystal and the frame
         rows = conn.execute(
             "SELECT r.h, r.k, r.l, r.sigma FROM reflections r "
-            "JOIN frames f USING (frame_id) WHERE f.frame_id = ?",
-            [fid],
+            "JOIN crystals c ON c.crystal_id = r.crystal_id "
+            "JOIN frames f ON f.frame_id = r.frame_id "
+            "WHERE f.frame_id = ? AND c.crystal_id = ?",
+            [fid, cid],
         ).fetchall()
         assert len(rows) == 2
         assert all(sigma > 0.0 for *_, sigma in rows)
@@ -226,11 +233,20 @@ def test_db_backfills_unindexed_frames(geometry_dict, cell, tmp_path):
 
         # the non-indexed rows carry their file-event identity but null stats
         rows = conn.execute(
-            "SELECT frame_index, event, rmsd FROM frames WHERE NOT indexed "
-            "ORDER BY frame_index"
+            "SELECT frame_index, event, num_reflections FROM frames "
+            "WHERE NOT indexed ORDER BY frame_index"
         ).fetchall()
         assert [(r[0], r[1]) for r in rows] == [(1, 1), (2, 2)]
         assert all(r[2] is None for r in rows)
+        # and they own no crystals
+        assert conn.execute("SELECT COUNT(*) FROM crystals").fetchone()[0] == 1
+        # a processed image with no lattice reports null stats, like a backfill
+        assert (
+            conn.execute(
+                "SELECT COUNT(*) FROM frames WHERE NOT indexed AND num_reflections IS NULL"
+            ).fetchone()[0]
+            == 2
+        )
 
         # the indexed frame_id matches the deterministic key for its file-event
         fid = conn.execute("SELECT frame_id FROM frames WHERE indexed").fetchone()[0]
@@ -340,5 +356,96 @@ def test_db_overwrites_existing_file(geometry_dict, cell, tmp_path):
     conn = duckdb.connect(str(out), read_only=True)
     try:
         assert conn.execute("SELECT COUNT(*) FROM frames").fetchone()[0] == 1
+    finally:
+        conn.close()
+
+
+def test_multilattice_frame_identity_and_merge(geometry_dict, cell, tmp_path):
+    from probixi.indexer import FrameIndexResult
+    from probixi.io.writer import DataOffloader
+    from probixi.multigpu import merge_dbs
+
+    files = {"selection": H5Info("a.h5", "/d", 2, (8, 8), event_start=12)}
+    crystals = [_make_index_result(cell), _make_index_result(cell)]
+    frame = FrameIndexResult(
+        0, crystals, crystals[0].positions, crystals[0].intensities
+    )
+    empty = FrameIndexResult(1, [], frame.positions[:0], frame.intensities[:0])
+    path = tmp_path / "multi.duckdb"
+    with DuckDBOffloader(path, geometry_dict, files=files) as out:
+        out.write(frame)
+        out.write(empty)
+    merged = tmp_path / "merged.duckdb"
+    assert merge_dbs([path], merged) == 1
+    with duckdb.connect(str(merged), read_only=True) as conn:
+        assert conn.execute(
+            "SELECT event, indexed FROM frames ORDER BY frame_index"
+        ).fetchall() == [(12, True), (13, False)]
+        assert conn.execute(
+            "SELECT count(*), count(DISTINCT crystal_id), count(DISTINCT frame_id) FROM crystals"
+        ).fetchone() == (2, 2, 1)
+        assert conn.execute(
+            "SELECT count(*) FROM reflections r JOIN crystals c USING(crystal_id) WHERE r.frame_id=c.frame_id"
+        ).fetchone() == (4,)
+        assert conn.execute("SELECT count(*) FROM peaks").fetchone() == (4,)
+    stream = tmp_path / "multi.stream"
+    with DataOffloader(stream, geometry_dict, files=files) as out:
+        out.write(frame)
+        out.write(empty)
+    text = stream.read_text()
+    assert text.count("----- Begin chunk -----") == 2
+    assert text.count("--- Begin crystal") == 2
+    assert "Event: //12" in text and "Event: //13" in text
+    assert "indexed_by = none" in text
+
+
+def test_db_records_integration_recipe_and_model_background(
+    geometry_dict, cell, tmp_path
+):
+    out = tmp_path / "out.duckdb"
+    result = _make_index_result(cell)
+    result.predicted_hkl = torch.tensor([[1, 0, 0], [0, 1, -1]], dtype=torch.long)
+    result.predicted_positions = torch.tensor([[40.0, 55.0], [70.0, 30.0]])
+    result.predicted_intensities = torch.tensor([1200.0, 800.0])
+    result.predicted_sigmas = torch.tensor([35.0, 28.0])
+    result.predicted_peak = torch.tensor([300.0, 200.0])
+    result.predicted_background = torch.tensor([2.5, 2.25])
+    result.predicted_n_pixels = torch.tensor([9.0, 8.0])
+    result.predicted_bg_model = torch.tensor([22.5, 18.0])
+    result.predicted_bg_model_var = torch.tensor([0.81, 0.64])
+    recipe = dict(
+        radii=(1.5, 6.0, 8.6), adu_per_photon=9.9, bg_annulus_pixels=280, aperture="snr"
+    )
+    with DuckDBOffloader(
+        out, geometry=geometry_dict, cell=cell, integration=recipe
+    ) as off:
+        off.write(result)
+
+    conn = duckdb.connect(str(out), read_only=True)
+    try:
+        row = conn.execute("SELECT * FROM integration").fetchone()
+        assert row == (1.5, 6.0, 8.6, 9.9, 280.0, "snr")
+        rows = conn.execute(
+            "SELECT n_pixels, background_model, background_model_var FROM reflections "
+            "ORDER BY h DESC"
+        ).fetchall()
+        assert rows == [(9, 22.5, pytest.approx(0.81)), (8, 18.0, pytest.approx(0.64))]
+    finally:
+        conn.close()
+
+
+def test_db_reflections_without_prediction_leave_model_columns_null(
+    geometry_dict, cell, tmp_path
+):
+    out = tmp_path / "out.duckdb"
+    with DuckDBOffloader(out, geometry=geometry_dict, cell=cell) as off:
+        off.write(_make_index_result(cell))
+    conn = duckdb.connect(str(out), read_only=True)
+    try:
+        assert conn.execute("SELECT COUNT(*) FROM integration").fetchone()[0] == 0
+        rows = conn.execute(
+            "SELECT n_pixels, background_model FROM reflections"
+        ).fetchall()
+        assert rows and all(r == (None, None) for r in rows)
     finally:
         conn.close()

@@ -137,3 +137,41 @@ def test_multipanel_layout_has_fixed_panel_selectors(multipanel_geom_file):
 def test_missing_file_raises():
     with pytest.raises(FileNotFoundError):
         read_geometry("does-not-exist.geom")
+
+
+def test_lab_frame_bad_region_parsed(tmp_path):
+    # CrystFEL's other bad-region form: lab coordinates, not array indices.
+    path = tmp_path / "lab.geom"
+    path.write_text(
+        "clen = 0.1\nphoton_energy = 12398.0\nres = 13333.3\n"
+        "data = /entry/data/data\n"
+        "badlab/min_x = -500\nbadlab/max_x = -50\n"
+        "badlab/min_y = 460\nbadlab/max_y = 510\n"
+        "0/min_fs = 0\n0/max_fs = 7\n0/min_ss = 0\n0/max_ss = 7\n"
+        "0/corner_x = -4\n0/corner_y = -4\n"
+        "0/fs = +1.0x +0.0y\n0/ss = +0.0x +1.0y\n",
+        encoding="utf-8",
+    )
+    geom = read_geometry(path)
+    (br,) = geom.bad_regions
+    assert br.name == "badlab"
+    assert br.is_lab_frame
+    assert (br.min_x, br.max_x, br.min_y, br.max_y) == (-500.0, -50.0, 460.0, 510.0)
+    assert br.min_fs is None
+
+
+def test_unparseable_bad_region_warns(tmp_path):
+    # Silently dropping a region is how a geometry's masking goes missing.
+    path = tmp_path / "partial.geom"
+    path.write_text(
+        "clen = 0.1\nphoton_energy = 12398.0\nres = 13333.3\n"
+        "data = /entry/data/data\n"
+        "badpartial/min_x = -500\nbadpartial/max_x = -50\n"
+        "0/min_fs = 0\n0/max_fs = 7\n0/min_ss = 0\n0/max_ss = 7\n"
+        "0/corner_x = -4\n0/corner_y = -4\n"
+        "0/fs = +1.0x +0.0y\n0/ss = +0.0x +1.0y\n",
+        encoding="utf-8",
+    )
+    with pytest.warns(UserWarning, match="badpartial"):
+        geom = read_geometry(path)
+    assert geom.bad_regions == []

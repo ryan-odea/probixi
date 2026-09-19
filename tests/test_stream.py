@@ -7,9 +7,10 @@ import torch
 
 from probixi.indexer.indexer import IndexResult
 from probixi.indexer.lattice import B_to_cell
+from probixi.io import read_geometry
 from probixi.io.cxi import PeakOffloader
 from probixi.io.metadata import H5Info
-from probixi.io.writer import DataOffloader
+from probixi.io.writer import DataOffloader, _StreamWriter
 from probixi.peakfinding.peaks.blobs import BlobStats
 from probixi.peakfinding.peaks.peakfinder import PeakResult
 
@@ -75,6 +76,7 @@ def _make_peak_result() -> PeakResult:
         posterior_mean=z,
         eccentricity=z,
         peakedness=z,
+        background_sum=z,
     )
     return PeakResult(
         frame_index=0,
@@ -253,3 +255,183 @@ def test_peak_offloader_write_before_context_manager_raises(tmp_path):
     off = PeakOffloader(tmp_path / "x.stream")
     with pytest.raises(RuntimeError):
         off.write(_make_peak_result())
+
+
+# --- peak resolution must come from the panel geometry -----------------------
+
+
+def _folded_geom_file(tmp_path):
+    # Two 4x4 panels stacked in ss in the array, mirrored about the beam in the
+    # lab frame: array pixel (ss, fs) on panel 0 and (ss + 4, fs) on panel 1 are
+    # at the same scattering angle.
+    lines = [
+        "clen = 0.1",
+        "photon_energy = 12398.0",
+        "res = 13333.3",
+        "data = /entry/data/data",
+        "dim0 = %",
+        "dim1 = ss",
+        "dim2 = fs",
+        "0/min_fs = 0",
+        "0/max_fs = 3",
+        "0/min_ss = 0",
+        "0/max_ss = 3",
+        "0/corner_x = 10.0",
+        "0/corner_y = -1.5",
+        "0/fs = +1.0x +0.0y",
+        "0/ss = +0.0x +1.0y",
+        "1/min_fs = 0",
+        "1/max_fs = 3",
+        "1/min_ss = 4",
+        "1/max_ss = 7",
+        "1/corner_x = -10.0",
+        "1/corner_y = -1.5",
+        "1/fs = -1.0x +0.0y",
+        "1/ss = +0.0x +1.0y",
+    ]
+    path = tmp_path / "folded.geom"
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return path
+
+
+def _writer_for(geometry_dict):
+    w = _StreamWriter.__new__(_StreamWriter)
+    w.geometry = geometry_dict
+    return w
+
+
+def test_peak_resolution_uses_panel_geometry(tmp_path):
+    geom = read_geometry(_folded_geom_file(tmp_path))
+    w = _writer_for(geom.to_dict())
+
+    # mirror pixels are at one scattering angle, so one 1/d
+    for ss in range(4):
+        for fs in range(4):
+            a = w._resolution_nm_inv(float(ss), float(fs))
+            b = w._resolution_nm_inv(float(ss + 4), float(fs))
+            assert a == pytest.approx(b, rel=1e-5), f"({ss}, {fs}) vs ({ss + 4}, {fs})"
+
+    # and the value is the geometry's: panel 0 (0, 0) sits at lab (+10, -1.5) px
+    g = geom.to_dict()
+    r_m = math.hypot(10.0, 1.5) * float(g["pixel_size"])
+    want = (
+        2.0
+        * math.sin(0.5 * math.atan2(r_m, float(g["clen"])))
+        / (float(g["wavelength"]) * 0.1)
+    )
+    assert w._resolution_nm_inv(0.0, 0.0) == pytest.approx(want, rel=1e-5)
+
+
+def test_peak_resolution_is_not_array_radius(tmp_path):
+    # the pre-fix formula measured the radius in array coordinates about the
+    # beam centre; on a tiled detector that is a different number
+    geom = read_geometry(_folded_geom_file(tmp_path))
+    g = geom.to_dict()
+    w = _writer_for(g)
+    bc = g["beam_center"]
+    row, col = 4.0, 0.0
+    dr = (row - float(bc[0])) * float(g["pixel_size"])
+    dc = (col - float(bc[1])) * float(g["pixel_size"])
+    array_form = (
+        2.0
+        * math.sin(0.5 * math.atan2(math.hypot(dr, dc), float(g["clen"])))
+        / (float(g["wavelength"]) * 0.1)
+    )
+    assert w._resolution_nm_inv(row, col) != pytest.approx(array_form, rel=1e-3)
+
+
+def test_resolution_many_matches_scalar(tmp_path):
+    geom = read_geometry(_folded_geom_file(tmp_path))
+    w = _writer_for(geom.to_dict())
+    pos = [(0.0, 0.0), (2.0, 3.0), (6.0, 1.0)]
+    assert w._resolution_nm_inv_many(pos) == pytest.approx(
+        [w._resolution_nm_inv(r, c) for r, c in pos], rel=1e-6
+    )
+    assert w._resolution_nm_inv_many([]) == []
+
+
+def _with_prediction(result):
+    # attach an integrated lattice with the model-background columns
+    result.predicted_hkl = torch.tensor([[1, 0, 0], [0, 1, -1]], dtype=torch.long)
+    result.predicted_positions = torch.tensor([[40.0, 55.0], [70.0, 30.0]])
+    result.predicted_intensities = torch.tensor([1200.0, 800.0])
+    result.predicted_sigmas = torch.tensor([35.0, 28.0])
+    result.predicted_peak = torch.tensor([300.0, 200.0])
+    result.predicted_background = torch.tensor([2.5, 2.25])
+    result.predicted_n_pixels = torch.tensor([9.0, 8.0])
+    result.predicted_bg_model = torch.tensor([22.5, 18.0])
+    result.predicted_bg_model_var = torch.tensor([0.81, 0.64])
+    return result
+
+
+def test_header_records_integration_recipe_and_extra_columns(
+    tmp_path, geometry_dict, cell
+):
+    out = tmp_path / "indexed.stream"
+    recipe = dict(
+        radii=(1.5, 6.0, 8.6), adu_per_photon=9.9, bg_annulus_pixels=280, aperture="snr"
+    )
+    with DataOffloader(
+        out, geometry=geometry_dict, cell=cell, integration=recipe
+    ) as off:
+        off.write(_with_prediction(_make_index_result(cell)))
+
+    lines = out.read_text().splitlines()
+    first_chunk = lines.index("----- Begin chunk -----")
+    header = lines[:first_chunk]
+    assert "probixi/int_radius = 1.50,6.00,8.60" in header
+    assert "probixi/adu_per_photon = 9.9" in header
+    assert "probixi/bg_annulus_pixels = 280" in header
+    assert "probixi/aperture = snr" in header
+    assert "probixi/reflection_columns = n_pix bg_model bg_model_var" in header
+
+    crystal = _section(lines, "--- Begin crystal", "--- End crystal")
+    header_i = next(
+        i for i, line in enumerate(crystal) if line.startswith("   h    k    l")
+    )
+    assert crystal[header_i].split()[-3:] == ["n_pix", "bg_model", "bg_model_var"]
+    rows = crystal[header_i + 1 : crystal.index("End of reflections")]
+    assert len(rows) == 2
+    first = rows[0].split()
+    # the ten CrystFEL columns stay in place; the extras follow the panel name
+    assert len(first) == 13
+    assert first[9] == "0"
+    assert int(first[10]) == 9
+    assert float(first[11]) == pytest.approx(22.5)
+    assert float(first[12]) == pytest.approx(0.81)
+
+
+def test_reflection_rows_have_ten_columns_without_prediction(
+    tmp_path, geometry_dict, cell
+):
+    out = tmp_path / "indexed.stream"
+    with DataOffloader(out, geometry=geometry_dict, cell=cell) as off:
+        off.write(_make_index_result(cell))
+    lines = out.read_text().splitlines()
+    assert not any(line.startswith("probixi/int_radius") for line in lines)
+    crystal = _section(lines, "--- Begin crystal", "--- End crystal")
+    header_i = next(
+        i for i, line in enumerate(crystal) if line.startswith("   h    k    l")
+    )
+    assert crystal[header_i].split()[-1] == "panel"
+    rows = crystal[header_i + 1 : crystal.index("End of reflections")]
+    assert all(len(row.split()) == 10 for row in rows)
+
+
+def test_crystal_records_the_falloff_limit_beside_the_stream_limit(
+    tmp_path, geometry_dict, cell
+):
+    out = tmp_path / "indexed.stream"
+    result = _with_prediction(_make_index_result(cell))
+    result.diffraction_limit = 3.2  # highest indexed peak, nm^-1
+    result.falloff_limit = 2.5  # I/sigma crossing, kept as a diagnostic
+    with DataOffloader(out, geometry=geometry_dict, cell=cell) as off:
+        off.write(result)
+    crystal = _section(
+        out.read_text().splitlines(), "--- Begin crystal", "--- End crystal"
+    )
+    assert any(
+        l.startswith("diffraction_resolution_limit = 3.2")
+        for l in crystal  # Noqa: E741
+    )
+    assert "probixi/falloff_limit = 2.500000 nm^-1" in crystal

@@ -1,28 +1,11 @@
 from __future__ import annotations
 
 import math
-from functools import lru_cache
 
 import torch
 from torch import Tensor
 
 from ..io.cell import CellParams
-
-
-@lru_cache(maxsize=None)
-def _reduce_coefs(max_coef: int, device, dtype: torch.dtype) -> Tensor:
-    # integer (i,j,k) combination grid (origin excluded)
-    return torch.tensor(
-        [
-            [i, j, k]
-            for i in range(-max_coef, max_coef + 1)
-            for j in range(-max_coef, max_coef + 1)
-            for k in range(-max_coef, max_coef + 1)
-            if not (i == 0 and j == 0 and k == 0)
-        ],
-        dtype=dtype,
-        device=device,
-    )
 
 
 def cell_to_B(
@@ -64,60 +47,3 @@ def B_to_cell(B: Tensor) -> CellParams:
     beta = math.acos(float(torch.dot(av, cv)) / (a * c))
     gamma = math.acos(float(torch.dot(av, bv)) / (a * b))
     return CellParams(a=a, b=b, c=c, alpha=alpha, beta=beta, gamma=gamma)
-
-
-def reduce_cell(B: Tensor, max_coef: int = 3) -> Tensor:
-    # Greedy shortest-vector reduction: 3 short, non-collinear, non-coplanar
-    # lattice vectors from the integer-coefficient grid.
-    if B.shape[-2:] != (3, 3):
-        raise ValueError("B must be (3, 3)")
-    device, dtype = B.device, B.dtype
-    M = torch.linalg.inv(B.transpose(-1, -2))
-
-    coefs = _reduce_coefs(max_coef, device, dtype)
-    vectors = coefs @ M.transpose(-1, -2)
-    lengths = torch.linalg.vector_norm(vectors, dim=-1)
-    order = torch.argsort(lengths)
-
-    chosen: list[Tensor] = []
-    for idx in order.tolist():
-        v = vectors[idx]
-        if not chosen:
-            chosen.append(v)
-            continue
-        if len(chosen) == 1:
-            denom = (
-                torch.linalg.vector_norm(v) * torch.linalg.vector_norm(chosen[0])
-            ).clamp_min(1e-12)
-            if float((v @ chosen[0] / denom).abs()) < 0.99:
-                chosen.append(v)
-            continue
-        if len(chosen) == 2:
-            cross = torch.linalg.cross(chosen[0], chosen[1])
-            denom = (
-                torch.linalg.vector_norm(cross) * torch.linalg.vector_norm(v)
-            ).clamp_min(1e-12)
-            if float(((cross @ v).abs() / denom)) > 0.05:
-                chosen.append(v)
-                break
-    if len(chosen) < 3:
-        return B
-
-    M_red = torch.stack(chosen, dim=1)
-    if float(torch.linalg.det(M_red)) * float(torch.linalg.det(M)) < 0:
-        M_red[:, 2] = -M_red[:, 2]
-    return torch.linalg.inv(M_red.transpose(-1, -2))
-
-
-def decompose_A(A: Tensor) -> tuple[Tensor, Tensor, CellParams]:
-    # Factor A = U @ B via QR: U orthogonal residual, B the reduced cell-only
-    # reciprocal basis, cell recovered from B.
-    if A.shape[-2:] != (3, 3):
-        raise ValueError("A must be (3, 3)")
-    B_reduced = reduce_cell(A)
-    U_candidate = A @ torch.linalg.inv(B_reduced)
-    Q, _ = torch.linalg.qr(U_candidate)
-    if float(torch.linalg.det(Q)) < 0:
-        Q = -Q
-        B_reduced = -B_reduced
-    return Q, B_reduced, B_to_cell(B_reduced)

@@ -1,6 +1,10 @@
 from __future__ import annotations
 
+import math
+import random
+import warnings
 from dataclasses import dataclass, field
+from functools import lru_cache
 from itertools import chain, islice
 from pathlib import Path
 from typing import Iterable, Iterator, Literal, Optional, Union
@@ -10,13 +14,18 @@ from torch import Tensor
 
 from .indexer import (
     CellMatchConfig,
+    FrameIndexResult,
+    FrameIndexStream,
     Indexer,
+    IndexStats,
     IndexStream,
     IntegrateConfig,
     RefineConfig,
     SeedConfig,
 )
-from .indexer.forward import detector_to_q
+from .indexer.forward import _lab_xy_pixels, _panel_bases, detector_to_q
+from .indexer.indexer import MIN_PEAKS_TO_INDEX
+from .indexer.integrate import radial_profile, radii_from_profile
 from .io import (
     CellParams,
     DataLoader,
@@ -50,6 +59,20 @@ _BEAMSTOP_EDGE_FRACTION = 0.1
 _BEAMSTOP_MIN_FRACTION = 0.05
 _BEAMSTOP_MIN_PEAKS = 200
 _BEAMSTOP_MIN_BIN_PEAKS = 5
+_BEAMSTOP_MIN_BIN_PIXELS = 10_000
+_BEAMSTOP_MAX_EXTEND_BINS = 2
+
+_SEED_LEVEL_OVERSAMPLE = 3
+_SEED_LEVEL_STRIDE = 97
+
+_LAB_RADIUS_CHUNK_PIXELS = 1 << 18
+
+_SHADOW_MAD_K = 6.0
+_SHADOW_MAX_RATIO = 0.5
+_SHADOW_CORE_FRACTION = 0.5
+_RADII_MIN_FRAMES = 32
+_RADII_MAX_FRAMES = 512
+_RADII_MIN_PEAKS = 200
 
 
 # --- BEGIN GENERATED CITATION ---
@@ -57,7 +80,7 @@ _CITATION = r"""
 @software{odea_probixi,
   author  = {O'Dea, Ryan and Weinert, Tobias},
   title   = {{probixi}: Self-Calibrating Probabilistic Peak Finding for Serial X-Ray Crystallographic Data},
-  version = {0.4.0},
+  version = {0.5.0},
   year    = {2026},
   url     = {https://github.com/ryan-odea/probixi}
 }
@@ -69,6 +92,34 @@ _CITATION_URL = (
 
 # Cite repo version
 __citation__ = _CITATION.strip() + "\n"
+
+
+@lru_cache(maxsize=1)
+def mps_is_usable() -> bool:
+    """Whether this MPS can be used."""
+    try:
+        torch.linalg.inv(torch.eye(3, device="mps"))
+    except Exception:
+        return False
+    return True
+
+
+def auto_device() -> torch.device:
+    """Pick the best available torch device.
+
+    Returns
+    -------
+    torch.device
+        ``cuda``, ``mps`` or ``cpu``. MPS is chosen only when it is both
+        available and able to run the pipeline's kernels; see
+        :func:`mps_is_usable`.
+    """
+    if torch.cuda.is_available():
+        return torch.device("cuda")
+    mps = getattr(torch.backends, "mps", None)
+    if mps is not None and mps.is_available() and mps_is_usable():
+        return torch.device("mps")
+    return torch.device("cpu")
 
 
 def citation(timeout: float = 3.0) -> str:
@@ -112,6 +163,14 @@ class Probixi:
         the peak prior with learned values.
     matched_filter : bool, default True
         Use the multi-scale matched filter (the recommended operating point).
+    frame_screen_frac : float, default 0.1
+        Keep frames whose median level is below this fraction of the run's own
+        typical level out of the running background model, and report them.
+        ``0`` disables the screen (``--force-all``).
+    seed_level_frac : float, default 0.0 (off)
+        Drop calibration seed frames whose median level falls below this
+        fraction of the seed sample's own median level, i.e. blank/no-beam
+        shots.
     mf_scales, mf_threshold
         Matched-filter kernel scales and the fallback threshold (learned by
         ``calibrate`` when ``target_noise_peaks`` is set).
@@ -119,10 +178,15 @@ class Probixi:
         Replace the frozen variance floor with a learned photon-transfer curve
         so dim/low-flux shots are whitened against their own Poisson noise.
         Opt-in; intended for XFEL/SFX or jet-intensity-variable data.
+    peak_size_max : int, default 30
+        Maximum connected-component size accepted as a peak.
+    random_seed : int, default 1988
+        Seed for the draw of calibration and radii-training frames.
     seed, refine, cell_match, integrate
         Optional indexer configuration objects.
     device, dtype
-        Torch device and frame dtype.
+        Torch device and frame dtype. ``device=None`` (the default) selects the
+        best available: CUDA, else Apple MPS, else CPU.
 
     Attributes
     ----------
@@ -137,13 +201,17 @@ class Probixi:
     noise_mode: Literal["per_frame", "online"] = "online"
     warmup_frames: int = 16
     finder_kappa: float = 10.0
+    peak_size_max: int = 30
     posterior_threshold: float = 0.5
     candidate_threshold: Optional[float] = None
     matched_filter: bool = True
     mf_scales: tuple[float, ...] = (1.0, 1.6, 2.4)
     mf_threshold: float = 5.0
+    seed_level_frac: float = 0.0
+    frame_screen_frac: float = 0.1
     flux_variance: bool = False
     flux_var_floor: float = 0.15
+    random_seed: int = 1988
     seed: Optional[SeedConfig] = None
     refine: Optional[RefineConfig] = None
     cell_match: Optional[CellMatchConfig] = None
@@ -156,15 +224,23 @@ class Probixi:
     threshold_calibration: Optional[ThresholdCalibration] = field(
         default=None, init=False, repr=False
     )
+    _level_ref: Optional[float] = field(default=None, init=False, repr=False)
+    _shadow_fraction: float = field(default=0.0, init=False, repr=False)
+    screened_frames: list = field(default_factory=list, init=False, repr=False)
     _noise: Optional[NoiseModel] = field(default=None, init=False, repr=False)
     _finder: Optional[PeakFinder] = field(default=None, init=False, repr=False)
     _scale_ref: Optional[ScaleReference] = field(default=None, init=False, repr=False)
     _frame_scales: dict = field(default_factory=dict, init=False, repr=False)
+    _calibration_options: dict = field(default_factory=dict, init=False, repr=False)
+    _calibration_boundary: int = field(default=0, init=False, repr=False)
     _h5_mask: Optional[Tensor] = field(default=None, init=False, repr=False)
     _h5_mask_loaded: bool = field(default=False, init=False, repr=False)
     _beamstop_qmin: Optional[float] = field(default=None, init=False, repr=False)
 
     def __post_init__(self) -> None:
+        self.device = (
+            torch.device(self.device) if self.device is not None else auto_device()
+        )
         self.loader = DataLoader(
             self.list_file, geometry_file=self.geometry_file, cell_file=self.cell_file
         )
@@ -183,6 +259,64 @@ class Probixi:
                 integrate=self.integrate,
                 device=self.device,
             )
+
+    @property
+    def integration_radii(self) -> Optional[tuple[float, float, float]]:
+        """Learned ``(disk, annulus_in, annulus_out)`` radii in pixels.
+
+        Measured by :meth:`calibrate` from the radial profile of the seed
+        frames' peaks; ``None`` before calibration or when too few peaks were
+        found to measure it (the indexer then falls back to a fixed triple).
+        """
+        if self.indexer is None:
+            return None
+        return self.indexer._measured_radii
+
+    @property
+    def integration_recipe(self) -> Optional[dict]:
+        """Integration settings recorded in the stream header / database.
+
+        ``radii`` (disk, annulus_in, annulus_out) in pixels, ``adu_per_photon``,
+        the local-background ``bg_annulus_pixels`` and the ``aperture`` rule, as
+        the indexer applies them after :meth:`calibrate`; ``None`` without an
+        indexer. A merging program (e.g. torchsx) reads these back instead of
+        guessing CrystFEL defaults.
+        """
+        if self.indexer is None:
+            return None
+        return dict(
+            radii=tuple(float(r) for r in self.indexer._radii()),
+            adu_per_photon=self.indexer._adu_per_photon(),
+            bg_annulus_pixels=self.indexer._bg_annulus_pixels,
+            aperture=self.indexer.integrate.aperture,
+        )
+
+    @property
+    def shadow_fraction(self) -> float:
+        """Fraction of live pixels masked as static shadow by :meth:`calibrate`."""
+        return float(self._shadow_fraction)
+
+    @property
+    def blank_frame_floor(self) -> Optional[float]:
+        """Median-level cut below which a frame is treated as a blank shot.
+
+        ``None`` when the screen is disabled or the run's reference level is not
+        known yet (it is measured during :meth:`calibrate`).
+        """
+        if self.frame_screen_frac <= 0.0 or not self._level_ref:
+            return None
+        return self.frame_screen_frac * float(self._level_ref)
+
+    def frame_source(self, index: int) -> str:
+        """``path //event`` for an absolute frame index, for log messages."""
+        offset = 0
+        for info in (self.metadata.files or {}).values():
+            n = int(getattr(info, "n_frames", 0))
+            if offset <= index < offset + n:
+                ev = index - offset + int(getattr(info, "event_start", 0))
+                return f"{info.filename} //{ev}"
+            offset += n
+        return f"frame {index}"
 
     @property
     def metadata(self) -> Metadata:
@@ -260,6 +394,16 @@ class Probixi:
             prefetch=prefetch,
         )
 
+    def _sample_frame_indices(self, k: int, exclude: Iterable[int] = ()) -> list[int]:
+        skip = set(exclude)
+        pool = [i for i in range(int(self.metadata.n_frames)) if i not in skip]
+        return sorted(random.Random(self.random_seed).sample(pool, min(k, len(pool))))
+
+    def _frames_at(self, indices: Iterable[int]) -> Iterator[Tensor]:
+        # the loader streams contiguous ranges only; scattered frames go one by one
+        for i in indices:
+            yield next(iter(self.frames(start=i, stop=i + 1)))
+
     def _resolve_frame_index(self, frame: Union[int, str, tuple]) -> int:
         # int -> absolute index; "file//event" or (file, event) -> cumulative index
         if isinstance(frame, int):
@@ -274,8 +418,10 @@ class Probixi:
         base = Path(filename).name
         offset = 0
         for info in self.metadata.files.values():
-            if str(info.filename) == filename or Path(info.filename).name == base:
-                return offset + event
+            if (
+                str(info.filename) == filename or Path(info.filename).name == base
+            ) and info.event_start <= event < info.event_start + info.n_frames:
+                return offset + event - info.event_start
             offset += int(info.n_frames)
         raise KeyError(f"frame source not found: {filename}")
 
@@ -352,10 +498,22 @@ class Probixi:
             return
         frame_size = (int(item.shape[-2]), int(item.shape[-1]))
         first = item[0] if item.ndim == 3 else item
+        geom = self.loader.metadata.geometry
+        radius = _lab_radius_map(geom, frame_size, device=self.device)
+        if radius is None and len(getattr(geom, "panels", None) or {}) > 1:
+            warnings.warn(
+                "geometry: could not build a lab-frame radius map (panels are "
+                "missing fs/ss or corner_x/corner_y); the radial background "
+                "model will bin on array radius, which is wrong for a tiled "
+                "detector",
+                stacklevel=2,
+            )
         self._noise = NoiseModel(
             frame_size=frame_size,
             mode=self.noise_mode,
             warmup_frames=self.warmup_frames,
+            beam_center=geom.beam_center if geom is not None else None,
+            radial_radius=radius,
             valid_mask=self._static_mask(first, frame_size),
             device=self.device,
             dtype=self.dtype,
@@ -363,6 +521,7 @@ class Probixi:
         self._finder = PeakFinder(
             self._noise,
             kappa=self.finder_kappa,
+            size_max=self.peak_size_max,
             posterior_threshold=self.posterior_threshold,
             candidate_threshold=self.candidate_threshold,
             matched_filter=self.matched_filter,
@@ -373,18 +532,25 @@ class Probixi:
         )
 
     def _static_mask(self, frame: Tensor, frame_size: tuple[int, int]) -> Tensor:
-        # a-priori bad pixels: at/above max_adu (gaps/dead/saturated) + geometry
-        # bad regions, kept out of the background and detection.
+        # a-priori bad pixels: at/above max_adu (gaps/dead/saturated), panel-edge
+        # pixels, and geometry bad regions in either coordinate form -- all kept
+        # out of the background model and detection.
         mask = torch.ones(frame_size, dtype=torch.bool, device=frame.device)
         geom = self.loader.metadata.geometry
         max_adu = geom.parameters.get("max_adu") if geom else None
         if isinstance(max_adu, (int, float)):
             mask &= frame < float(max_adu)
+        if geom is not None:
+            _mask_panel_edges(mask, geom)
         for br in geom.bad_regions if geom else []:
+            if br.is_lab_frame:
+                continue
             r0, r1 = max(0, br.min_ss), min(frame_size[0] - 1, br.max_ss)
             c0, c1 = max(0, br.min_fs), min(frame_size[1] - 1, br.max_fs)
             if r0 <= r1 and c0 <= c1:
                 mask[r0 : r1 + 1, c0 : c1 + 1] = False
+        if geom is not None:
+            _mask_lab_bad_regions(mask, geom)
         h5_mask = self._hdf5_valid_mask(frame_size)
         if h5_mask is not None:
             mask &= h5_mask.to(device=mask.device)
@@ -453,32 +619,43 @@ class Probixi:
         pix = torch.histc(
             qmap[self._noise.valid_mask].float(), bins=n_bins, min=0.0, max=qmax
         )
-        density = ph / pix.clamp_min(1.0)
-        # zero bins with too few peaks to give a trustworthy density
-        density = torch.where(
-            ph >= _BEAMSTOP_MIN_BIN_PEAKS, density, torch.zeros_like(density)
-        )
-        pos_d = density[density > 0]
-        if pos_d.numel() == 0:
+        q_min = _beamstop_qmin_from_histogram(ph, pix, edges, n_bins)
+        if q_min is None:
             return None
-        med = float(pos_d.median())
-        inner = density[: max(1, n_bins // 4)]
-        ref = float(inner.max())
-        if med <= 0 or ref < _BEAMSTOP_SPIKE_RATIO * med:
-            return None
-        amax = int(inner.argmax())
-        thr = _BEAMSTOP_EDGE_FRACTION * ref
-        lo = hi = amax
-        while lo - 1 >= 0 and float(density[lo - 1]) >= thr:
-            lo -= 1
-        while hi + 1 < n_bins and float(density[hi + 1]) >= thr:
-            hi += 1
-        q_min = float(edges[hi + 1])
         if q_min <= 0.0:
             return None
         if float((allq < q_min).sum()) / allq.numel() < _BEAMSTOP_MIN_FRACTION:
             return None
         return q_min
+
+    def _learn_integration_radii(
+        self, exclude: Iterable[int]
+    ) -> Optional[tuple[float, float, float]]:
+        profile = None
+        n_peaks = 0
+        n_frames = 0
+        for res in self.peak_stream(
+            self._frames_at(self._sample_frame_indices(_RADII_MAX_FRAMES, exclude)),
+            update_noise=False,
+            estimate_scale=False,
+        ):
+            n_frames += 1
+            # stop once the profile rests on enough frames and enough peaks
+            if n_frames > _RADII_MIN_FRAMES and n_peaks >= _RADII_MIN_PEAKS:
+                break
+            excess = res.scores.get("excess") if res.scores else None
+            ks = res.kept_stats
+            if excess is None or ks is None or ks.row_centroid.numel() == 0:
+                continue
+            positions = torch.stack([ks.row_centroid, ks.col_centroid], dim=-1).to(
+                excess
+            )
+            one = radial_profile(excess, positions, pixel_valid=res.valid_mask)
+            profile = one if profile is None else profile + one
+            n_peaks += int(positions.shape[0])
+        if profile is None or n_peaks < _RADII_MIN_PEAKS:
+            return None
+        return radii_from_profile(profile, snr=self.indexer.integrate.aperture == "snr")
 
     def _apply_beamstop_qmin(self, q_min: float) -> None:
         # AND a |q| >= q_min beam-center exclusion into the noise model's masks so
@@ -491,10 +668,37 @@ class Probixi:
         )
         if qmap is None:
             return
-        keep = (qmap >= q_min).to(self._noise.valid_mask.device)
+        self._apply_static_exclusion(qmap >= q_min)
+
+    def _apply_static_exclusion(self, keep: Tensor) -> None:
+        assert self._noise is not None
+        keep = keep.to(self._noise.valid_mask.device)
         self._noise.static_mask &= keep
         self._noise.valid_mask &= keep
         self._noise._mask_version += 1
+
+    def _infer_shadow_mask(self) -> Optional[Tensor]:
+        # Static shadow from the warmed noise model== pixel mean far below the
+        # radial model at the same radius, grown by the local-background radius
+        if self._noise is None:
+            return None
+        finder = self.finder
+        grow = (
+            finder.local_outer_radius
+            if finder.local_background
+            else int(math.ceil(3.0 * max(finder.mf_scales)))
+        )
+        shadow = shadow_mask(
+            self._noise.pixel.mean(),
+            self._noise.rotational.mean(),
+            self._noise.valid_mask,
+            grow,
+        )
+        live = float(self._noise.valid_mask.sum())
+        self._shadow_fraction = (
+            float(shadow.sum()) / live if shadow is not None and live > 0 else 0.0
+        )
+        return shadow
 
     def _update_noise(self, item: Tensor) -> None:
         if item.ndim == 3:
@@ -600,7 +804,8 @@ class Probixi:
         Parameters
         ----------
         n_seed : int, default 32
-            Leading frames to calibrate on when ``seed_frames`` is not given.
+            Frames drawn at random from the run to calibrate on when
+            ``seed_frames`` is not given.
         seed_frames : iterable of torch.Tensor, optional
             Explicit calibration frames; overrides ``n_seed``.
         eigen_modes : int, default 0
@@ -618,14 +823,51 @@ class Probixi:
         CalibrationResult
             The applied noise calibration.
         """
-        seed = (
-            list(seed_frames)
-            if seed_frames is not None
-            else list(islice(self.frames(), n_seed))
-        )
+        seed_indices: list[int] = []
+        self.blank_seed_floor = None
+        self.n_blank_seeds_dropped = 0
+        if seed_frames is not None:
+            seed = list(seed_frames)
+        elif self.seed_level_frac > 0.0:
+            cand = self._sample_frame_indices(n_seed * _SEED_LEVEL_OVERSAMPLE)
+            levels = [_frame_level(f) for f in self._frames_at(cand)]
+            floor = _blank_seed_floor(levels, self.seed_level_frac)
+            keep = [i for i, lv in zip(cand, levels) if lv >= floor]
+            self.blank_seed_floor = floor
+            self.n_blank_seeds_dropped = len(cand) - len(keep)
+            if len(keep) < max(4, n_seed // 4):
+                warnings.warn(
+                    f"calibration: only {len(keep)} of {len(cand)} seed "
+                    f"candidates clear the blank-shot floor {floor:.3g}; "
+                    f"ignoring the level test for this run",
+                    stacklevel=2,
+                )
+                keep = cand
+                self.n_blank_seeds_dropped = 0
+            seed_indices = keep[:n_seed]
+            seed = list(self._frames_at(seed_indices))
+        else:
+            seed_indices = self._sample_frame_indices(n_seed)
+            seed = list(self._frames_at(seed_indices))
         if not seed:
             raise ValueError("no seed frames available to calibrate on")
+        self._calibration_options = dict(
+            n_seed=n_seed,
+            eigen_modes=eigen_modes,
+            target_noise_peaks=target_noise_peaks,
+            threshold_opts=threshold_opts,
+            **opts,
+        )
+        if self._level_ref is None and seed:
+            lv = sorted(_frame_level(f) for f in seed)
+            self._level_ref = lv[len(lv) // 2]
         self.fit_noise(seed)
+        shadow = self._infer_shadow_mask()
+        if shadow is not None:
+            # refit every background source with the shadow out of the masks
+            self._apply_static_exclusion(~shadow)
+            self.noise.reset()
+            self.fit_noise(seed)
         result = calibrate_noise(self.noise, seed, warm=False, **opts)
         result.apply(self.noise, self.finder)
         if self.flux_variance:
@@ -648,6 +890,8 @@ class Probixi:
             self.indexer._measured_gain = self.noise.gain
         if self.indexer is not None:
             self.indexer._bg_annulus_pixels = self.finder.background_annulus_pixels()
+        if self.indexer is not None:
+            self.indexer._measured_radii = self._learn_integration_radii(seed_indices)
         self._beamstop_qmin = self._infer_beamstop_qmin(seed)
         if self._beamstop_qmin:
             self._apply_beamstop_qmin(self._beamstop_qmin)
@@ -699,12 +943,17 @@ class Probixi:
             Lazy, composable stream of ``PeakResult`` (torch-resident).
         """
 
+        floor = self.blank_frame_floor
+
         def _tee() -> Iterator[Tensor]:
             offset = 0
             for item in frames:
                 self._ensure_built(item)
                 self.noise.record_drift = False
-                if update_noise:
+                blank = floor is not None and _frame_level(item) < floor
+                if blank:
+                    self.screened_frames.append(start_index + offset)
+                if update_noise and not blank:
                     self._update_noise(item)
                 if estimate_scale and self._scale_ref is not None:
                     subs = item if item.ndim == 3 else item.unsqueeze(0)
@@ -729,51 +978,151 @@ class Probixi:
         batch_size: int = 8,
         start_index: int = 0,
         update_noise: bool = True,
-    ) -> IndexStream:
-        """Open a lazy stream of indexing solutions over ``frames``.
-
-        Runs the full pipeline per frame: detect peaks, lift to reciprocal
-        space, seed and refine an orientation whose cell matches the target, then
-        predict and integrate the lattice.
+        recalibrate_every: Optional[int] = None,
+        enrich_alpha: Optional[float] = None,
+    ) -> IndexStream[FrameIndexResult]:
+        """Yield individual lattices from ``index_frame_stream``.
 
         Parameters
         ----------
-        frames : iterable of torch.Tensor
-            Frames to process.
-        batch_size : int, default 8
-            Frames per batched refinement pass.
-        start_index : int, default 0
-            Absolute index assigned to the first frame.
-        update_noise : bool, default True
-            Fold each frame into the running noise model as it passes.
+        frames, batch_size, start_index, update_noise, recalibrate_every, enrich_alpha
+            See ``index_frame_stream``.
 
         Returns
         -------
         IndexStream
-            Lazy stream of ``IndexResult``, one per indexed frame.
+            Accepted lattices, sharing physical-frame statistics.
+        """
+        return self.index_frame_stream(
+            frames,
+            batch_size,
+            start_index,
+            update_noise,
+            recalibrate_every,
+            enrich_alpha,
+        ).flatten()
+
+    def index_frame_stream(
+        self,
+        frames: Iterable[Tensor],
+        batch_size: int = 8,
+        start_index: int = 0,
+        update_noise: bool = True,
+        recalibrate_every: Optional[int] = None,
+        enrich_alpha: Optional[float] = None,
+    ) -> FrameIndexStream:
+        """Yield every input image with its accepted lattices.
+
+        Parameters
+        ----------
+        frames : iterable of Tensor
+            Images in input-list order, starting at ``start_index``.
+        batch_size : int
+            Frames per indexing batch.
+        start_index : int
+            Absolute input-list offset.
+        update_noise : bool
+            Update running statistics when ``recalibrate_every`` is None.
+        recalibrate_every : int, optional
+            None preserves running updates; zero freezes calibration. Positive
+            intervals rebuild noise and thresholds from the leading seed frames
+            at input-list boundaries, freezing statistics between boundaries.
+            Call ``calibrate`` first to set seed count and threshold options.
+        enrich_alpha : float, optional
+            Gate lattices before cross-lattice overlap exclusion.
+
+        Returns
+        -------
+        FrameIndexStream
+            Includes unindexed images and physical-frame statistics.
         """
         if self.indexer is None:
             raise RuntimeError(
-                "index_stream requires a target cell; construct Probixi with a "
-                "cell_file (omit it only for peak-only use via peak_stream)"
+                "index_frame_stream requires a target cell; construct Probixi "
+                "with a cell_file (omit it only for peak-only use via "
+                "peak_stream)"
             )
+        indexer = self.indexer
+        if recalibrate_every is not None:
+            if recalibrate_every < 0:
+                raise ValueError("recalibrate_every must be nonnegative")
+            if not self._calibration_options:
+                raise RuntimeError("call calibrate before scheduled or frozen indexing")
         self._frame_scales.clear()
-        tc = self.threshold_calibration
-        bright_threshold = tc.threshold if tc is not None else self.mf_threshold
-        base = self.indexer.index_stream(
-            self.peak_stream(
-                frames, start_index=start_index, update_noise=update_noise
-            ),
-            batch_size=batch_size,
-            bright_threshold=bright_threshold,
-        )
+        stats = IndexStats()
 
-        def _attach(r) -> None:
-            fs = self._frame_scales.pop(r.frame_index, None)
-            if fs is not None:
-                r.scale, r.scale_sigma = fs.scale, fs.sigma
+        # a recalibration boundary can fall inside a batch, so split batched
+        # input into single frames whenever a schedule is in force
+        def _individual() -> Iterator[Tensor]:
+            for item in frames:
+                yield from item if item.ndim == 3 else (item,)
 
-        return base.tap(_attach)
+        def _gen() -> Iterator[FrameIndexResult]:
+            source = iter(frames) if recalibrate_every is None else iter(_individual())
+            index = start_index
+            while True:
+                try:
+                    first = next(source)
+                except StopIteration:
+                    break
+                limit = None
+                if recalibrate_every:
+                    boundary = index // recalibrate_every * recalibrate_every
+                    if boundary != self._calibration_boundary:
+                        self._recalibrate(boundary)
+                    limit = boundary + recalibrate_every - index
+                segment = chain(
+                    (first,), islice(source, limit - 1) if limit else source
+                )
+                tc = self.threshold_calibration
+                base = indexer.index_frame_stream(
+                    self.peak_stream(
+                        segment,
+                        start_index=index,
+                        update_noise=(
+                            update_noise if recalibrate_every is None else False
+                        ),
+                    ),
+                    batch_size=batch_size,
+                    bright_threshold=(
+                        tc.threshold if tc is not None else self.mf_threshold
+                    ),
+                    enrich_alpha=enrich_alpha,
+                )
+                for result in base:
+                    fs = self._frame_scales.pop(result.frame_index, None)
+                    for crystal in result.crystals:
+                        if fs is not None:
+                            crystal.scale, crystal.scale_sigma = fs.scale, fs.sigma
+                    stats.frames += 1
+                    stats.hits += result.n_peaks >= MIN_PEAKS_TO_INDEX
+                    stats.indexed += bool(result.crystals)
+                    stats.crystals += len(result.crystals)
+                    index += 1
+                    yield result
+                if limit is None:
+                    break
+
+        return FrameIndexStream(_gen(), stats=stats)
+
+    def _recalibrate(self, boundary: int) -> None:
+        options = self._calibration_options.copy()
+        reference = self._scale_ref
+        self._noise = self._finder = None
+        self._beamstop_qmin = None
+        self.threshold_calibration = None
+        device = torch.device(self.device or "cpu")
+        devices = [device.index or 0] if device.type == "cuda" else []
+        with torch.random.fork_rng(devices=devices):
+            torch.manual_seed(boundary)
+            self.calibrate(
+                seed_frames=self.frames(
+                    start=boundary, stop=boundary + options["n_seed"]
+                ),
+                **options,
+            )
+        self._scale_ref = reference
+        self._calibration_boundary = boundary
 
     def scale_stream(
         self,
@@ -806,3 +1155,192 @@ class Probixi:
         for offset, item in enumerate(frames):
             frame = item[0] if item.ndim == 3 else item
             yield ref.estimate(frame, start_index + offset)
+
+
+def _beamstop_qmin_from_histogram(
+    ph: Tensor, pix: Tensor, edges: Tensor, n_bins: int
+) -> Optional[float]:
+    density = ph / pix.clamp_min(1.0)
+    big = pix >= _BEAMSTOP_MIN_BIN_PIXELS
+    if not bool(big.any()):
+        return None
+    med = float(density[big].median())
+    if med <= 0:
+        return None
+
+    masked = (pix <= 0).nonzero().flatten().tolist()
+    lo_bin = (max(masked) + 1) if masked else 0
+    hi_cap = min(n_bins - 1, lo_bin + _BEAMSTOP_MAX_EXTEND_BINS - 1)
+    cand = [
+        i
+        for i in range(lo_bin, hi_cap + 1)
+        if float(pix[i]) >= _BEAMSTOP_MIN_BIN_PIXELS
+        and float(ph[i]) >= _BEAMSTOP_MIN_BIN_PEAKS
+    ]
+    if not cand:
+        return None
+    amax = max(cand, key=lambda i: float(density[i]))
+    ref = float(density[amax])
+    if ref < _BEAMSTOP_SPIKE_RATIO * med:
+        return None
+    thr = _BEAMSTOP_EDGE_FRACTION * ref
+    hi = amax
+    while hi + 1 <= hi_cap and float(density[hi + 1]) >= thr:
+        hi += 1
+    return float(edges[hi + 1])
+
+
+def _frame_level(frame: Tensor) -> float:
+    v = frame.flatten()[::_SEED_LEVEL_STRIDE].float()
+    return float(v.median()) if v.numel() else 0.0
+
+
+def _blank_seed_floor(levels: list[float], frac: float) -> float:
+    if not levels or frac <= 0.0:
+        return float("-inf")
+    ref = float(torch.tensor(levels).median())
+    return frac * ref if ref > 0.0 else float("-inf")
+
+
+def _lab_radius_map(geom, frame_size: tuple[int, int], device=None) -> Optional[Tensor]:
+    if geom is None:
+        return None
+    g = geom.to_dict()
+    bases = _panel_bases(g, device, torch.float32)
+    if bases is None:
+        return None
+    rows, cols = frame_size
+    out = torch.empty(frame_size, dtype=torch.float32, device=device)
+    cc = torch.arange(cols, dtype=torch.float32, device=device)
+    step = max(1, _LAB_RADIUS_CHUNK_PIXELS // max(cols, 1))
+    for r0 in range(0, rows, step):
+        r1 = min(rows, r0 + step)
+        n = r1 - r0
+        rr = torch.arange(r0, r1, dtype=torch.float32, device=device)
+        pos = torch.stack(
+            [
+                rr.view(-1, 1).expand(n, cols).reshape(-1),
+                cc.view(1, -1).expand(n, cols).reshape(-1),
+            ],
+            dim=-1,
+        )
+        xy = _lab_xy_pixels(pos, g, bases)
+        out[r0:r1] = torch.linalg.vector_norm(xy, dim=-1).view(n, cols)
+    return out
+
+
+def _mask_panel_edges(mask: Tensor, geom) -> None:
+    # mask ``mask_edge_pixels`` pixels around the border of every panel
+    n = geom.parameters.get("mask_edge_pixels")
+    if not isinstance(n, (int, float)) or isinstance(n, bool):
+        return
+    n = int(n)
+    if n <= 0:
+        return
+    rows, cols = int(mask.shape[0]), int(mask.shape[1])
+    for panel in (geom.panels or {}).values():
+        try:
+            r0, r1 = int(panel["min_ss"]), int(panel["max_ss"])
+            c0, c1 = int(panel["min_fs"]), int(panel["max_fs"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        r0, r1 = max(0, r0), min(rows - 1, r1)
+        c0, c1 = max(0, c0), min(cols - 1, c1)
+        if r0 > r1 or c0 > c1:
+            continue
+        mask[r0 : min(r0 + n, r1 + 1), c0 : c1 + 1] = False
+        mask[max(r1 - n + 1, r0) : r1 + 1, c0 : c1 + 1] = False
+        mask[r0 : r1 + 1, c0 : min(c0 + n, c1 + 1)] = False
+        mask[r0 : r1 + 1, max(c1 - n + 1, c0) : c1 + 1] = False
+
+
+def shadow_mask(
+    pixel_mean: Tensor, radial_mean: Tensor, valid: Tensor, grow: int
+) -> Optional[Tensor]:
+    """Static shadow regions: pixels far below the radial background model.
+
+    Compares each live pixel's mean to the rotational model's mean at its radius.
+    A pixel is dark when its log-ratio lies more than ``_SHADOW_MAD_K`` robust
+    sigmas below the median and the ratio is under ``_SHADOW_MAX_RATIO``; a
+    shadow core is a dark pixel whose ``(2*grow+1)``-square window is at least
+    half dark (isolated dark pixels are not a shadow). Cores are grown by
+    ``grow`` pixels so no local-background annulus straddles the edge.
+
+    Parameters
+    ----------
+    pixel_mean, radial_mean : Tensor
+        (H, W) per-pixel and radial-model background means.
+    valid : Tensor
+        (H, W) bool mask of live pixels.
+    grow : int
+        Growth radius in pixels (the local-background annulus radius).
+
+    Returns
+    -------
+    Tensor or None
+        (H, W) bool mask of shadow pixels, or ``None`` when there is none.
+    """
+    ok = valid & torch.isfinite(pixel_mean) & (radial_mean > 0)
+    if int(ok.sum()) < 1000:
+        return None
+    ratio = (pixel_mean / radial_mean.clamp_min(1e-12)).clamp_min(1e-6)
+    log_ratio = ratio.log()
+    body = log_ratio[ok]
+    med = body.median()
+    mad = (body - med).abs().median() * 1.4826
+    if float(mad) <= 0:
+        return None
+    cut = min(float(med - _SHADOW_MAD_K * mad), math.log(_SHADOW_MAX_RATIO))
+    dark = ok & (log_ratio < cut)
+    if not bool(dark.any()):
+        return None
+    k = 2 * int(grow) + 1
+    dense = torch.nn.functional.avg_pool2d(
+        dark[None, None].float(),
+        k,
+        stride=1,
+        padding=int(grow),
+        count_include_pad=False,
+    )[0, 0]
+    core = dark & (dense >= _SHADOW_CORE_FRACTION)
+    if not bool(core.any()):
+        return None
+    grown = torch.nn.functional.max_pool2d(
+        core[None, None].float(), k, stride=1, padding=int(grow)
+    )[0, 0]
+    return grown > 0
+
+
+def _mask_lab_bad_regions(mask: Tensor, geom) -> None:
+    # mask abd regions defined in lab-frame coordinates (e.g. beamstop, guard ring, etc.)
+    regions = [br for br in geom.bad_regions if br.is_lab_frame]
+    if not regions:
+        return
+    bases = _panel_bases(geom.to_dict(), mask.device, torch.float32)
+    if bases is None:
+        return
+    rows, cols = int(mask.shape[0]), int(mask.shape[1])
+    for name, basis in zip((geom.panels or {}).keys(), bases):
+        min_ss, max_ss = int(basis[0]), int(basis[1])
+        min_fs, max_fs = int(basis[2]), int(basis[3])
+        cx, cy = float(basis[4]), float(basis[5])
+        fsx, fsy = float(basis[6]), float(basis[7])
+        ssx, ssy = float(basis[8]), float(basis[9])
+        r0, r1 = max(0, min_ss), min(rows - 1, max_ss)
+        c0, c1 = max(0, min_fs), min(cols - 1, max_fs)
+        if r0 > r1 or c0 > c1:
+            continue
+        ss_i = torch.arange(
+            r0 - min_ss, r1 - min_ss + 1, device=mask.device, dtype=torch.float32
+        )[:, None]
+        fs_j = torch.arange(
+            c0 - min_fs, c1 - min_fs + 1, device=mask.device, dtype=torch.float32
+        )[None, :]
+        x = cx + fs_j * fsx + ss_i * ssx
+        y = cy + fs_j * fsy + ss_i * ssy
+        for br in regions:
+            if br.panel is not None and br.panel != name:
+                continue
+            hit = (x >= br.min_x) & (x <= br.max_x) & (y >= br.min_y) & (y <= br.max_y)
+            if bool(hit.any()):
+                mask[r0 : r1 + 1, c0 : c1 + 1] &= ~hit

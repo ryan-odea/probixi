@@ -115,7 +115,10 @@ class NoiseModel(nn.Module):
     decay : float
         EWMA weight in ``(0, 1]``; ``1.0`` is an unweighted running estimate.
     beam_center : tuple[float, float], optional
-        Radial-bin center; defaults to the geometric frame center.
+        Radial-bin center, for a single-panel detector.
+    radial_radius : Tensor, optional
+        Per-pixel lab-frame radius ``(rows, cols)``, in pixels, for the radial
+        annuli
     radial_bin_width : float
         Width of the radial annuli in pixels.
     panels : PanelSpec, optional
@@ -157,6 +160,7 @@ class NoiseModel(nn.Module):
         mode: Literal["per_frame", "online"] = "online",
         decay: float = 1.0,
         beam_center: Optional[tuple[float, float]] = None,
+        radial_radius: Optional[Tensor] = None,
         radial_bin_width: float = 2.0,
         panels: Optional[PanelSpec] = None,
         warmup_frames: int = 16,
@@ -193,6 +197,7 @@ class NoiseModel(nn.Module):
         self.rotational = RotationalNoise(
             frame_size=frame_size,
             beam_center=beam_center,
+            radius=radial_radius,
             bin_width=radial_bin_width,
             mode=mode,
             decay=decay,

@@ -22,6 +22,7 @@ class RotationalNoise(NoiseStats):
         decay: float = 1.0,
         device: Optional[torch.device] = None,
         dtype: torch.dtype = torch.float32,
+        radius: Optional[Tensor] = None,
     ):
         if bin_width <= 0:
             raise ValueError("bin_width must be > 0")
@@ -29,17 +30,30 @@ class RotationalNoise(NoiseStats):
         self.bin_width = float(bin_width)
 
         rows, cols = self.frame_size
-        if beam_center is None:
-            beam_center = ((rows - 1) / 2.0, (cols - 1) / 2.0)
-        self.beam_center = (float(beam_center[0]), float(beam_center[1]))
-
-        # bin = floor(radius / bin_width); pixels at one radius share a stat.
-        rr = torch.arange(rows, dtype=dtype, device=device).view(-1, 1)
-        cc = torch.arange(cols, dtype=dtype, device=device).view(1, -1)
-        radius = torch.sqrt(
-            (rr - self.beam_center[0]) ** 2 + (cc - self.beam_center[1]) ** 2
+        self.beam_center = (
+            (float(beam_center[0]), float(beam_center[1]))
+            if beam_center is not None
+            else None
         )
-        bin_idx = torch.floor(radius / self.bin_width).long()
+
+        if radius is not None:
+            if tuple(radius.shape) != self.frame_size:
+                raise ValueError(
+                    f"radius shape {tuple(radius.shape)} != frame_size "
+                    f"{self.frame_size}"
+                )
+            radius = radius.to(device=device, dtype=dtype)
+        else:
+            if self.beam_center is None:
+                self.beam_center = ((rows - 1) / 2.0, (cols - 1) / 2.0)
+            rr = torch.arange(rows, dtype=dtype, device=device).view(-1, 1)
+            cc = torch.arange(cols, dtype=dtype, device=device).view(1, -1)
+            radius = torch.sqrt(
+                (rr - self.beam_center[0]) ** 2 + (cc - self.beam_center[1]) ** 2
+            )
+
+        # bin = floor(radius / bin_width)
+        bin_idx = torch.floor(radius / self.bin_width).long().clamp_min(0)
         n_bins = int(bin_idx.max().item()) + 1
         self.n_bins = n_bins
 

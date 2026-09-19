@@ -22,6 +22,8 @@ def _single_panel_geom(
     mask_good: str = "0x0",
     mask_bad: str = "0xFFFFFFFF",
     bad_region: tuple[int, int, int, int] | None = None,
+    lab_bad_region: tuple[float, float, float, float] | None = None,
+    mask_edge_pixels: int | None = None,
 ) -> Path:
     lines = [
         "clen = 0.1",
@@ -38,6 +40,16 @@ def _single_panel_geom(
     ]
     if mask_file is not None:
         lines.append(f"mask_file = {mask_file}")
+    if mask_edge_pixels is not None:
+        lines.append(f"mask_edge_pixels = {mask_edge_pixels}")
+    if lab_bad_region is not None:
+        min_x, max_x, min_y, max_y = lab_bad_region
+        lines += [
+            f"badlab/min_x = {min_x}",
+            f"badlab/max_x = {max_x}",
+            f"badlab/min_y = {min_y}",
+            f"badlab/max_y = {max_y}",
+        ]
     if bad_region is not None:
         min_ss, max_ss, min_fs, max_fs = bad_region
         lines += [
@@ -178,3 +190,52 @@ def test_static_mask_without_mask_spec_is_unaffected(tmp_path, cell_file):
     px = Probixi(list_file=lst, geometry_file=geom_path, cell_file=cell_file)
     px.fit_noise(list(px.frames()))
     assert bool(px.noise.valid_mask.all())
+
+
+# --- mask_edge_pixels and lab-frame bad regions -------------------------------
+
+
+def test_mask_edge_pixels_masks_panel_border(tmp_path, cell_file):
+    # ASIC borders carry charge-sharing artefacts; CrystFEL masks them via
+    # mask_edge_pixels and probixi must do the same or edge blobs dominate.
+    h, w = 8, 6
+    geom_path = _single_panel_geom(tmp_path, h=h, w=w, mask_edge_pixels=1)
+    frames = np.full((4, h, w), 100.0, dtype=np.float32)
+    _, lst = sim.write_cxi_run(tmp_path, frames)
+
+    px = Probixi(list_file=lst, geometry_file=geom_path, cell_file=cell_file)
+    px.fit_noise(list(px.frames()))
+    vm = px.noise.valid_mask
+
+    for c in range(w):  # first and last row of the panel
+        assert not bool(vm[0, c])
+        assert not bool(vm[h - 1, c])
+    for r in range(h):  # first and last column
+        assert not bool(vm[r, 0])
+        assert not bool(vm[r, w - 1])
+    for r in range(1, h - 1):  # interior survives
+        for c in range(1, w - 1):
+            assert bool(vm[r, c])
+
+
+def test_lab_frame_bad_region_masks_expected_pixels(tmp_path, cell_file):
+    # badregion/min_x..max_y are lab-frame pixel units about the beam centre.
+    # This panel maps (ss, fs) -> (x, y) = (fs - 2.5, ss - 3.5), so the box
+    # [-0.6, 0.6]^2 covers fs in {2, 3} and ss in {3, 4}.
+    h, w = 8, 6
+    geom_path = _single_panel_geom(
+        tmp_path, h=h, w=w, lab_bad_region=(-0.6, 0.6, -0.6, 0.6)
+    )
+    frames = np.full((4, h, w), 100.0, dtype=np.float32)
+    _, lst = sim.write_cxi_run(tmp_path, frames)
+
+    px = Probixi(list_file=lst, geometry_file=geom_path, cell_file=cell_file)
+    px.fit_noise(list(px.frames()))
+    vm = px.noise.valid_mask
+
+    for ss in (3, 4):
+        for fs in (2, 3):
+            assert not bool(vm[ss, fs])
+    assert bool(vm[2, 2])  # just outside in ss
+    assert bool(vm[3, 1])  # just outside in fs
+    assert bool(vm[5, 4])
