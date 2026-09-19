@@ -348,3 +348,71 @@ def test_resolution_many_matches_scalar(tmp_path):
         [w._resolution_nm_inv(r, c) for r, c in pos], rel=1e-6
     )
     assert w._resolution_nm_inv_many([]) == []
+
+
+def _with_prediction(result):
+    # attach an integrated lattice with the model-background columns
+    result.predicted_hkl = torch.tensor([[1, 0, 0], [0, 1, -1]], dtype=torch.long)
+    result.predicted_positions = torch.tensor([[40.0, 55.0], [70.0, 30.0]])
+    result.predicted_intensities = torch.tensor([1200.0, 800.0])
+    result.predicted_sigmas = torch.tensor([35.0, 28.0])
+    result.predicted_peak = torch.tensor([300.0, 200.0])
+    result.predicted_background = torch.tensor([2.5, 2.25])
+    result.predicted_n_pixels = torch.tensor([9.0, 8.0])
+    result.predicted_bg_model = torch.tensor([22.5, 18.0])
+    result.predicted_bg_model_var = torch.tensor([0.81, 0.64])
+    return result
+
+
+def test_header_records_integration_recipe_and_extra_columns(tmp_path, geometry_dict, cell):
+    out = tmp_path / "indexed.stream"
+    recipe = dict(radii=(1.5, 6.0, 8.6), adu_per_photon=9.9, bg_annulus_pixels=280, aperture="snr")
+    with DataOffloader(out, geometry=geometry_dict, cell=cell, integration=recipe) as off:
+        off.write(_with_prediction(_make_index_result(cell)))
+
+    lines = out.read_text().splitlines()
+    first_chunk = lines.index("----- Begin chunk -----")
+    header = lines[:first_chunk]
+    assert "probixi/int_radius = 1.50,6.00,8.60" in header
+    assert "probixi/adu_per_photon = 9.9" in header
+    assert "probixi/bg_annulus_pixels = 280" in header
+    assert "probixi/aperture = snr" in header
+    assert "probixi/reflection_columns = n_pix bg_model bg_model_var" in header
+
+    crystal = _section(lines, "--- Begin crystal", "--- End crystal")
+    header_i = next(i for i, line in enumerate(crystal) if line.startswith("   h    k    l"))
+    assert crystal[header_i].split()[-3:] == ["n_pix", "bg_model", "bg_model_var"]
+    rows = crystal[header_i + 1 : crystal.index("End of reflections")]
+    assert len(rows) == 2
+    first = rows[0].split()
+    # the ten CrystFEL columns stay in place; the extras follow the panel name
+    assert len(first) == 13
+    assert first[9] == "0"
+    assert int(first[10]) == 9
+    assert float(first[11]) == pytest.approx(22.5)
+    assert float(first[12]) == pytest.approx(0.81)
+
+
+def test_reflection_rows_have_ten_columns_without_prediction(tmp_path, geometry_dict, cell):
+    out = tmp_path / "indexed.stream"
+    with DataOffloader(out, geometry=geometry_dict, cell=cell) as off:
+        off.write(_make_index_result(cell))
+    lines = out.read_text().splitlines()
+    assert not any(line.startswith("probixi/int_radius") for line in lines)
+    crystal = _section(lines, "--- Begin crystal", "--- End crystal")
+    header_i = next(i for i, line in enumerate(crystal) if line.startswith("   h    k    l"))
+    assert crystal[header_i].split()[-1] == "panel"
+    rows = crystal[header_i + 1 : crystal.index("End of reflections")]
+    assert all(len(row.split()) == 10 for row in rows)
+
+
+def test_crystal_records_the_falloff_limit_beside_the_stream_limit(tmp_path, geometry_dict, cell):
+    out = tmp_path / "indexed.stream"
+    result = _with_prediction(_make_index_result(cell))
+    result.diffraction_limit = 3.2   # highest indexed peak, nm^-1
+    result.falloff_limit = 2.5       # I/sigma crossing, kept as a diagnostic
+    with DataOffloader(out, geometry=geometry_dict, cell=cell) as off:
+        off.write(result)
+    crystal = _section(out.read_text().splitlines(), "--- Begin crystal", "--- End crystal")
+    assert any(l.startswith("diffraction_resolution_limit = 3.2") for l in crystal)
+    assert "probixi/falloff_limit = 2.500000 nm^-1" in crystal

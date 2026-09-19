@@ -133,7 +133,7 @@ def test_integrate_recovers_injected_intensity_and_background(cell):
     var = torch.full(SHAPE, noise_sigma**2, dtype=torch.float32)
     mean = torch.full(SHAPE, background, dtype=torch.float32)
 
-    positions, intensity, sigma, snapped, peak, bg = integrate_rings(
+    positions, intensity, sigma, snapped, peak, bg, *_ = integrate_rings(
         lattice_pos,
         excess,
         var,
@@ -156,7 +156,7 @@ def test_integrate_snaps_predicted_to_nearby_observed_peak(cell):
     var = torch.ones(SHAPE, dtype=torch.float32)
     mean = torch.zeros(SHAPE, dtype=torch.float32)
     # predicted positions are offset; observed peaks sit on the true lattice
-    positions, _, _, snapped, _, _ = integrate_rings(
+    positions, _, _, snapped, *_ = integrate_rings(
         lattice_pos + 0.4,
         excess,
         var,
@@ -173,7 +173,7 @@ def test_integrate_snaps_predicted_to_nearby_observed_peak(cell):
 def test_integrate_does_not_snap_observed_peak_outside_snap_radius():
     shape = (64, 64)
     pred_pos = torch.tensor([[20.0, 20.0]], dtype=torch.float32)
-    positions, _, _, snapped, _, _ = integrate_rings(
+    positions, _, _, snapped, *_ = integrate_rings(
         pred_pos,
         torch.zeros(shape, dtype=torch.float32),
         torch.ones(shape, dtype=torch.float32),
@@ -190,7 +190,7 @@ def test_integrate_does_not_snap_observed_peak_outside_snap_radius():
 def test_integrate_with_no_observed_peaks_keeps_predicted_positions():
     shape = (64, 64)
     pred_pos = torch.tensor([[10.0, 12.0], [30.0, 40.0]], dtype=torch.float32)
-    positions, _, _, snapped, _, _ = integrate_rings(
+    positions, _, _, snapped, *_ = integrate_rings(
         pred_pos,
         torch.zeros(shape, dtype=torch.float32),
         torch.ones(shape, dtype=torch.float32),
@@ -212,7 +212,7 @@ def test_integrate_deblend_owns_shared_pixel_by_nearest_then_lowest_index():
     excess[24, 22] = 100.0  # only in disk 0
     excess[24, 26] = 80.0  # only in disk 1
     excess[24, 24] = 30.0  # equidistant (d=2) -> tie -> lowest index (disk 0)
-    _, intensity, _, _, _, _ = integrate_rings(
+    _, intensity, *_ = integrate_rings(
         positions,
         excess,
         torch.ones(shape, dtype=torch.float32),
@@ -251,8 +251,8 @@ def test_integrate_deblend_runs_on_mps_and_matches_cpu():
         )
         return [t.cpu() for t in out]
 
-    _, I_c, s_c, _, p_c, b_c = run(torch.device("cpu"))
-    _, I_m, s_m, _, p_m, b_m = run(torch.device("mps"))
+    _, I_c, s_c, _, p_c, b_c, *_ = run(torch.device("cpu"))
+    _, I_m, s_m, _, p_m, b_m, *_ = run(torch.device("mps"))
     assert torch.allclose(I_c, I_m, atol=1e-4)
     assert torch.allclose(s_c, s_m, atol=1e-4)
     assert torch.allclose(p_c, p_m, atol=1e-4)
@@ -264,7 +264,7 @@ def test_integrate_peak_is_disk_maximum_of_excess():
     shape = (32, 32)
     excess = torch.zeros(shape, dtype=torch.float32)
     excess[16, 16] = 42.0
-    _, intensity, _, _, peak, _ = integrate_rings(
+    _, intensity, _, _, peak, *_ = integrate_rings(
         torch.tensor([[16.0, 16.0]], dtype=torch.float32),
         excess,
         torch.ones(shape, dtype=torch.float32),
@@ -275,3 +275,70 @@ def test_integrate_peak_is_disk_maximum_of_excess():
     assert float(peak[0]) == pytest.approx(42.0)
     # the single hot pixel is the only excess in the disk, so the sum matches it
     assert float(intensity[0]) == pytest.approx(42.0)
+
+
+def test_integrate_reports_disk_pixels_and_model_background():
+    shape = (64, 64)
+    background = 20.0
+    var = torch.full(shape, 9.0, dtype=torch.float32)
+    mean = torch.full(shape, background, dtype=torch.float32)
+    pred_pos = torch.tensor([[30.0, 30.0]], dtype=torch.float32)
+    out = integrate_rings(
+        pred_pos,
+        torch.zeros(shape, dtype=torch.float32),
+        var,
+        obs_positions=torch.empty(0, 2, dtype=torch.float32),
+        mean=mean,
+        n_bg=200.0,
+        radii=(2.0, 4.0, 6.0),
+    )
+    assert len(out) == 9
+    n_pix, bg_model, bg_model_var = out[6:]
+    # a radius-2 disk holds the 13 integer offsets with dr^2 + dc^2 <= 4
+    assert int(n_pix[0]) == 13
+    # the model background is the mean image summed over exactly those pixels
+    assert float(bg_model[0]) == pytest.approx(13 * background)
+    # one shared annulus correction: n^2 * var_pix / n_bg = (13 * 9) * 13 / 200
+    assert float(bg_model_var[0]) == pytest.approx(13 * 9.0 * 13 / 200.0)
+    # without a local annulus the model estimate carries no annulus variance
+    out0 = integrate_rings(
+        pred_pos,
+        torch.zeros(shape, dtype=torch.float32),
+        var,
+        obs_positions=torch.empty(0, 2, dtype=torch.float32),
+        mean=mean,
+        radii=(2.0, 4.0, 6.0),
+    )
+    assert float(out0[8][0]) == 0.0
+    # masked pixels drop out of both the count and the model sum
+    valid = torch.ones(shape, dtype=torch.bool)
+    valid[30, 30] = False
+    out1 = integrate_rings(
+        pred_pos,
+        torch.zeros(shape, dtype=torch.float32),
+        var,
+        obs_positions=torch.empty(0, 2, dtype=torch.float32),
+        mean=mean,
+        pixel_valid=valid,
+        radii=(2.0, 4.0, 6.0),
+    )
+    assert int(out1[6][0]) == 12
+    assert float(out1[7][0]) == pytest.approx(12 * background)
+
+
+def test_detector_q_max_uses_panel_corners_not_raw_array_corners(cell):
+    # Two panels stacked in the raw array; the second sits far off-axis physically,
+    # so the raw array's corners are not the detector's physical extremes.
+    n = SHAPE[0]
+    geom = dict(_synthetic_geometry())
+    near = dict(fs="+1.0x +0.0y", ss="+0.0x +1.0y", corner_x=-n / 2, corner_y=-n / 2,
+                min_fs=0, max_fs=n - 1, min_ss=0, max_ss=n - 1)
+    far = dict(near, corner_x=6 * n, min_ss=n, max_ss=2 * n - 1)
+    single = detector_q_max(dict(geom, panels={"p0": near}), (n, n))
+    both = detector_q_max(dict(geom, panels={"p0": near, "p1": far}), (2 * n, n))
+    assert both > 1.5 * single
+    # the far panel's outer corner is the maximum
+    from probixi.indexer.forward import detector_to_q
+    corners = torch.tensor([[float(s), float(f)] for s in (n, 2 * n - 1) for f in (0, n - 1)])
+    expect = float(detector_to_q(corners, dict(geom, panels={"p0": near, "p1": far})).norm(dim=-1).max())
+    assert both == pytest.approx(expect, rel=1e-6)

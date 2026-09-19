@@ -397,3 +397,45 @@ def test_multilattice_frame_identity_and_merge(geometry_dict, cell, tmp_path):
     assert text.count("--- Begin crystal") == 2
     assert "Event: //12" in text and "Event: //13" in text
     assert "indexed_by = none" in text
+
+
+def test_db_records_integration_recipe_and_model_background(geometry_dict, cell, tmp_path):
+    out = tmp_path / "out.duckdb"
+    result = _make_index_result(cell)
+    result.predicted_hkl = torch.tensor([[1, 0, 0], [0, 1, -1]], dtype=torch.long)
+    result.predicted_positions = torch.tensor([[40.0, 55.0], [70.0, 30.0]])
+    result.predicted_intensities = torch.tensor([1200.0, 800.0])
+    result.predicted_sigmas = torch.tensor([35.0, 28.0])
+    result.predicted_peak = torch.tensor([300.0, 200.0])
+    result.predicted_background = torch.tensor([2.5, 2.25])
+    result.predicted_n_pixels = torch.tensor([9.0, 8.0])
+    result.predicted_bg_model = torch.tensor([22.5, 18.0])
+    result.predicted_bg_model_var = torch.tensor([0.81, 0.64])
+    recipe = dict(radii=(1.5, 6.0, 8.6), adu_per_photon=9.9, bg_annulus_pixels=280, aperture="snr")
+    with DuckDBOffloader(out, geometry=geometry_dict, cell=cell, integration=recipe) as off:
+        off.write(result)
+
+    conn = duckdb.connect(str(out), read_only=True)
+    try:
+        row = conn.execute("SELECT * FROM integration").fetchone()
+        assert row == (1.5, 6.0, 8.6, 9.9, 280.0, "snr")
+        rows = conn.execute(
+            "SELECT n_pixels, background_model, background_model_var FROM reflections "
+            "ORDER BY h DESC"
+        ).fetchall()
+        assert rows == [(9, 22.5, pytest.approx(0.81)), (8, 18.0, pytest.approx(0.64))]
+    finally:
+        conn.close()
+
+
+def test_db_reflections_without_prediction_leave_model_columns_null(geometry_dict, cell, tmp_path):
+    out = tmp_path / "out.duckdb"
+    with DuckDBOffloader(out, geometry=geometry_dict, cell=cell) as off:
+        off.write(_make_index_result(cell))
+    conn = duckdb.connect(str(out), read_only=True)
+    try:
+        assert conn.execute("SELECT COUNT(*) FROM integration").fetchone()[0] == 0
+        rows = conn.execute("SELECT n_pixels, background_model FROM reflections").fetchall()
+        assert rows and all(r == (None, None) for r in rows)
+    finally:
+        conn.close()

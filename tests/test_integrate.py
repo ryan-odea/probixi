@@ -94,7 +94,7 @@ def test_integrate_rings_requires_the_background_mean():
 
 def test_integrate_rings_returns_empty_for_no_predictions():
     excess, var, mean = _flat_frame(5.0)
-    positions, intensity, sigma, snapped, peak, background = integrate_rings(
+    positions, intensity, sigma, snapped, peak, background, *extras = integrate_rings(
         torch.zeros((0, 2)),
         excess,
         var,
@@ -102,14 +102,15 @@ def test_integrate_rings_returns_empty_for_no_predictions():
         mean=mean,
         radii=(3.0, 5.0, 7.0),
     )
-    for t in (positions, intensity, sigma, snapped, peak, background):
+    for t in (positions, intensity, sigma, snapped, peak, background, *extras):
         assert len(t) == 0
+    assert len(extras) == 3
 
 
 def test_integrate_rings_recovers_intensity_above_flat_background():
     excess, var, mean = _flat_frame(7.0)
     excess[32, 32] = 100.0
-    _, intensity, _, _, peak, background = integrate_rings(
+    _, intensity, _, _, peak, background, *_ = integrate_rings(
         torch.tensor([[32.0, 32.0]]),
         excess,
         var,
@@ -127,7 +128,7 @@ def test_integrate_rings_does_not_double_count_overlapping_disks():
     excess, var, mean = _flat_frame(0.0)
     excess[32, 32] = 60.0  # equidistant from both centres -> one owner only
     positions = torch.tensor([[32.0, 30.0], [32.0, 34.0]])
-    _, intensity, _, _, _, _ = integrate_rings(
+    _, intensity, _, _, _, _, *_ = integrate_rings(
         positions,
         excess,
         var,
@@ -144,7 +145,7 @@ def test_integrate_rings_falls_back_to_model_variance_on_a_thin_annulus():
     # write time -- fall back to the calibrated per-pixel variance.
     excess, var, mean = _flat_frame(1.0)
     excess[0, 0] = 20.0
-    _, intensity, sigma, _, _, _ = integrate_rings(
+    _, intensity, sigma, _, _, _, *_ = integrate_rings(
         torch.tensor([[0.0, 0.0]]),
         excess,
         var,
@@ -163,7 +164,7 @@ def test_integrate_rings_prefers_the_annulus_variance_when_it_has_samples():
     var = torch.full(SHAPE, 1e-6, dtype=torch.float32)
     torch.manual_seed(0)
     excess = excess + torch.randn(SHAPE) * 4.0
-    _, _, sigma, _, _, _ = integrate_rings(
+    _, _, sigma, _, _, _, *_ = integrate_rings(
         torch.tensor([[32.0, 32.0]]),
         excess,
         var,
@@ -177,7 +178,7 @@ def test_integrate_rings_prefers_the_annulus_variance_when_it_has_samples():
 def test_integrate_rings_zero_sigma_only_when_no_pixels_are_owned():
     excess, var, mean = _flat_frame(1.0)
     # a centre far off the frame owns nothing at all
-    _, _, sigma, _, _, _ = integrate_rings(
+    _, _, sigma, _, _, _, *_ = integrate_rings(
         torch.tensor([[-50.0, -50.0]]),
         excess,
         var,
