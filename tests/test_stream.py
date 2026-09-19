@@ -430,5 +430,8 @@ def test_crystal_records_the_falloff_limit_beside_the_stream_limit(
     crystal = _section(
         out.read_text().splitlines(), "--- Begin crystal", "--- End crystal"
     )
-    assert any(l.startswith("diffraction_resolution_limit = 3.2") for l in crystal)
+    assert any(
+        l.startswith("diffraction_resolution_limit = 3.2")
+        for l in crystal  # Noqa: E741
+    )
     assert "probixi/falloff_limit = 2.500000 nm^-1" in crystal
