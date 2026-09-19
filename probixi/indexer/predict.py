@@ -151,11 +151,14 @@ def predict_reflections(
 
 
 def detector_q_max(geometry: dict, frame_shape: tuple[int, int]) -> float:
-    # Highest |q| (A^-1) reachable on the detector, from its four corners.
     rows, cols = frame_shape
-    corners = torch.tensor(
-        [[0.0, 0.0], [0.0, cols - 1], [rows - 1, 0.0], [rows - 1, cols - 1]],
-        dtype=torch.float32,
-    )
-    q = detector_to_q(corners, geometry)
+    corners = [[0.0, 0.0], [0.0, cols - 1], [rows - 1, 0.0], [rows - 1, cols - 1]]
+    for panel in (geometry.get("panels") or {}).values():
+        try:
+            ss = (float(panel["min_ss"]), float(panel["max_ss"]))
+            fs = (float(panel["min_fs"]), float(panel["max_fs"]))
+        except (KeyError, TypeError, ValueError):
+            continue
+        corners += [[s, f] for s in ss for f in fs]
+    q = detector_to_q(torch.tensor(corners, dtype=torch.float32), geometry)
     return float(torch.linalg.vector_norm(q, dim=-1).max())

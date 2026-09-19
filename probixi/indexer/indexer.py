@@ -120,6 +120,14 @@ class IndexResult:
     predicted_background : Tensor, optional
         (M,) mean per-pixel background under each disk, from its own annulus
         (the CrystFEL stream's ``background`` column; informational only).
+    predicted_n_pixels : Tensor, optional
+        (M,) pixels actually summed in each disk (after masking and deblending).
+    predicted_bg_model : Tensor, optional
+        (M,) noise-model background summed over those pixels (ADU): the
+        model's own estimate of the disk's content without a spot.
+    predicted_bg_model_var : Tensor, optional
+        (M,) variance of that estimate (ADU^2) from the local-background
+        annulus the disk pixels share; zero when no local annulus is used.
     peak_background_sum : Tensor, optional
         (N,) noise-model background summed over each *detected* peak's own
         pixels, aligned with ``positions``/``intensities``. Only searched peaks
@@ -130,9 +138,11 @@ class IndexResult:
         Detector gain the frame was processed with, for turning the ADU columns
         into photon counts.
     diffraction_limit : float, optional
-        Per-crystal resolution estimate (nm^-1) from integrated I/sigma; reported
-        without truncating reflections, as the stream's
-        ``diffraction_resolution_limit``.
+        Per-crystal resolution limit (nm^-1) written to the stream as
+        ``diffraction_resolution_limit``: the highest-resolution indexed peak
+        or the falloff crossing, whichever is more generous (partialator's
+        ``--push-res`` then behaves as on an indexamajig stream); the falloff
+        estimate alone is kept in ``falloff_limit``.
     enrichment : float, optional
         Bright-rate of predicted spots over the background bright-rate (see
         ``spot_enrichment``); ~1 is a noise indexing, >>1 a real lattice.
@@ -174,10 +184,14 @@ class IndexResult:
     predicted_sigmas: Optional[Tensor] = None
     predicted_peak: Optional[Tensor] = None
     predicted_background: Optional[Tensor] = None
+    predicted_n_pixels: Optional[Tensor] = None
+    predicted_bg_model: Optional[Tensor] = None
+    predicted_bg_model_var: Optional[Tensor] = None
     peak_background_sum: Optional[Tensor] = None
     peak_n_pixels: Optional[Tensor] = None
     adu_per_photon: Optional[float] = None
     diffraction_limit: Optional[float] = None
+    falloff_limit: Optional[float] = None
     enrichment: Optional[float] = None
     n_bright: Optional[int] = None
     enrich_p: Optional[float] = None
@@ -403,7 +417,7 @@ class IntegrateConfig:
     predict_sigma: float = 1.5
     domain_size_recip: float = 5.0e-5
     snap_radius: float = 5.0
-    resolution_isigma: float = 1.0  # per-crystal drl: cut where <I/sig> falls to this
+    resolution_isigma: float = 0.5  # falloff limit: where shell <I/sig> falls to this
     resolution_nbins: int = 10
     resolution_min_refl: int = 40  # below this, fall back to the peak percentile
     resolution_percentile: float = 0.90  # fallback estimator (sparse crystals)
@@ -1230,9 +1244,14 @@ class Indexer:
                 "sigmas",
                 "peak",
                 "background",
+                "n_pixels",
+                "bg_model",
+                "bg_model_var",
             ):
                 name = "predicted_" + attribute
-                setattr(r, name, getattr(r, name)[selected])
+                value = getattr(r, name)
+                if value is not None:
+                    setattr(r, name, value[selected])
             offset += count
             r._integration_positions = r._integration_valid = None
 
@@ -1307,20 +1326,25 @@ class Indexer:
         if len(pred) == 0:
             result.predicted_hkl = pred.hkl
             result.predicted_positions = pred.positions
-            for name in ("intensities", "sigmas", "peak", "background"):
+            for name in (
+                "intensities", "sigmas", "peak", "background",
+                "n_pixels", "bg_model", "bg_model_var",
+            ):
                 setattr(result, "predicted_" + name, excess.new_empty(0))
             return
-        positions, intensity, sigma, _, peak, background = integrate_rings(
-            pred.positions.to(excess.dtype),
-            excess,
-            var,
-            result.positions.to(excess.dtype),
-            snap_radius=self.integrate.snap_radius,
-            mean=mean.to(excess.dtype) if mean is not None else None,
-            pixel_valid=valid_mask,
-            adu_per_photon=self._adu_per_photon(),
-            n_bg=self._bg_annulus_pixels,
-            radii=self._radii(),
+        positions, intensity, sigma, _, peak, background, n_pix, bg_model, bg_var = (
+            integrate_rings(
+                pred.positions.to(excess.dtype),
+                excess,
+                var,
+                result.positions.to(excess.dtype),
+                snap_radius=self.integrate.snap_radius,
+                mean=mean.to(excess.dtype) if mean is not None else None,
+                pixel_valid=valid_mask,
+                adu_per_photon=self._adu_per_photon(),
+                n_bg=self._bg_annulus_pixels,
+                radii=self._radii(),
+            )
         )
         peak_res_nm = None
         if result.positions.numel() > 0:
@@ -1328,16 +1352,26 @@ class Indexer:
             peak_res_nm = peak_q.norm(dim=-1) * A_INV_TO_NM_INV
 
         sig_ok = torch.isfinite(sigma) & (sigma > 0)
-        drl = None
+        falloff = None
         if bool(sig_ok.any()):
             q_nm = pred.resolution[sig_ok].to(excess.dtype) * A_INV_TO_NM_INV
-            drl = falloff_resolution_limit(
+            falloff = falloff_resolution_limit(
                 q_nm,
                 intensity[sig_ok] / sigma[sig_ok],
                 target=self.integrate.resolution_isigma,
                 nbins=self.integrate.resolution_nbins,
                 min_refl=self.integrate.resolution_min_refl,
             )
+        result.falloff_limit = falloff
+        drl = None
+        if peak_res_nm is not None and result.indexed_mask is not None:
+            indexed = result.indexed_mask.to(peak_res_nm.device)
+            if indexed.shape == peak_res_nm.shape and bool(indexed.any()):
+                drl = peak_resolution_limit(peak_res_nm[indexed], 1.0)
+        if drl is not None and falloff is not None:
+            drl = max(drl, falloff)
+        elif drl is None:
+            drl = falloff
         if drl is None:
             if peak_res_nm is not None:
                 peak_snr = None
@@ -1372,5 +1406,8 @@ class Indexer:
         result.predicted_sigmas = sigma[keep]
         result.predicted_peak = peak[keep]
         result.predicted_background = background[keep]
+        result.predicted_n_pixels = n_pix[keep]
+        result.predicted_bg_model = bg_model[keep]
+        result.predicted_bg_model_var = bg_var[keep]
         result._integration_positions = positions
         result._integration_valid = keep
