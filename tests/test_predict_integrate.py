@@ -331,14 +331,29 @@ def test_detector_q_max_uses_panel_corners_not_raw_array_corners(cell):
     # so the raw array's corners are not the detector's physical extremes.
     n = SHAPE[0]
     geom = dict(_synthetic_geometry())
-    near = dict(fs="+1.0x +0.0y", ss="+0.0x +1.0y", corner_x=-n / 2, corner_y=-n / 2,
-                min_fs=0, max_fs=n - 1, min_ss=0, max_ss=n - 1)
+    near = dict(
+        fs="+1.0x +0.0y",
+        ss="+0.0x +1.0y",
+        corner_x=-n / 2,
+        corner_y=-n / 2,
+        min_fs=0,
+        max_fs=n - 1,
+        min_ss=0,
+        max_ss=n - 1,
+    )
     far = dict(near, corner_x=6 * n, min_ss=n, max_ss=2 * n - 1)
     single = detector_q_max(dict(geom, panels={"p0": near}), (n, n))
     both = detector_q_max(dict(geom, panels={"p0": near, "p1": far}), (2 * n, n))
     assert both > 1.5 * single
     # the far panel's outer corner is the maximum
     from probixi.indexer.forward import detector_to_q
-    corners = torch.tensor([[float(s), float(f)] for s in (n, 2 * n - 1) for f in (0, n - 1)])
-    expect = float(detector_to_q(corners, dict(geom, panels={"p0": near, "p1": far})).norm(dim=-1).max())
+
+    corners = torch.tensor(
+        [[float(s), float(f)] for s in (n, 2 * n - 1) for f in (0, n - 1)]
+    )
+    expect = float(
+        detector_to_q(corners, dict(geom, panels={"p0": near, "p1": far}))
+        .norm(dim=-1)
+        .max()
+    )
     assert both == pytest.approx(expect, rel=1e-6)

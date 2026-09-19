@@ -399,7 +399,9 @@ def test_multilattice_frame_identity_and_merge(geometry_dict, cell, tmp_path):
     assert "indexed_by = none" in text
 
 
-def test_db_records_integration_recipe_and_model_background(geometry_dict, cell, tmp_path):
+def test_db_records_integration_recipe_and_model_background(
+    geometry_dict, cell, tmp_path
+):
     out = tmp_path / "out.duckdb"
     result = _make_index_result(cell)
     result.predicted_hkl = torch.tensor([[1, 0, 0], [0, 1, -1]], dtype=torch.long)
@@ -411,8 +413,12 @@ def test_db_records_integration_recipe_and_model_background(geometry_dict, cell,
     result.predicted_n_pixels = torch.tensor([9.0, 8.0])
     result.predicted_bg_model = torch.tensor([22.5, 18.0])
     result.predicted_bg_model_var = torch.tensor([0.81, 0.64])
-    recipe = dict(radii=(1.5, 6.0, 8.6), adu_per_photon=9.9, bg_annulus_pixels=280, aperture="snr")
-    with DuckDBOffloader(out, geometry=geometry_dict, cell=cell, integration=recipe) as off:
+    recipe = dict(
+        radii=(1.5, 6.0, 8.6), adu_per_photon=9.9, bg_annulus_pixels=280, aperture="snr"
+    )
+    with DuckDBOffloader(
+        out, geometry=geometry_dict, cell=cell, integration=recipe
+    ) as off:
         off.write(result)
 
     conn = duckdb.connect(str(out), read_only=True)
@@ -428,14 +434,18 @@ def test_db_records_integration_recipe_and_model_background(geometry_dict, cell,
         conn.close()
 
 
-def test_db_reflections_without_prediction_leave_model_columns_null(geometry_dict, cell, tmp_path):
+def test_db_reflections_without_prediction_leave_model_columns_null(
+    geometry_dict, cell, tmp_path
+):
     out = tmp_path / "out.duckdb"
     with DuckDBOffloader(out, geometry=geometry_dict, cell=cell) as off:
         off.write(_make_index_result(cell))
     conn = duckdb.connect(str(out), read_only=True)
     try:
         assert conn.execute("SELECT COUNT(*) FROM integration").fetchone()[0] == 0
-        rows = conn.execute("SELECT n_pixels, background_model FROM reflections").fetchall()
+        rows = conn.execute(
+            "SELECT n_pixels, background_model FROM reflections"
+        ).fetchall()
         assert rows and all(r == (None, None) for r in rows)
     finally:
         conn.close()

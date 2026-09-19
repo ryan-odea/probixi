@@ -18,7 +18,7 @@ def test_flat_field_has_no_shadow():
 
 def test_dark_rectangle_is_masked_and_grown():
     pixel, radial, valid = _field()
-    pixel[100:200, 120:200] = torch.randn(100, 80) * 0.5      # ~0 ADU under a 40 ADU field
+    pixel[100:200, 120:200] = torch.randn(100, 80) * 0.5  # ~0 ADU under a 40 ADU field
     m = shadow_mask(pixel, radial, valid, grow=9)
     assert m is not None
     # the rectangle itself and a 9 px margin around it are masked ...

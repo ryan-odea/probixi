@@ -592,7 +592,9 @@ class DuckDBOffloader(_StreamWriter):
                 .cpu()
                 .tolist()
             )
-            refl = list(zip(p_pos, p_hkl, p_int, p_sig, p_pk, p_bg, *_reflection_extras(result)))
+            refl = list(
+                zip(p_pos, p_hkl, p_int, p_sig, p_pk, p_bg, *_reflection_extras(result))
+            )
         else:
             positions = result.positions.detach().cpu().tolist()
             intensities = result.intensities.detach().cpu().tolist()

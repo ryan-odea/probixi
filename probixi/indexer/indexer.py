@@ -1327,8 +1327,13 @@ class Indexer:
             result.predicted_hkl = pred.hkl
             result.predicted_positions = pred.positions
             for name in (
-                "intensities", "sigmas", "peak", "background",
-                "n_pixels", "bg_model", "bg_model_var",
+                "intensities",
+                "sigmas",
+                "peak",
+                "background",
+                "n_pixels",
+                "bg_model",
+                "bg_model_var",
             ):
                 setattr(result, "predicted_" + name, excess.new_empty(0))
             return

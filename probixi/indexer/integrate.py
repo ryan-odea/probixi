@@ -229,7 +229,9 @@ def integrate_rings(
         + intensity.clamp_min(0) * adu_per_photon
     )
     sigma = totalvar.clamp_min(1e-12).sqrt()
-    model_var_sum = torch.where(use, var.flatten()[flat], torch.zeros_like(pixels)).sum(1)
+    model_var_sum = torch.where(use, var.flatten()[flat], torch.zeros_like(pixels)).sum(
+        1
+    )
     model_var = model_var_sum
     if n_bg is not None and n_bg > 0:
         model_var = model_var * (1.0 + n / float(n_bg))
@@ -245,7 +247,17 @@ def integrate_rings(
         bg_model_var = model_var_sum * n / float(n_bg)
     else:
         bg_model_var = torch.zeros_like(model_var_sum)
-    return positions, intensity, sigma, snapped, peak, background, n, bg_model, bg_model_var
+    return (
+        positions,
+        intensity,
+        sigma,
+        snapped,
+        peak,
+        background,
+        n,
+        bg_model,
+        bg_model_var,
+    )
 
 
 @torch.no_grad()

@@ -1296,7 +1296,11 @@ def shadow_mask(
         return None
     k = 2 * int(grow) + 1
     dense = torch.nn.functional.avg_pool2d(
-        dark[None, None].float(), k, stride=1, padding=int(grow), count_include_pad=False
+        dark[None, None].float(),
+        k,
+        stride=1,
+        padding=int(grow),
+        count_include_pad=False,
     )[0, 0]
     core = dark & (dense >= _SHADOW_CORE_FRACTION)
     if not bool(core.any()):
