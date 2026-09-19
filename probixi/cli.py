@@ -415,6 +415,8 @@ def main(
         floor = probixi.blank_frame_floor
         if floor is not None:
             msg += f" blank_floor={floor:.3g}"
+        if probixi.shadow_fraction > 0:
+            msg += f" shadow={100 * probixi.shadow_fraction:.1f}%"
         radii = probixi.integration_radii
         if radii is not None:
             msg += " radii=({:.1f}, {:.1f}, {:.1f})px".format(*radii)
@@ -486,6 +488,7 @@ def main(
         geometry_file=geometry_file,
         files=meta.files,
         panel=panel,
+        integration=probixi.integration_recipe,
     )
     if is_duckdb_path(output):
         offloader = DuckDBOffloader

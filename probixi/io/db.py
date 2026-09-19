@@ -10,7 +10,13 @@ import torch
 
 from ..indexer.lattice import B_to_cell
 from .geometry import EV_ANGSTROM
-from .writer import A_INV_TO_NM_INV, _panel_bounds, _profile_radius, _StreamWriter
+from .writer import (
+    A_INV_TO_NM_INV,
+    _panel_bounds,
+    _profile_radius,
+    _reflection_extras,
+    _StreamWriter,
+)
 
 if TYPE_CHECKING:
     from ..indexer.indexer import FrameIndexResult, IndexResult
@@ -84,6 +90,9 @@ _REFLECTION_COLUMNS = (
     "ss",
     "panel",
     "resolution_nm_inv",
+    "n_pixels",
+    "background_model",
+    "background_model_var",
 )
 
 _SCHEMA = """
@@ -118,6 +127,15 @@ CREATE TABLE cell (
     lattice_type VARCHAR,
     centering    VARCHAR,
     unique_axis  VARCHAR
+);
+
+CREATE TABLE integration (
+    r_peak            DOUBLE,
+    r_gap             DOUBLE,
+    r_bg              DOUBLE,
+    adu_per_photon    DOUBLE,
+    bg_annulus_pixels DOUBLE,
+    aperture          VARCHAR
 );
 
 CREATE TABLE frames (
@@ -178,7 +196,10 @@ CREATE TABLE reflections (
     fs                DOUBLE,
     ss                DOUBLE,
     panel             VARCHAR,
-    resolution_nm_inv DOUBLE
+    resolution_nm_inv DOUBLE,
+    n_pixels          INTEGER,
+    background_model  DOUBLE,
+    background_model_var DOUBLE
 );
 
 CREATE TABLE peaks (
@@ -255,6 +276,10 @@ class DuckDBOffloader(_StreamWriter):
         Recorded for provenance parity with the stream writer (unused in the DB).
     panel : str, default "0"
         Fallback panel name for peaks/reflections outside every geometry panel.
+    integration : dict, optional
+        Integration recipe (``radii``, ``adu_per_photon``,
+        ``bg_annulus_pixels``, ``aperture``) stored in the ``integration``
+        table; see :attr:`~probixi.Probixi.integration_recipe`.
     """
 
     def __init__(
@@ -268,6 +293,7 @@ class DuckDBOffloader(_StreamWriter):
         frame_range: Optional[tuple[int, int]] = None,
         indexer_name: str = "probixi",
         panel: str = "0",
+        integration: Optional[dict] = None,
     ):
         super().__init__(
             path,
@@ -276,6 +302,7 @@ class DuckDBOffloader(_StreamWriter):
             files=files,
             indexer_name=indexer_name,
             panel=panel,
+            integration=integration,
         )
         self.cell = cell
         self._crystal_rows: list[tuple] = []
@@ -324,7 +351,8 @@ class DuckDBOffloader(_StreamWriter):
             cid = f"{fid}:{lattice_index}"
             refl = self._reflections(crystal)
             total += len(refl)
-            for (row, col), miller, intensity, sigma, peak, background in refl:
+            for (row, col), miller, intensity, sigma, peak, background, *extra in refl:
+                n_pix, bg_model, bg_var = extra if extra else (None, None, None)
                 self._refl_rows.append(
                     (
                         cid,
@@ -338,6 +366,9 @@ class DuckDBOffloader(_StreamWriter):
                         float(row),
                         self._panel_for(col, row),
                         self._resolution_nm_inv(row, col),
+                        None if n_pix is None else int(n_pix),
+                        _as_float(bg_model),
+                        _as_float(bg_var),
                     )
                 )
             self._crystal_rows.append(
@@ -466,6 +497,18 @@ class DuckDBOffloader(_StreamWriter):
         )
         if panels:
             self._conn.executemany("INSERT INTO panels VALUES (?, ?, ?, ?, ?)", panels)
+        if self.integration:
+            r = self.integration
+            radii = r.get("radii") or (None, None, None)
+            self._conn.execute(
+                "INSERT INTO integration VALUES (?, ?, ?, ?, ?, ?)",
+                [
+                    *(_as_float(x) for x in radii),
+                    _as_float(r.get("adu_per_photon")),
+                    _as_float(r.get("bg_annulus_pixels")),
+                    r.get("aperture"),
+                ],
+            )
         if self.cell is not None:
             c = self.cell
             self._conn.execute(
@@ -549,7 +592,7 @@ class DuckDBOffloader(_StreamWriter):
                 .cpu()
                 .tolist()
             )
-            refl = list(zip(p_pos, p_hkl, p_int, p_sig, p_pk, p_bg))
+            refl = list(zip(p_pos, p_hkl, p_int, p_sig, p_pk, p_bg, *_reflection_extras(result)))
         else:
             positions = result.positions.detach().cpu().tolist()
             intensities = result.intensities.detach().cpu().tolist()

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import random
 import warnings
 from dataclasses import dataclass, field
@@ -66,6 +67,9 @@ _SEED_LEVEL_STRIDE = 97
 
 _LAB_RADIUS_CHUNK_PIXELS = 1 << 18
 
+_SHADOW_MAD_K = 6.0
+_SHADOW_MAX_RATIO = 0.5
+_SHADOW_CORE_FRACTION = 0.5
 _RADII_MIN_FRAMES = 32
 _RADII_MAX_FRAMES = 512
 _RADII_MIN_PEAKS = 200
@@ -221,6 +225,7 @@ class Probixi:
         default=None, init=False, repr=False
     )
     _level_ref: Optional[float] = field(default=None, init=False, repr=False)
+    _shadow_fraction: float = field(default=0.0, init=False, repr=False)
     screened_frames: list = field(default_factory=list, init=False, repr=False)
     _noise: Optional[NoiseModel] = field(default=None, init=False, repr=False)
     _finder: Optional[PeakFinder] = field(default=None, init=False, repr=False)
@@ -266,6 +271,30 @@ class Probixi:
         if self.indexer is None:
             return None
         return self.indexer._measured_radii
+
+    @property
+    def integration_recipe(self) -> Optional[dict]:
+        """Integration settings recorded in the stream header / database.
+
+        ``radii`` (disk, annulus_in, annulus_out) in pixels, ``adu_per_photon``,
+        the local-background ``bg_annulus_pixels`` and the ``aperture`` rule, as
+        the indexer applies them after :meth:`calibrate`; ``None`` without an
+        indexer. A merging program (e.g. torchsx) reads these back instead of
+        guessing CrystFEL defaults.
+        """
+        if self.indexer is None:
+            return None
+        return dict(
+            radii=tuple(float(r) for r in self.indexer._radii()),
+            adu_per_photon=self.indexer._adu_per_photon(),
+            bg_annulus_pixels=self.indexer._bg_annulus_pixels,
+            aperture=self.indexer.integrate.aperture,
+        )
+
+    @property
+    def shadow_fraction(self) -> float:
+        """Fraction of live pixels masked as static shadow by :meth:`calibrate`."""
+        return float(self._shadow_fraction)
 
     @property
     def blank_frame_floor(self) -> Optional[float]:
@@ -639,10 +668,37 @@ class Probixi:
         )
         if qmap is None:
             return
-        keep = (qmap >= q_min).to(self._noise.valid_mask.device)
+        self._apply_static_exclusion(qmap >= q_min)
+
+    def _apply_static_exclusion(self, keep: Tensor) -> None:
+        assert self._noise is not None
+        keep = keep.to(self._noise.valid_mask.device)
         self._noise.static_mask &= keep
         self._noise.valid_mask &= keep
         self._noise._mask_version += 1
+
+    def _infer_shadow_mask(self) -> Optional[Tensor]:
+        # Static shadow from the warmed noise model== pixel mean far below the
+        # radial model at the same radius, grown by the local-background radius
+        if self._noise is None:
+            return None
+        finder = self.finder
+        grow = (
+            finder.local_outer_radius
+            if finder.local_background
+            else int(math.ceil(3.0 * max(finder.mf_scales)))
+        )
+        shadow = shadow_mask(
+            self._noise.pixel.mean(),
+            self._noise.rotational.mean(),
+            self._noise.valid_mask,
+            grow,
+        )
+        live = float(self._noise.valid_mask.sum())
+        self._shadow_fraction = (
+            float(shadow.sum()) / live if shadow is not None and live > 0 else 0.0
+        )
+        return shadow
 
     def _update_noise(self, item: Tensor) -> None:
         if item.ndim == 3:
@@ -806,6 +862,12 @@ class Probixi:
             lv = sorted(_frame_level(f) for f in seed)
             self._level_ref = lv[len(lv) // 2]
         self.fit_noise(seed)
+        shadow = self._infer_shadow_mask()
+        if shadow is not None:
+            # refit every background source with the shadow out of the masks
+            self._apply_static_exclusion(~shadow)
+            self.noise.reset()
+            self.fit_noise(seed)
         result = calibrate_noise(self.noise, seed, warm=False, **opts)
         result.apply(self.noise, self.finder)
         if self.flux_variance:
@@ -1190,6 +1252,59 @@ def _mask_panel_edges(mask: Tensor, geom) -> None:
         mask[max(r1 - n + 1, r0) : r1 + 1, c0 : c1 + 1] = False
         mask[r0 : r1 + 1, c0 : min(c0 + n, c1 + 1)] = False
         mask[r0 : r1 + 1, max(c1 - n + 1, c0) : c1 + 1] = False
+
+
+def shadow_mask(
+    pixel_mean: Tensor, radial_mean: Tensor, valid: Tensor, grow: int
+) -> Optional[Tensor]:
+    """Static shadow regions: pixels far below the radial background model.
+
+    Compares each live pixel's mean to the rotational model's mean at its radius.
+    A pixel is dark when its log-ratio lies more than ``_SHADOW_MAD_K`` robust
+    sigmas below the median and the ratio is under ``_SHADOW_MAX_RATIO``; a
+    shadow core is a dark pixel whose ``(2*grow+1)``-square window is at least
+    half dark (isolated dark pixels are not a shadow). Cores are grown by
+    ``grow`` pixels so no local-background annulus straddles the edge.
+
+    Parameters
+    ----------
+    pixel_mean, radial_mean : Tensor
+        (H, W) per-pixel and radial-model background means.
+    valid : Tensor
+        (H, W) bool mask of live pixels.
+    grow : int
+        Growth radius in pixels (the local-background annulus radius).
+
+    Returns
+    -------
+    Tensor or None
+        (H, W) bool mask of shadow pixels, or ``None`` when there is none.
+    """
+    ok = valid & torch.isfinite(pixel_mean) & (radial_mean > 0)
+    if int(ok.sum()) < 1000:
+        return None
+    ratio = (pixel_mean / radial_mean.clamp_min(1e-12)).clamp_min(1e-6)
+    log_ratio = ratio.log()
+    body = log_ratio[ok]
+    med = body.median()
+    mad = (body - med).abs().median() * 1.4826
+    if float(mad) <= 0:
+        return None
+    cut = min(float(med - _SHADOW_MAD_K * mad), math.log(_SHADOW_MAX_RATIO))
+    dark = ok & (log_ratio < cut)
+    if not bool(dark.any()):
+        return None
+    k = 2 * int(grow) + 1
+    dense = torch.nn.functional.avg_pool2d(
+        dark[None, None].float(), k, stride=1, padding=int(grow), count_include_pad=False
+    )[0, 0]
+    core = dark & (dense >= _SHADOW_CORE_FRACTION)
+    if not bool(core.any()):
+        return None
+    grown = torch.nn.functional.max_pool2d(
+        core[None, None].float(), k, stride=1, padding=int(grow)
+    )[0, 0]
+    return grown > 0
 
 
 def _mask_lab_bad_regions(mask: Tensor, geom) -> None:

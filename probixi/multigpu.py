@@ -19,7 +19,7 @@ _CHUNK_MARKER = "----- Begin chunk -----"
 _SERIAL_PREFIX = "Image serial number:"
 _STREAM_VERSION_PREFIX = "CrystFEL stream format"
 _DB_DATA_TABLES = ("frames", "crystals", "reflections", "peaks")
-_DB_META_TABLES = ("geometry", "panels", "cell")
+_DB_META_TABLES = ("geometry", "panels", "cell", "integration")
 
 __all__ = [
     "run_data_parallel",
@@ -251,6 +251,7 @@ def run_block(
         geometry_file=cfg.geometry_file,
         files=p.metadata.files,
         panel=cfg.panel,
+        integration=p.integration_recipe,
     )
     if cfg.db:
         offloader = DuckDBOffloader
