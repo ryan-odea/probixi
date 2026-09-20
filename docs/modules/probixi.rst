@@ -35,6 +35,21 @@ Output writers
 .. autoclass:: PeakOffloader
    :members:
 
+Indexing ambiguity
+==================
+
+.. autoclass:: Ambigator
+   :members:
+
+.. autoclass:: AmbigatorResult
+   :members:
+
+.. autofunction:: probixi.ambigator.ambiguity_operator
+
+.. autofunction:: probixi.ambigator.point_group_ops
+
+.. autofunction:: probixi.ambigator.parse_operator
+
 Multi-GPU
 =========
 

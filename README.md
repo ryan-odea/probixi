@@ -109,6 +109,31 @@ The database holds run metadata as small tables (`geometry`, `panels`, `cell`) p
 - **`peaks`** — the peak-search results per frame
 
 
+### Resolving indexing ambiguity
+
+When the lattice symmetry is higher than the structure's point group, each crystal can
+be indexed in more than one way. `probixi-resolve` clusters the crystals in a database
+into the two choices and reindexes the ones on the wrong side -- an implementation of
+CrystFEL's `ambigator`, created by Thomas White, in torch/Triton.
+
+```bash
+probixi-resolve -i run.duckdb -y 3 -w 321 -o detwinned.duckdb
+```
+
+Without `-o` the database is rewritten in place. Reindexing transforms `reflections`
+`h k l` along with the matching `crystals` reciprocal axes and cell parameters, and
+records every assignment in an `ambiguity` table. The same thing from python:
+
+```python
+from probixi import Ambigator
+
+amb = Ambigator("run.duckdb", symmetry="3", apparent="321")
+result = amb.resolve()
+print(f"{result.n_reindexed}/{len(result)} crystals reindexed")
+amb.reindex(result, output="detwinned.duckdb")
+```
+
+
 ### Using `probixi` as only a peakfinder
 
 Of course, if you only want to use probixi as a peakfinder and prefer to use your own indexing regime, this is possible -- through the CLI's `--peaks-only` flag or the Python API's `peak_stream`.
