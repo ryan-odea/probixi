@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "probixi"
-version = "0.5.0"
+version = "0.6.0"
 description = "Self-Calibrating Probabilistic Peak Finding for Serial X-Ray Crystallographic Data"
 readme = "README.md"
 license = { text = "MIT" }
@@ -46,6 +46,7 @@ dependencies = [
 
 [project.scripts]
 probixi = "probixi.cli:main"
+probixi-resolve = "probixi.ambigator:main"
 
 [project.optional-dependencies]
 gpu = ["triton>=3.5", "nvidia-libnvcomp-cu12==5.3.0.16"]

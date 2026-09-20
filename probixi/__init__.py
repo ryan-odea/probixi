@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from .ambigator import Ambigator, AmbigatorResult
 from .indexer import (
     CellMatchConfig,
     FrameIndexResult,
@@ -26,6 +27,9 @@ __all__ = [
     "RefineConfig",
     "CellMatchConfig",
     "IntegrateConfig",
+    # indexing ambiguity
+    "Ambigator",
+    "AmbigatorResult",
     # multi-GPU
     "run_data_parallel",
     "run_block_from_env",
