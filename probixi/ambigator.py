@@ -711,7 +711,9 @@ def _pass(cc, cc_r, valid, valid_r, partners, assignments):
 @click.option(
     "--highres", default=None, type=float, help="High-resolution cutoff in A."
 )
-@click.option("--seed", default=1988, show_default=True, help="Seeds the starting split.")
+@click.option(
+    "--seed", default=1988, show_default=True, help="Seeds the starting split."
+)
 @click.option("--device", default=None, help="Torch device, or 'auto'.")
 @click.option("--quiet", is_flag=True, help="Only report errors.")
 def main(
