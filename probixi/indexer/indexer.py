@@ -668,7 +668,9 @@ class Indexer:
             or (prev.unique_axis if prev is not None else None),
             centering=cell.centering or (prev.centering if prev is not None else None),
         )
-        self.B_target = cell_to_B(self.target_cell, device=self.device, dtype=self.dtype)
+        self.B_target = cell_to_B(
+            self.target_cell, device=self.device, dtype=self.dtype
+        )
         if self.seed.q_tolerance is not None:
             self.q_tolerance = float(self.seed.q_tolerance)
         else:

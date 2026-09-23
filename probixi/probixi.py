@@ -26,7 +26,6 @@ from .indexer import (
 from .indexer.forward import _lab_xy_pixels, _panel_bases, detector_to_q
 from .indexer.indexer import MIN_PEAKS_TO_INDEX
 from .indexer.integrate import radial_profile, radii_from_profile
-from .io.cell import median_cell
 from .io import (
     CellParams,
     DataLoader,
@@ -36,6 +35,7 @@ from .io import (
     read_mask,
     render_frame,
 )
+from .io.cell import median_cell
 from .kernels import Engine, use_engine
 from .peakfinding import PeakFinder, PeakStream
 from .peakfinding.noise import (
@@ -933,7 +933,11 @@ class Probixi:
         if self._beamstop_qmin:
             self._apply_beamstop_qmin(self._beamstop_qmin)
         self._sync_active_noise_sources()
-        if self.cell_calibrate and self.indexer is not None and not self.cell_calibrations:
+        if (
+            self.cell_calibrate
+            and self.indexer is not None
+            and not self.cell_calibrations
+        ):
             self._calibrate_cell(seed)
         return result
 
@@ -1165,7 +1169,9 @@ class Probixi:
                         if len(pending_cells) >= self.cell_calibrate_after:
                             self._recalibrate_cell(pending_cells)
                             rounds += 1
-                            pending_cells = [] if rounds < self.cell_calibrate_rounds else None
+                            pending_cells = (
+                                [] if rounds < self.cell_calibrate_rounds else None
+                            )
                     index += 1
                     yield result
                 if limit is None:
@@ -1179,9 +1185,17 @@ class Probixi:
         if self._cell_origin is None:
             self._cell_origin = old
         new = median_cell(cells, template=old)
-        edge_shift = max(abs(n / o - 1.0) for n, o in ((new.a, old.a), (new.b, old.b), (new.c, old.c)))
+        edge_shift = max(
+            abs(n / o - 1.0)
+            for n, o in ((new.a, old.a), (new.b, old.b), (new.c, old.c))
+        )
         angle_shift = max(
-            abs(n - o) for n, o in ((new.alpha, old.alpha), (new.beta, old.beta), (new.gamma, old.gamma))
+            abs(n - o)
+            for n, o in (
+                (new.alpha, old.alpha),
+                (new.beta, old.beta),
+                (new.gamma, old.gamma),
+            )
         )
         applied = self.indexer._cell_matches_target(new, self._cell_origin)
         if applied:
