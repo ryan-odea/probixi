@@ -650,17 +650,38 @@ class Indexer:
         self._bg_annulus_pixels: Optional[float] = None
         self._measured_radii: Optional[tuple[float, float, float]] = None
         self._q_max: Optional[float] = None
-        self.B_target = cell_to_B(target_cell, device=device, dtype=self.dtype)
+        self.set_target_cell(target_cell)
 
+    def set_target_cell(self, cell: CellParams) -> None:
+        """Re-centre indexing on ``cell``."""
+        prev = getattr(self, "target_cell", None)
+        self.target_cell = CellParams(
+            cell.a,
+            cell.b,
+            cell.c,
+            cell.alpha,
+            cell.beta,
+            cell.gamma,
+            lattice_type=cell.lattice_type
+            or (prev.lattice_type if prev is not None else None),
+            unique_axis=cell.unique_axis
+            or (prev.unique_axis if prev is not None else None),
+            centering=cell.centering or (prev.centering if prev is not None else None),
+        )
+        self.B_target = cell_to_B(
+            self.target_cell, device=self.device, dtype=self.dtype
+        )
         if self.seed.q_tolerance is not None:
             self.q_tolerance = float(self.seed.q_tolerance)
         else:
             min_spacing = float(torch.linalg.vector_norm(self.B_target, dim=0).min())
             self.q_tolerance = self.seed.q_tolerance_fraction * min_spacing
 
-    def _cell_matches_target(self, cell: CellParams) -> bool:
+    def _cell_matches_target(
+        self, cell: CellParams, target: Optional[CellParams] = None
+    ) -> bool:
         # Compare sorted edges/angles so the match is invariant to axis labelling.
-        tc = self.target_cell
+        tc = target or self.target_cell
         tol = self.cell_match.edge_tolerance
         angle_tol = self.cell_match.angle_tolerance_rad
         edges_obs = sorted([cell.a, cell.b, cell.c])

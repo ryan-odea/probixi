@@ -3,6 +3,7 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass
 from pathlib import Path
+from statistics import median
 from typing import Optional, Union
 
 PathLike = Union[str, Path]
@@ -138,4 +139,23 @@ def read_crystfel_cell(path: PathLike) -> CellParams:
         lattice_type=meta.get("lattice_type"),
         unique_axis=meta.get("unique_axis"),
         centering=meta.get("centering"),
+    )
+
+
+def median_cell(cells, template: Optional[CellParams] = None) -> CellParams:
+    """Component-wise median of ``cells``"""
+    cells = list(cells)
+    if not cells:
+        raise ValueError("median_cell needs at least one cell")
+    meta = template if template is not None else cells[0]
+    return CellParams(
+        a=median(c.a for c in cells),
+        b=median(c.b for c in cells),
+        c=median(c.c for c in cells),
+        alpha=median(c.alpha for c in cells),
+        beta=median(c.beta for c in cells),
+        gamma=median(c.gamma for c in cells),
+        lattice_type=meta.lattice_type,
+        unique_axis=meta.unique_axis,
+        centering=meta.centering,
     )

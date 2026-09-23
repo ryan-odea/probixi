@@ -178,6 +178,8 @@ class BlockConfig:
     panel: str = "0"
     enrich_gate: bool = False
     enrich_alpha: float = 1e-3
+    cell_calibrate: bool = True
+    cell_calibrate_after: int = 200
     threads: Optional[int] = None
     quiet: bool = False
     db: bool = False  # write per-rank DuckDB parts instead of .stream parts
@@ -222,6 +224,8 @@ def run_block(
         integrate=cfg.integrate,
         refine=cfg.refine,
         peak_size_max=cfg.peak_size_max,
+        cell_calibrate=cfg.cell_calibrate,
+        cell_calibrate_after=cfg.cell_calibrate_after,
     )
     if p.indexer is None:
         raise RuntimeError("multi-GPU indexing requires a cell_file")
@@ -259,10 +263,21 @@ def run_block(
         offload_kwargs["frame_range"] = (lo, hi)
     else:
         offloader = DataOffloader
+    n_cellcal = 0
     with offloader(part_path, **offload_kwargs) as off:
         for result in stream:
             off.write(result)
             n += bool(result.crystals)
+            while n_cellcal < len(p.cell_calibrations):
+                if not cfg.quiet:
+                    from .cli import format_cell_calibration
+
+                    print(
+                        f"[rank {rank}/{world_size}] "
+                        + format_cell_calibration(p.cell_calibrations[n_cellcal]),
+                        flush=True,
+                    )
+                n_cellcal += 1
 
     stats = {
         "rank": rank,
@@ -319,6 +334,8 @@ def run_data_parallel(
     panel: str = "0",
     enrich_gate: bool = False,
     enrich_alpha: float = 1e-3,
+    cell_calibrate: bool = True,
+    cell_calibrate_after: int = 200,
     threads_per_worker: Optional[int] = None,
     keep_parts: bool = False,
     quiet: bool = False,
@@ -362,6 +379,8 @@ def run_data_parallel(
         panel=panel,
         enrich_gate=enrich_gate,
         enrich_alpha=enrich_alpha,
+        cell_calibrate=cell_calibrate,
+        cell_calibrate_after=cell_calibrate_after,
         threads=threads_per_worker,
         quiet=quiet,
         db=is_duckdb_path(output),
