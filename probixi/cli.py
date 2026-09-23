@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import time
 from pathlib import Path
 from typing import Any, Literal, Optional, cast
@@ -37,6 +38,23 @@ def _resolve_cli_devices(
     if device and device.strip().lower() != "auto":
         return [torch.device(device)]
     return None
+
+
+def format_cell_calibration(cc) -> str:
+    c = cc.cell
+    if not cc.applied:
+        return (
+            f"Cell NOT re-centred: median of {cc.n_lattices} lattices "
+            f"a={c.a:.3f} b={c.b:.3f} c={c.c:.3f} lies outside the cell file's match window"
+        )
+    return (
+        f"Cell re-centred on {cc.n_lattices} lattices: "
+        f"a={c.a:.3f} b={c.b:.3f} c={c.c:.3f} "
+        f"al={math.degrees(c.alpha):.2f} be={math.degrees(c.beta):.2f} "
+        f"ga={math.degrees(c.gamma):.2f} "
+        f"(target moved {100 * cc.edge_shift:.2f}% on edges, "
+        f"{math.degrees(cc.angle_shift):.3f} deg on angles)"
+    )
 
 
 def _run_multi_gpu(device_list: list, **kw) -> None:
@@ -77,6 +95,8 @@ def _run_multi_gpu(device_list: list, **kw) -> None:
         refine=kw["refine"],
         integrate=kw["integrate"],
         recalibrate_every=kw["recalibrate_every"],
+        cell_calibrate=kw["cell_calibrate"],
+        cell_calibrate_after=kw["cell_calibrate_after"],
     )
 
 
@@ -288,6 +308,21 @@ def _run_multi_gpu(device_list: list, **kw) -> None:
     help="Size the learned integration disk for background-limited "
     "signal-to-noise (smaller on narrow spots) or for total flux (2% profile radius).",
 )
+@click.option(
+    "--cell-calibrate/--no-cell-calibrate",
+    default=True,
+    show_default=True,
+    help="Re-centre the target cell on the median refined cell of the calibration "
+    "frames' lattices and then of the first accepted lattices (twice), so the cell "
+    "file only has to bootstrap; absorbs a cell/camera-length inconsistency.",
+)
+@click.option(
+    "--cell-calibrate-after",
+    type=int,
+    default=200,
+    show_default=True,
+    help="Accepted lattices pooled before each re-centring under --cell-calibrate.",
+)
 def main(
     list_file: str,
     geometry_file: str,
@@ -320,6 +355,8 @@ def main(
     force_all: bool,
     no_refine_cell: bool,
     aperture: str,
+    cell_calibrate: bool,
+    cell_calibrate_after: int,
 ) -> None:
     """Run the probixi pipeline and write indexed frames to a CrystFEL stream.
 
@@ -366,6 +403,8 @@ def main(
             enrich_alpha=enrich_alpha,
             threads_per_worker=threads_per_worker,
             quiet=quiet,
+            cell_calibrate=cell_calibrate,
+            cell_calibrate_after=cell_calibrate_after,
         )
         return
 
@@ -383,6 +422,8 @@ def main(
         seed=SeedConfig(max_lattices=max_lattices),
         refine=refine_cfg,
         integrate=integrate_cfg,
+        cell_calibrate=cell_calibrate,
+        cell_calibrate_after=cell_calibrate_after,
     )
 
     meta = probixi.metadata
@@ -501,10 +542,16 @@ def main(
     with offloader(output, **offload_kwargs) as off:
         n = 0
         n_screened = 0
+        n_cellcal = 0
         for result in stream:
             off.write(result)
             n += bool(result.crystals)
             if not quiet:
+                while n_cellcal < len(probixi.cell_calibrations):
+                    click.echo(
+                        format_cell_calibration(probixi.cell_calibrations[n_cellcal])
+                    )
+                    n_cellcal += 1
                 # screened_frames grows as the stream consumes frames
                 while n_screened < len(probixi.screened_frames):
                     idx = probixi.screened_frames[n_screened]

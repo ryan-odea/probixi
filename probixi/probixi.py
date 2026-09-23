@@ -26,6 +26,7 @@ from .indexer import (
 from .indexer.forward import _lab_xy_pixels, _panel_bases, detector_to_q
 from .indexer.indexer import MIN_PEAKS_TO_INDEX
 from .indexer.integrate import radial_profile, radii_from_profile
+from .io.cell import median_cell
 from .io import (
     CellParams,
     DataLoader,
@@ -139,6 +140,35 @@ def citation(timeout: float = 3.0) -> str:
 
 
 @dataclass
+class CellCalibration:
+    """One run-level re-centring of the target cell (see ``Probixi.cell_calibrate``).
+
+    Attributes
+    ----------
+    n_lattices : int
+        Accepted lattices whose refined cells were pooled.
+    cell : CellParams
+        The new target: component-wise median of those cells.
+    previous : CellParams
+        The target it replaced.
+    edge_shift : float
+        Largest relative change over a, b, c.
+    angle_shift : float
+        Largest absolute change over alpha, beta, gamma (radians).
+    applied : bool
+        False when the median fell outside the file cell's match window
+        and the target was left alone.
+    """
+
+    n_lattices: int
+    cell: CellParams
+    previous: CellParams
+    edge_shift: float
+    angle_shift: float
+    applied: bool = True
+
+
+@dataclass
 class Probixi:
     """Self-calibrating probabilistic peak finder and indexer.
 
@@ -212,6 +242,11 @@ class Probixi:
     flux_variance: bool = False
     flux_var_floor: float = 0.15
     random_seed: int = 1988
+    cell_calibrate: bool = True
+    cell_calibrate_after: int = 200
+    cell_calibrate_rounds: int = 2
+    cell_calibrate_warn: float = 0.005
+    cell_calibrate_alpha: float = 1e-3
     seed: Optional[SeedConfig] = None
     refine: Optional[RefineConfig] = None
     cell_match: Optional[CellMatchConfig] = None
@@ -227,6 +262,8 @@ class Probixi:
     _level_ref: Optional[float] = field(default=None, init=False, repr=False)
     _shadow_fraction: float = field(default=0.0, init=False, repr=False)
     screened_frames: list = field(default_factory=list, init=False, repr=False)
+    cell_calibrations: list = field(default_factory=list, init=False, repr=False)
+    _cell_origin: Optional[CellParams] = field(default=None, init=False, repr=False)
     _noise: Optional[NoiseModel] = field(default=None, init=False, repr=False)
     _finder: Optional[PeakFinder] = field(default=None, init=False, repr=False)
     _scale_ref: Optional[ScaleReference] = field(default=None, init=False, repr=False)
@@ -896,7 +933,23 @@ class Probixi:
         if self._beamstop_qmin:
             self._apply_beamstop_qmin(self._beamstop_qmin)
         self._sync_active_noise_sources()
+        if self.cell_calibrate and self.indexer is not None and not self.cell_calibrations:
+            self._calibrate_cell(seed)
         return result
+
+    def _calibrate_cell(self, frames: list[Tensor]) -> None:
+        n_screened = len(self.screened_frames)
+        tc = self.threshold_calibration
+        results = self.indexer.index_frame_stream(
+            self.peak_stream(frames, update_noise=False),
+            bright_threshold=tc.threshold if tc is not None else self.mf_threshold,
+            enrich_alpha=self.cell_calibrate_alpha,
+        )
+        cells = [c.cell for r in results for c in r.crystals]
+        del self.screened_frames[n_screened:]
+        self._frame_scales.clear()
+        if len(cells) >= max(1, self.cell_calibrate_after // 10):
+            self._recalibrate_cell(cells)
 
     @property
     def beamstop_min_res(self) -> Optional[float]:
@@ -1060,6 +1113,10 @@ class Probixi:
         def _gen() -> Iterator[FrameIndexResult]:
             source = iter(frames) if recalibrate_every is None else iter(_individual())
             index = start_index
+            pending_cells: Optional[list[CellParams]] = (
+                [] if self.cell_calibrate and self.cell_calibrate_rounds > 0 else None
+            )
+            rounds = 0
             while True:
                 try:
                     first = next(source)
@@ -1098,12 +1155,55 @@ class Probixi:
                     stats.hits += result.n_peaks >= MIN_PEAKS_TO_INDEX
                     stats.indexed += bool(result.crystals)
                     stats.crystals += len(result.crystals)
+                    if pending_cells is not None and result.crystals:
+                        pending_cells.extend(
+                            c.cell
+                            for c in result.crystals
+                            if c.enrich_p is not None
+                            and c.enrich_p <= self.cell_calibrate_alpha
+                        )
+                        if len(pending_cells) >= self.cell_calibrate_after:
+                            self._recalibrate_cell(pending_cells)
+                            rounds += 1
+                            pending_cells = [] if rounds < self.cell_calibrate_rounds else None
                     index += 1
                     yield result
                 if limit is None:
                     break
 
         return FrameIndexStream(_gen(), stats=stats)
+
+    def _recalibrate_cell(self, cells: list[CellParams]) -> None:
+        assert self.indexer is not None
+        old = self.indexer.target_cell
+        if self._cell_origin is None:
+            self._cell_origin = old
+        new = median_cell(cells, template=old)
+        edge_shift = max(abs(n / o - 1.0) for n, o in ((new.a, old.a), (new.b, old.b), (new.c, old.c)))
+        angle_shift = max(
+            abs(n - o) for n, o in ((new.alpha, old.alpha), (new.beta, old.beta), (new.gamma, old.gamma))
+        )
+        applied = self.indexer._cell_matches_target(new, self._cell_origin)
+        if applied:
+            self.indexer.set_target_cell(new)
+            new = self.indexer.target_cell
+        self.cell_calibrations.append(
+            CellCalibration(len(cells), new, old, edge_shift, angle_shift, applied)
+        )
+        if not applied:
+            warnings.warn(
+                f"target cell NOT re-centred: the median of {len(cells)} lattices lies "
+                "outside the match window of the cell file; check the cell and geometry.",
+                stacklevel=2,
+            )
+        elif edge_shift > self.cell_calibrate_warn:
+            warnings.warn(
+                f"target cell re-centred by {100 * edge_shift:.2f}% on its edges "
+                f"after {len(cells)} lattices: the cell file and the geometry's "
+                "camera length were inconsistent (cell scale and camera length "
+                "are degenerate). Indexing continues on the data-derived cell.",
+                stacklevel=2,
+            )
 
     def _recalibrate(self, boundary: int) -> None:
         options = self._calibration_options.copy()

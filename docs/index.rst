@@ -30,3 +30,4 @@
    overview/io
    overview/peakfinding
    overview/indexing
+   overview/method
