@@ -244,7 +244,10 @@ def test_pipeline_pools_only_gate_passing_lattices(monkeypatch):
 
     # the 9.0 lattices fail the enrichment gate (or carry no p) and never enter the pool
     cells = {0: [c(9.0), c(9.8)], 1: [c(9.0), c(9.9)], 2: [c(9.0), c(9.7)]}
-    p_of = lambda k: (0.5 if k.a == 9.0 else 1e-9)
+
+    def p_of(k):
+        return 0.5 if k.a == 9.0 else 1e-9
+
     p, calls = _fake_pipeline(monkeypatch, cells, after=3, p_of=p_of)
     list(p.index_frame_stream((torch.zeros((1, 1)) for _ in range(3)), batch_size=1))
     assert [round(k.a, 6) for k in calls] == [9.8]

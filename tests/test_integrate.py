@@ -9,10 +9,13 @@ import torch
 from probixi.indexer import IndexResult, RefineConfig, SeedConfig
 from probixi.indexer.indexer import Indexer
 from probixi.indexer.integrate import (
+    choose_aperture,
     integrate_rings,
     keep_non_overlapping,
+    nearest_neighbour_distance,
     radial_profile,
     radii_from_profile,
+    ring_sums,
     snap_positions,
     snr_disk_radius,
 )
@@ -430,3 +433,111 @@ def test_snr_disk_radius_matches_the_background_limited_optimum():
     centres = (torch.rand(30, 2, generator=g) * 260 + 30).round()
     profile = radial_profile(_planted(2.0, centres), centres.float())
     assert snr_disk_radius(profile, 16.0) == pytest.approx(3.5, abs=1.0)
+
+
+def _crystals(n_cryst=12, per=10, seed=0):
+    # spots of n_cryst crystals, each on its own frame, at random positions
+    g = torch.Generator().manual_seed(seed)
+    centres = (torch.rand(n_cryst * per, 2, generator=g) * 260 + 30).round()
+    frame = torch.arange(n_cryst).repeat_interleave(per)
+    q = ((centres.float() - 160) ** 2).sum(-1).sqrt()
+    return centres, frame, q / q.max()
+
+
+def _ring_data(
+    psf, centres, shape=(320, 320), noise=4.0, seed=0, background=0.0, extra=None
+):
+    # spots of per-centre width psf (scalar or (N,)) on Gaussian noise over a
+    # background (a per-spot local offset the annulus must remove); |q| is the
+    # distance from the frame centre
+    g = torch.Generator().manual_seed(seed)
+    yy, xx = torch.meshgrid(
+        torch.arange(shape[0]).float(), torch.arange(shape[1]).float(), indexing="ij"
+    )
+    excess = torch.randn(shape, generator=g) * noise + background * (xx / shape[1])
+    if extra is not None:
+        excess += extra
+    psf = torch.as_tensor(psf).float().expand(len(centres))
+    for (r, c), s in zip(centres, psf):
+        excess += 2000.0 * torch.exp(-(((yy - r) ** 2 + (xx - c) ** 2) / (2 * s * s)))
+    sums, counts, sq = ring_sums(excess, centres.float(), squares=True)
+    q = ((centres.float() - shape[0] / 2) ** 2).sum(-1).sqrt()
+    return sums, sq, counts, q, nearest_neighbour_distance(centres.float())
+
+
+SNR_RADII, FLUX_RADII = (1.5, 5.0, 7.2), (4.0, 5.0, 7.2)
+
+
+def _decide(psf, centres, frame, **kw):
+    sums, sq, counts, q, nn = _ring_data(psf, centres, **kw)
+    return choose_aperture(
+        sums, sq, counts, q, frame, SNR_RADII, FLUX_RADII, nn_dist=nn
+    )
+
+
+def test_ring_sums_agree_with_the_radial_profile():
+    g = torch.Generator().manual_seed(0)
+    centres = (torch.rand(20, 2, generator=g) * 260 + 30).round()
+    excess = _planted(2.0, centres)
+    total, counts, sq = ring_sums(excess, centres.float(), squares=True)
+    assert total.shape == counts.shape == sq.shape == (20, 17)
+    assert torch.allclose(
+        (total / counts.clamp_min(1)).median(0).values,
+        radial_profile(excess, centres.float()),
+    )
+    # rings 0..3 (offsets rounding to that distance) hold 1, 8, 12, 16 pixels
+    assert counts[0, :4].tolist() == [1.0, 8.0, 12.0, 16.0]
+    assert torch.all(sq >= 0)
+
+
+def test_auto_aperture_keeps_snr_for_a_constant_spot_shape():
+    centres, frame, _ = _crystals(seed=3)
+    choice, diag = _decide(1.2, centres, frame, background=40.0)
+    assert choice == "snr", diag
+    assert diag["n_crystals"] >= 10 and diag["crystal_spread"] < 0.02
+
+
+def test_auto_aperture_absorbs_a_resolution_trend_common_to_all_crystals():
+    # every crystal's spots broaden alike with |q|: a common B, not a bias
+    centres, frame, u = _crystals(seed=4)
+    choice, diag = _decide(0.9 + 0.8 * u, centres, frame)
+    assert choice == "snr", diag
+    assert diag["common_trend"] < -0.05  # the trend is there, and ignored
+
+
+def test_auto_aperture_falls_back_to_flux_when_crystals_broaden_differently():
+    # mosaicity differing between crystals: the |q| slope of the captured
+    # fraction is crystal-specific and no scale or B removes it
+    centres, frame, u = _crystals(seed=5)
+    eta = 1.6 * (frame.float() / frame.max())
+    choice, diag = _decide(0.9 + eta * u, centres, frame)
+    assert choice == "flux", diag
+    assert diag["crystal_spread"] >= 0.02 and diag["spread_z"] >= 3
+
+
+def test_auto_aperture_ignores_a_diffuse_halo_common_to_all_crystals():
+    centres, frame, u = _crystals(seed=6)
+    yy, xx = torch.meshgrid(
+        torch.arange(320).float(), torch.arange(320).float(), indexing="ij"
+    )
+    halo = torch.zeros(320, 320)
+    for (r, c), uu in zip(centres, u):
+        halo += 400.0 * uu * torch.exp(-(((yy - r) ** 2 + (xx - c) ** 2) / 72.0))
+    choice, diag = _decide(1.2, centres, frame, extra=halo)
+    assert choice == "snr", diag
+
+
+def test_auto_aperture_needs_enough_strong_peaks_and_crystals():
+    centres, frame, _ = _crystals(n_cryst=2, per=5, seed=7)
+    choice, diag = _decide(1.2, centres, frame)
+    assert choice == "snr" and diag["reason"] == "too few strong peaks"
+    centres, frame, _ = _crystals(n_cryst=6, per=12, seed=8)
+    choice, diag = _decide(1.2, centres, frame)
+    assert choice == "snr" and diag["reason"].startswith("too few crystals")
+    sums, sq, counts, q, nn = _ring_data(1.2, centres)
+    assert (
+        choose_aperture(sums, sq, counts, q, frame, FLUX_RADII, FLUX_RADII, nn_dist=nn)[
+            0
+        ]
+        == "flux"
+    )

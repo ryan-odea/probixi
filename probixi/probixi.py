@@ -25,7 +25,12 @@ from .indexer import (
 )
 from .indexer.forward import _lab_xy_pixels, _panel_bases, detector_to_q
 from .indexer.indexer import MIN_PEAKS_TO_INDEX
-from .indexer.integrate import radial_profile, radii_from_profile
+from .indexer.integrate import (
+    choose_aperture,
+    nearest_neighbour_distance,
+    radii_from_profile,
+    ring_sums,
+)
 from .io import (
     CellParams,
     DataLoader,
@@ -74,6 +79,7 @@ _SHADOW_CORE_FRACTION = 0.5
 _RADII_MIN_FRAMES = 32
 _RADII_MAX_FRAMES = 512
 _RADII_MIN_PEAKS = 200
+_APERTURE_MIN_PEAKS = 4000  # "auto" needs strong, isolated peaks: sample more
 
 
 # --- BEGIN GENERATED CITATION ---
@@ -81,7 +87,7 @@ _CITATION = r"""
 @software{odea_probixi,
   author  = {O'Dea, Ryan and Weinert, Tobias},
   title   = {{probixi}: Self-Calibrating Probabilistic Peak Finding for Serial X-Ray Crystallographic Data},
-  version = {0.6.0},
+  version = {0.7.0},
   year    = {2026},
   url     = {https://github.com/ryan-odea/probixi}
 }
@@ -310,6 +316,20 @@ class Probixi:
         return self.indexer._measured_radii
 
     @property
+    def aperture_choice(self) -> Optional[tuple[str, dict]]:
+        """``(aperture, diagnostics)`` of an ``"auto"`` aperture after calibrate.
+
+        ``None`` unless :meth:`calibrate` measured the choice. The diagnostics
+        hold the strong-peak count ``n``, the captured fraction ``f_mean`` and
+        its per-|q|-bin means ``f_bins``, the relative ``trend`` (with its
+        ``trend_z``) and excess ``scatter``, both radii and the ``reason``.
+        """
+        diag = getattr(self, "_aperture_diag", None)
+        if diag is None or self.indexer is None:
+            return None
+        return self.indexer._aperture(), diag
+
+    @property
     def integration_recipe(self) -> Optional[dict]:
         """Integration settings recorded in the stream header / database.
 
@@ -325,7 +345,7 @@ class Probixi:
             radii=tuple(float(r) for r in self.indexer._radii()),
             adu_per_photon=self.indexer._adu_per_photon(),
             bg_annulus_pixels=self.indexer._bg_annulus_pixels,
-            aperture=self.indexer.integrate.aperture,
+            aperture=self.indexer._aperture(),
         )
 
     @property
@@ -671,6 +691,8 @@ class Probixi:
         profile = None
         n_peaks = 0
         n_frames = 0
+        auto = self.indexer.integrate.aperture == "auto"
+        sums, sqs, cnts, qs, nns, frames, qmap = [], [], [], [], [], [], None
         for res in self.peak_stream(
             self._frames_at(self._sample_frame_indices(_RADII_MAX_FRAMES, exclude)),
             update_noise=False,
@@ -678,7 +700,9 @@ class Probixi:
         ):
             n_frames += 1
             # stop once the profile rests on enough frames and enough peaks
-            if n_frames > _RADII_MIN_FRAMES and n_peaks >= _RADII_MIN_PEAKS:
+            if n_frames > _RADII_MIN_FRAMES and n_peaks >= (
+                _APERTURE_MIN_PEAKS if auto else _RADII_MIN_PEAKS
+            ):
                 break
             excess = res.scores.get("excess") if res.scores else None
             ks = res.kept_stats
@@ -687,12 +711,68 @@ class Probixi:
             positions = torch.stack([ks.row_centroid, ks.col_centroid], dim=-1).to(
                 excess
             )
-            one = radial_profile(excess, positions, pixel_valid=res.valid_mask)
+            total, counts, sq = ring_sums(
+                excess, positions, pixel_valid=res.valid_mask, squares=auto
+            )
+            one = (total / counts.clamp_min(1.0)).median(dim=0).values
             profile = one if profile is None else profile + one
             n_peaks += int(positions.shape[0])
+            if auto and sq is not None:
+                if qmap is None:
+                    qmap = self._qmap(tuple(excess.shape), device=excess.device)
+                if qmap is None:
+                    auto = False
+                    continue
+                c = positions.round().long()
+                qs.append(
+                    qmap[
+                        c[:, 0].clamp(0, excess.shape[0] - 1),
+                        c[:, 1].clamp(0, excess.shape[1] - 1),
+                    ]
+                )
+                sums.append(total)
+                sqs.append(sq)
+                cnts.append(counts)
+                nns.append(nearest_neighbour_distance(positions))
+                frames.append(
+                    torch.full((len(positions),), n_frames, device=positions.device)
+                )
         if profile is None or n_peaks < _RADII_MIN_PEAKS:
             return None
-        return radii_from_profile(profile, snr=self.indexer.integrate.aperture == "snr")
+        aperture = self.indexer.integrate.aperture
+        if auto and sums:
+            flux = radii_from_profile(profile)
+            snr = radii_from_profile(profile, snr=True)
+            if flux is None or snr is None:
+                return None
+            aperture, diag = choose_aperture(
+                torch.cat(sums),
+                torch.cat(sqs),
+                torch.cat(cnts),
+                torch.cat(qs),
+                torch.cat(frames),
+                snr,
+                flux,
+                adu_per_photon=self.indexer._adu_per_photon(),
+                tolerance=self.indexer.integrate.aperture_tolerance,
+                nn_dist=torch.cat(nns),
+            )
+            self.indexer._resolved_aperture = aperture
+            self._aperture_diag = diag
+            # what the decision saw, for offline inspection
+            self._aperture_data = dict(
+                sums=torch.cat(sums).cpu(),
+                squares=torch.cat(sqs).cpu(),
+                counts=torch.cat(cnts).cpu(),
+                q=torch.cat(qs).cpu(),
+                nn_dist=torch.cat(nns).cpu(),
+                frame=torch.cat(frames).cpu(),
+                radii_snr=snr,
+                radii_flux=flux,
+                adu_per_photon=self.indexer._adu_per_photon(),
+            )
+            return snr if aperture == "snr" else flux
+        return radii_from_profile(profile, snr=aperture != "flux")
 
     def _apply_beamstop_qmin(self, q_min: float) -> None:
         # AND a |q| >= q_min beam-center exclusion into the noise model's masks so
