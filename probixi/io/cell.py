@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from statistics import median
 from pathlib import Path
+from statistics import median
 from typing import Optional, Union
 
 PathLike = Union[str, Path]

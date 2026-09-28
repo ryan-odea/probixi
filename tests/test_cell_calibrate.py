@@ -43,7 +43,9 @@ def _rel(x: float, y: float) -> float:
 
 
 def test_median_cell_is_componentwise_and_keeps_template_metadata():
-    template = CellParams(10, 20, 30, math.pi / 2, 1.8, math.pi / 2, "monoclinic", "b", "C")
+    template = CellParams(
+        10, 20, 30, math.pi / 2, 1.8, math.pi / 2, "monoclinic", "b", "C"
+    )
     cells = [
         CellParams(9.0, 21.0, 30.5, math.pi / 2, 1.81, math.pi / 2),
         CellParams(10.0, 19.0, 29.0, math.pi / 2, 1.79, math.pi / 2),
@@ -57,10 +59,14 @@ def test_median_cell_is_componentwise_and_keeps_template_metadata():
         median_cell([])
 
 
-def test_set_target_cell_rebuilds_basis_tolerance_and_keeps_metadata(geometry_dict, cell):
+def test_set_target_cell_rebuilds_basis_tolerance_and_keeps_metadata(
+    geometry_dict, cell
+):
     idxr = Indexer(geometry_dict, cell, seed=SEED)
     B0, tol0 = idxr.B_target.clone(), idxr.q_tolerance
-    bare = CellParams(cell.a * 1.01, cell.b * 1.01, cell.c * 1.01, cell.alpha, cell.beta, cell.gamma)
+    bare = CellParams(
+        cell.a * 1.01, cell.b * 1.01, cell.c * 1.01, cell.alpha, cell.beta, cell.gamma
+    )
     idxr.set_target_cell(bare)
     # reciprocal basis and the derived |q| tolerance both shrink by 1 %
     assert torch.allclose(idxr.B_target, B0 / 1.01, rtol=1e-5, atol=0)
@@ -110,7 +116,9 @@ def _fake_pipeline(monkeypatch, cells_per_frame, **opts):
     p._cell_origin = None
     p.screened_frames = []
     p.cell_calibrations = []
-    target = CellParams(10.0, 20.0, 30.0, math.pi / 2, 1.8, math.pi / 2, "monoclinic", "b", "C")
+    target = CellParams(
+        10.0, 20.0, 30.0, math.pi / 2, 1.8, math.pi / 2, "monoclinic", "b", "C"
+    )
     calls: list[CellParams] = []
     p_of = opts.get("p_of", lambda c: 1e-6)
 
@@ -124,23 +132,36 @@ def _fake_pipeline(monkeypatch, cells_per_frame, **opts):
 
         def _cell_matches_target(self, cell, target=None):
             t = target or self.target_cell
-            return all(abs(x / y - 1) <= 0.05 for x, y in ((cell.a, t.a), (cell.b, t.b), (cell.c, t.c)))
+            return all(
+                abs(x / y - 1) <= 0.05
+                for x, y in ((cell.a, t.a), (cell.b, t.b), (cell.c, t.c))
+            )
 
-        def index_frame_stream(self, peaks, batch_size=8, bright_threshold=None, enrich_alpha=None):
+        def index_frame_stream(
+            self, peaks, batch_size=8, bright_threshold=None, enrich_alpha=None
+        ):
             stats = IndexStats()
 
             def generate():
                 for i, _ in peaks:
                     crystals = [
-                        SimpleNamespace(cell=c, enrich_p=p_of(c), scale=None, scale_sigma=None)
+                        SimpleNamespace(
+                            cell=c, enrich_p=p_of(c), scale=None, scale_sigma=None
+                        )
                         for c in cells_per_frame[i]
                     ]
                     stats.frames += 1
-                    yield FrameIndexResult(i, crystals, torch.empty((0, 2)), torch.empty(0))
+                    yield FrameIndexResult(
+                        i, crystals, torch.empty((0, 2)), torch.empty(0)
+                    )
 
             return FrameIndexStream(generate(), stats)
 
-    monkeypatch.setattr(p, "peak_stream", lambda frames, start_index=0, update_noise=True: enumerate(frames, start_index))
+    monkeypatch.setattr(
+        p,
+        "peak_stream",
+        lambda frames, start_index=0, update_noise=True: enumerate(frames, start_index),
+    )
     p.indexer = FakeIndexer()
     return p, calls
 
@@ -151,16 +172,35 @@ def test_pipeline_recentres_on_median_after_n_lattices_for_n_rounds(monkeypatch)
 
     # frame 0: 2 lattices, frame 1: none, frame 2: 1 -> first round after frame 2;
     # frames 3-5: one each -> second round after frame 5; frames 6-7 pooled no more
-    cells = {0: [c(9.6), c(9.8)], 1: [], 2: [c(9.7)], 3: [c(9.8)], 4: [c(9.9)], 5: [c(9.85)], 6: [c(1.0)], 7: [c(1.0)]}
+    cells = {
+        0: [c(9.6), c(9.8)],
+        1: [],
+        2: [c(9.7)],
+        3: [c(9.8)],
+        4: [c(9.9)],
+        5: [c(9.85)],
+        6: [c(1.0)],
+        7: [c(1.0)],
+    }
     p, calls = _fake_pipeline(monkeypatch, cells, after=3, rounds=2)
     with pytest.warns(UserWarning, match="re-centred"):
-        out = list(p.index_frame_stream((torch.zeros((1, 1)) for _ in range(8)), batch_size=3))
+        out = list(
+            p.index_frame_stream((torch.zeros((1, 1)) for _ in range(8)), batch_size=3)
+        )
     assert [r.frame_index for r in out] == list(range(8))
-    assert [round(k.a, 6) for k in calls] == [9.7, 9.85]  # medians of {9.6,9.8,9.7} then {9.8,9.9,9.85}
+    assert [round(k.a, 6) for k in calls] == [
+        9.7,
+        9.85,
+    ]  # medians of {9.6,9.8,9.7} then {9.8,9.9,9.85}
     assert all(k.lattice_type == "monoclinic" and k.centering == "C" for k in calls)
     assert len(p.cell_calibrations) == 2
     first = p.cell_calibrations[0]
-    assert first.n_lattices == 3 and first.previous.a == 10.0 and first.cell.a == 9.7 and first.applied
+    assert (
+        first.n_lattices == 3
+        and first.previous.a == 10.0
+        and first.cell.a == 9.7
+        and first.applied
+    )
     assert first.edge_shift == pytest.approx(0.03)
     assert first.angle_shift == 0.0
     # every crystal still streamed through, including the ones after the last round
@@ -175,7 +215,9 @@ def test_pipeline_leaves_target_alone_when_disabled_or_starved(monkeypatch):
     p, calls = _fake_pipeline(monkeypatch, cells, cell_calibrate=False)
     list(p.index_frame_stream((torch.zeros((1, 1)) for _ in range(4)), batch_size=2))
     assert calls == [] and p.cell_calibrations == []
-    p, calls = _fake_pipeline(monkeypatch, cells, after=10)  # never reaches the pool size
+    p, calls = _fake_pipeline(
+        monkeypatch, cells, after=10
+    )  # never reaches the pool size
     list(p.index_frame_stream((torch.zeros((1, 1)) for _ in range(4)), batch_size=2))
     assert calls == [] and p.cell_calibrations == []
 
@@ -188,7 +230,9 @@ def test_pipeline_refuses_a_move_outside_the_file_cells_window(monkeypatch):
     cells = {i: [c(9.2)] for i in range(6)}
     p, calls = _fake_pipeline(monkeypatch, cells, after=3, rounds=1)
     with pytest.warns(UserWarning, match="NOT re-centred"):
-        out = list(p.index_frame_stream((torch.zeros((1, 1)) for _ in range(6)), batch_size=2))
+        out = list(
+            p.index_frame_stream((torch.zeros((1, 1)) for _ in range(6)), batch_size=2)
+        )
     assert calls == [] and len(out) == 6
     assert len(p.cell_calibrations) == 1 and not p.cell_calibrations[0].applied
     assert p.indexer.target_cell.a == 10.0
