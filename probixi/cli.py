@@ -302,11 +302,13 @@ def _run_multi_gpu(device_list: list, **kw) -> None:
 )
 @click.option(
     "--aperture",
-    type=click.Choice(["snr", "flux"]),
-    default="snr",
+    type=click.Choice(["snr", "flux", "auto"]),
+    default="auto",
     show_default=True,
     help="Size the learned integration disk for background-limited "
-    "signal-to-noise (smaller on narrow spots) or for total flux (2% profile radius).",
+    "signal-to-noise (smaller on narrow spots) or for total flux (2% profile "
+    "radius); auto keeps snr only if it captures a constant fraction of every "
+    "spot's flux on the calibration peaks, else flux.",
 )
 @click.option(
     "--cell-calibrate/--no-cell-calibrate",
@@ -463,6 +465,15 @@ def main(
             msg += " radii=({:.1f}, {:.1f}, {:.1f})px".format(*radii)
         else:
             msg += " radii=fallback"
+        choice = probixi.aperture_choice
+        if choice is not None:
+            ap, d = choice
+            msg += f" aperture={ap}"
+            if "f_mean" in d:
+                msg += " (f={:.2f} trend={:.1%} scatter={:.1%} n={})".format(
+                    d["f_mean"], d["trend"], d["scatter"], d["n"]
+                )
+            msg += f": {d['reason']}"
         click.echo(msg)
 
     if render:

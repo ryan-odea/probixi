@@ -49,15 +49,29 @@ def keep_non_overlapping(
 
 
 @torch.no_grad()
-def radial_profile(
+def nearest_neighbour_distance(positions: Tensor) -> Tensor:
+    # Distance (px) from each position to its closest other one
+    out = positions.new_full((len(positions),), float("inf"))
+    for start in range(0, len(positions), 512):
+        d2 = (positions[start : start + 512, None] - positions[None]).square().sum(-1)
+        row = torch.arange(len(d2), device=positions.device)
+        d2[row, start + row] = float("inf")
+        out[start : start + 512] = d2.amin(1).sqrt()
+    return out
+
+
+@torch.no_grad()
+def ring_sums(
     excess: Tensor,
     positions: Tensor,
     pixel_valid: Tensor | None = None,
     max_radius: int = 16,
-) -> Tensor:
-    out = excess.new_zeros(max_radius + 1)
-    if not len(positions):
-        return out
+    squares: bool = False,
+) -> tuple[Tensor, Tensor, Tensor | None]:
+    n_pk = len(positions)
+    if n_pk == 0:
+        z = excess.new_zeros(0, max_radius + 1)
+        return z, z.clone(), (z.clone() if squares else None)
     off = torch.arange(-max_radius, max_radius + 1, device=excess.device)
     dr, dc = torch.meshgrid(off, off, indexing="ij")
     dr = dr.flatten()
@@ -75,16 +89,32 @@ def radial_profile(
     )
     if pixel_valid is not None:
         ok &= pixel_valid.flatten()[flat]
-    values = torch.where(
-        ok, excess.flatten()[flat], torch.zeros_like(excess.flatten()[flat])
-    )
     # corners of the square stamp exceed max_radius but are already zeroed by
     # `ok`, so clamping their bin index is harmless
-    index = rbin.clamp(0, max_radius).expand_as(values)
-    total = excess.new_zeros(len(positions), max_radius + 1)
-    total.scatter_add_(1, index, values)
-    counts = excess.new_zeros(len(positions), max_radius + 1)
-    counts.scatter_add_(1, index, ok.to(excess.dtype))
+    index = rbin.clamp(0, max_radius).expand_as(flat)
+    values = torch.where(ok, excess.flatten()[flat], 0.0)
+
+    def gather(v: Tensor) -> Tensor:
+        out = excess.new_zeros(n_pk, max_radius + 1)
+        return out.scatter_add_(1, index, v.to(out.dtype))
+
+    return (
+        gather(values),
+        gather(ok.to(excess.dtype)),
+        (gather(values * values) if squares else None),
+    )
+
+
+@torch.no_grad()
+def radial_profile(
+    excess: Tensor,
+    positions: Tensor,
+    pixel_valid: Tensor | None = None,
+    max_radius: int = 16,
+) -> Tensor:
+    if len(positions) == 0:
+        return excess.new_zeros(max_radius + 1)
+    total, counts, _ = ring_sums(excess, positions, pixel_valid, max_radius)
     return (total / counts.clamp_min(1.0)).median(dim=0).values
 
 
@@ -154,6 +184,123 @@ def radii_from_profile(
         # annulus still clears the 2 % radius; only the signal disk shrinks
         r_sig = min(r_sig, snr_disk_radius(profile, r_sig))
     return r_sig, r_in, r_out
+
+
+@torch.no_grad()
+def choose_aperture(
+    sums: Tensor,
+    squares: Tensor,
+    counts: Tensor,
+    q: Tensor,
+    frame: Tensor,
+    radii_snr: tuple[float, float, float],
+    radii_flux: tuple[float, float, float],
+    adu_per_photon: float = 1.0,
+    tolerance: float = 0.02,
+    min_isig: float = 10.0,
+    min_peaks: int = 50,
+    min_crystals: int = 10,
+    nn_dist: Tensor | None = None,
+) -> tuple[str, dict]:
+    """Pick ``"snr"`` or ``"flux"`` from the calibration peaks' ring sums"""
+    r_snr, r_flux = radii_snr[0], radii_flux[0]
+    diag = dict(r_snr=float(r_snr), r_flux=float(r_flux), n_peaks=len(sums), n=0)
+    if r_snr >= r_flux:
+        return "flux", dict(diag, reason="snr disk is the flux disk")
+    k_s, k_f = int(math.floor(r_snr)), int(round(r_flux))
+    k_in, k_out = int(math.ceil(radii_flux[1])), int(math.floor(radii_flux[2]))
+    k_out = min(k_out, sums.shape[1] - 1)
+    sums, squares, counts = sums.double(), squares.double(), counts.double()
+    n_ann = counts[:, k_in : k_out + 1].sum(1)
+    s_ann = sums[:, k_in : k_out + 1].sum(1)
+    bg = s_ann / n_ann.clamp_min(1)
+    bgvar = (squares[:, k_in : k_out + 1].sum(1) - s_ann * bg) / (n_ann - 1).clamp_min(
+        1
+    )
+    n_s, n_f = counts[:, : k_s + 1].sum(1), counts[:, : k_f + 1].sum(1)
+    i_s = sums[:, : k_s + 1].sum(1) - n_s * bg
+    i_f = sums[:, : k_f + 1].sum(1) - n_f * bg
+    shot = i_s.clamp_min(0) * adu_per_photon
+    v_s = n_s * bgvar * (1 + n_s / n_ann.clamp_min(1)) + shot
+    v_f = (
+        n_f * bgvar * (1 + n_f / n_ann.clamp_min(1)) + i_f.clamp_min(0) * adu_per_photon
+    )
+
+    cov = n_s * bgvar * (1 + n_f / n_ann.clamp_min(1)) + shot
+    strong = (n_ann >= MIN_ANNULUS_PIXELS) & (i_s > 0) & (i_f > 0) & (v_f > 0)
+    strong &= i_f / v_f.clamp_min(1e-12).sqrt() >= min_isig
+    diag["n_strong"] = int(strong.sum())
+    if nn_dist is not None:
+        strong &= nn_dist.to(strong.device) >= 2 * r_flux + 1
+    diag["n"] = int(strong.sum())
+    if diag["n"] < min_peaks:
+        return "snr", dict(diag, reason="too few strong peaks")
+    i_s, i_f, v_s, v_f, cov = (t[strong] for t in (i_s, i_f, v_s, v_f, cov))
+    f = i_s / i_f
+    y = torch.log(f)
+    w = f * f / ((v_s - 2 * f * cov + f * f * v_f) / (i_f * i_f)).clamp_min(1e-12)
+    x = q.double()[strong] ** 2
+    diag["f_mean"] = float(f.mean())
+    order = torch.argsort(x)
+    n_bin = max(3, min(8, len(x) // 20))
+    edges = [(i * len(x)) // n_bin for i in range(n_bin + 1)]
+    bx, by = [], []
+    for lo, hi in zip(edges[:-1], edges[1:]):
+        sel = order[lo:hi]
+        bx.append(float((w[sel] * x[sel]).sum() / w[sel].sum()))
+        by.append(float((w[sel] * y[sel]).sum() / w[sel].sum()))
+    bx_t, by_t = x.new_tensor(bx), x.new_tensor(by)
+    pos = torch.bucketize(x, bx_t).clamp(1, len(bx) - 1)
+    x0, x1, y0, y1 = bx_t[pos - 1], bx_t[pos], by_t[pos - 1], by_t[pos]
+    common = y0 + (y1 - y0) * (x - x0) / (x1 - x0)
+    span = float(torch.quantile(x, 0.9) - torch.quantile(x, 0.5))
+    diag["common_trend"] = by[-1] - by[len(by) // 2]
+    y = y - common
+
+    # per-crystal weighted regression of the residual log f on |q|^2
+    crystal, c_idx = torch.unique(frame[strong], return_inverse=True)
+    J = len(crystal)
+
+    def acc(v: Tensor) -> Tensor:
+        return torch.zeros(J, dtype=x.dtype, device=x.device).index_add_(0, c_idx, v)
+
+    sw, swx, swy = acc(w), acc(w * x), acc(w * y)
+    xm, ym = swx / sw, swy / sw
+    sxx = acc(w * x * x) - sw * xm * xm
+    sxy = acc(w * x * y) - sw * xm * ym
+    syy = acc(w * y * y) - sw * ym * ym
+    n_j = acc(torch.ones_like(w))
+    ok = (n_j >= 3) & (sxx > 0)
+    diag["n_crystals"] = int(ok.sum())
+    if diag["n_crystals"] < min_crystals:
+        return "snr", dict(diag, reason="too few crystals with enough peaks")
+    b = (sxy / sxx)[ok]
+    var_b = (1.0 / sxx)[ok]
+
+    # per-reflection scatter beyond the noise model (sub-pixel centring, shape)
+    chi2_within = float(((syy - sxy * sxy / sxx)[ok]).sum() / (n_j[ok] - 2).sum())
+    var_b = var_b * max(chi2_within, 1.0)
+    b_mean = float((b / var_b).sum() / (1.0 / var_b).sum())
+    dof = diag["n_crystals"] - 1
+    dev = (b - b_mean) ** 2 / var_b
+
+    capped = dev.clamp_max(9.0)
+    excess = max(float(capped.mean()) / 0.995 - 1.0, 0.0) * float(var_b.median())
+    diag.update(
+        chi2_within=chi2_within,
+        residual_trend=b_mean * span,
+        crystal_spread=math.sqrt(excess) * span,
+        spread_z=(float(capped.sum()) - 0.995 * len(dev)) / math.sqrt(1.90 * len(dev)),
+        max_dev=float(dev.max()),
+        plain_chi2_red=float(dev.sum()) / dof,
+    )
+    if diag["crystal_spread"] >= tolerance and diag["spread_z"] >= 3.0:
+        return "flux", dict(
+            diag, reason="captured fraction's resolution trend differs between crystals"
+        )
+    return "snr", dict(
+        diag, reason="captured fraction's resolution trend is common to all crystals"
+    )
 
 
 @torch.no_grad()

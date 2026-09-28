@@ -399,12 +399,18 @@ class IntegrateConfig:
         Detector gain used for the signal shot-noise term in sigma(I). ``None``
         auto-detects it from the measured photon-transfer gain, else the
         geometry (``adu_per_eV * photon_energy``), else 1.0.
-    aperture : {"snr", "flux"}
+    aperture : {"snr", "flux", "auto"}
         How the learned signal disk is sized from the measured spot profile.
-        ``"snr"`` (default) takes the radius maximising background-limited
+        ``"snr"`` takes the radius maximising background-limited
         signal-to-noise of the disk sum, which is smaller for narrow spots.
         ``"flux"`` takes the radius where the profile falls to 2 % of its centre
-        (captures ~all the flux)
+        (captures ~all the flux). ``"auto"`` (default) measures, on the calibration peaks,
+        whether the snr disk captures the same fraction of every spot's flux
+        and keeps it only then; otherwise it falls back to ``"flux"``
+        (:func:`choose_aperture`).
+    aperture_tolerance : float
+        ``"auto"`` only: the relative drift or excess scatter of the captured
+        fraction above which the snr disk is rejected.
     """
 
     enabled: bool = True
@@ -423,7 +429,8 @@ class IntegrateConfig:
     resolution_percentile: float = 0.90  # fallback estimator (sparse crystals)
     resolution_snr_floor: float = 0.0
     adu_per_photon: Optional[float] = None
-    aperture: str = "snr"
+    aperture: str = "auto"
+    aperture_tolerance: float = 0.02
 
 
 @dataclass
@@ -649,6 +656,7 @@ class Indexer:
         self._measured_gain: Optional[float] = None
         self._bg_annulus_pixels: Optional[float] = None
         self._measured_radii: Optional[tuple[float, float, float]] = None
+        self._resolved_aperture: Optional[str] = None
         self._q_max: Optional[float] = None
         self.set_target_cell(target_cell)
 
@@ -668,7 +676,9 @@ class Indexer:
             or (prev.unique_axis if prev is not None else None),
             centering=cell.centering or (prev.centering if prev is not None else None),
         )
-        self.B_target = cell_to_B(self.target_cell, device=self.device, dtype=self.dtype)
+        self.B_target = cell_to_B(
+            self.target_cell, device=self.device, dtype=self.dtype
+        )
         if self.seed.q_tolerance is not None:
             self.q_tolerance = float(self.seed.q_tolerance)
         else:
@@ -1273,6 +1283,9 @@ class Indexer:
                     setattr(r, name, value[selected])
             offset += count
             r._integration_positions = r._integration_valid = None
+
+    def _aperture(self) -> str:
+        return self._resolved_aperture or self.integrate.aperture
 
     def _radii(self) -> tuple[float, float, float]:
         # Measured by Probixi.calibrate; the fallback only applies when nothing
