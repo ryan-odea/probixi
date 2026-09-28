@@ -46,7 +46,7 @@ dependencies = [
 
 [project.scripts]
 probixi = "probixi.cli:main"
-probixi-resolve = "probixi.ambigator:main"
+probixi-resolve = "probixi.ambigator_cli:main"
 
 [project.optional-dependencies]
 gpu = ["triton>=3.5", "nvidia-libnvcomp-cu12==5.3.0.16"]

@@ -1,42 +1,47 @@
 from __future__ import annotations
 
-from .ambigator import Ambigator, AmbigatorResult
-from .indexer import (
-    CellMatchConfig,
-    FrameIndexResult,
-    FrameIndexStream,
-    IntegrateConfig,
-    RefineConfig,
-    SeedConfig,
-)
-from .io import DataOffloader, DuckDBOffloader, PeakOffloader
-from .multigpu import BlockConfig, merge_streams, run_block_from_env, run_data_parallel
-from .probixi import Probixi, __citation__, auto_device, citation
-
-__all__ = [
+_LAZY = {
     # pipeline
-    "Probixi",
-    "auto_device",
+    "Probixi": ".probixi",
+    "auto_device": ".probixi",
     # citation
-    "citation",
-    "__citation__",
+    "citation": ".probixi",
+    "__citation__": ".probixi",
     # indexer config
-    "FrameIndexResult",
-    "FrameIndexStream",
-    "SeedConfig",
-    "RefineConfig",
-    "CellMatchConfig",
-    "IntegrateConfig",
+    "FrameIndexResult": ".indexer",
+    "FrameIndexStream": ".indexer",
+    "SeedConfig": ".indexer",
+    "RefineConfig": ".indexer",
+    "CellMatchConfig": ".indexer",
+    "IntegrateConfig": ".indexer",
     # indexing ambiguity
-    "Ambigator",
-    "AmbigatorResult",
+    "Ambigator": ".ambigator",
+    "AmbigatorResult": ".ambigator",
     # multi-GPU
-    "run_data_parallel",
-    "run_block_from_env",
-    "merge_streams",
-    "BlockConfig",
+    "run_data_parallel": ".multigpu",
+    "run_block_from_env": ".multigpu",
+    "merge_streams": ".multigpu",
+    "BlockConfig": ".multigpu",
     # output writers
-    "DataOffloader",
-    "PeakOffloader",
-    "DuckDBOffloader",
-]
+    "DataOffloader": ".io",
+    "PeakOffloader": ".io",
+    "DuckDBOffloader": ".io",
+}
+
+__all__ = list(_LAZY)
+
+
+def __getattr__(name: str):
+    try:
+        module = _LAZY[name]
+    except KeyError:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}") from None
+    from importlib import import_module
+
+    value = getattr(import_module(module, __name__), name)
+    globals()[name] = value
+    return value
+
+
+def __dir__() -> list[str]:
+    return sorted(set(globals()) | set(_LAZY))

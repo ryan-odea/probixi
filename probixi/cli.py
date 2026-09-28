@@ -6,11 +6,6 @@ from pathlib import Path
 from typing import Any, Literal, Optional, cast
 
 import click
-import torch
-
-from probixi.indexer import IntegrateConfig, RefineConfig, SeedConfig
-from probixi.io import DataOffloader, DuckDBOffloader, PeakOffloader, is_duckdb_path
-from probixi.probixi import Probixi
 
 _IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".pdf", ".svg"}
 _PROGRESS_INTERVAL_S = 60.0
@@ -25,6 +20,8 @@ def _resolve_cli_devices(
 ) -> Optional[list]:
     # Translate the --device / --devices / --gpus flags into a device list, or
     # None to keep the single-device path. --devices/--gpus imply multi-GPU.
+    import torch
+
     explicit = bool(device) and device.strip().lower() != "auto"
     picked = [f for f in (explicit, bool(devices), gpus) if f]
     if len(picked) > 1:
@@ -58,6 +55,7 @@ def format_cell_calibration(cc) -> str:
 
 
 def _run_multi_gpu(device_list: list, **kw) -> None:
+    from probixi.indexer import SeedConfig
     from probixi.multigpu import run_data_parallel
 
     if kw["peaks_only"] or kw["render"] or kw["gif"]:
@@ -372,6 +370,15 @@ def main(
         )
     if output is None and not render:
         raise click.UsageError("-o/--output is required unless only --render is used")
+
+    from probixi.indexer import IntegrateConfig, RefineConfig, SeedConfig
+    from probixi.io import (
+        DataOffloader,
+        DuckDBOffloader,
+        PeakOffloader,
+        is_duckdb_path,
+    )
+    from probixi.probixi import Probixi
 
     device_list = _resolve_cli_devices(device, devices, gpus)
     refine_cfg = RefineConfig(cell=not no_refine_cell)
