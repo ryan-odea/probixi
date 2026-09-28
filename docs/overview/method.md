@@ -335,7 +335,7 @@ $$
 
 so the background annulus always holds about 120 pixels (`background_pixels`, fixed) and starts one pixel outside the spot.
 
-**SNR rule** (default, `--aperture snr`; `snr_disk_radius`, `integrate.py:98-107`). With $n(b)$ the number of integer offsets on ring $b$, the disk radius is the one maximising the background-limited signal-to-noise of the *profile*:
+**SNR rule** (`--aperture snr`; `snr_disk_radius`, `integrate.py:98-107`). With $n(b)$ the number of integer offsets on ring $b$, the disk radius is the one maximising the background-limited signal-to-noise of the *profile*:
 
 $$
 S(k) = \sum_{b\le k} p(b)\,n(b), \qquad N(k) = \sum_{b\le k} n(b), \qquad
@@ -343,6 +343,8 @@ k^\star = \arg\max_{1\le k\le r_{\text{sig}}}\frac{S(k)}{\sqrt{N(k)}}, \qquad r_
 $$
 
 with $r_{\text{in}}, r_{\text{out}}$ left at the flux-rule values so the annulus still clears the 2 % radius. On 1 px spots this gives a $3\times3$ disk ($r_{\text{sig}} = 1.5$) where the flux rule gave 5 px; on broad spots both rules agree. If too few peaks are found the indexer falls back to $(3.0, 4.0, 7.36)$ px (`FALLBACK_RADII`).
+
+**Auto rule** (default, `--aperture auto`; `choose_aperture`). The SNR disk captures a fraction $f$ of each spot's flux. Not every loss survives merging: a per-crystal constant is absorbed by that crystal's scale factor, and a resolution trend common to all crystals by an overall $B$. What no scale model removes is a resolution dependence of $f$ that *differs between crystals*, as it does when their mosaicity differs, so that is what the rule measures. On strong ($I/\sigma \ge 10$ in the flux disk, both disks corrected by the peak's own annulus as in 7.2), isolated (no neighbour within $2 r_{\text{sig}}^{\text{flux}} + 1$ px) calibration peaks with their frame ids, the trend common to all crystals is estimated first (weighted means of $\log f$ in $|q|^2$ bins, interpolated) and removed, since a curved common trend would otherwise read as crystal-specific slopes wherever crystals sample different $|q|$ ranges. Each crystal's residual $\log f$ is then regressed on $|q|^2$; the slope errors are calibrated on the pooled within-crystal residuals, so per-reflection scatter (sub-pixel centring, spot shape) does not count as a crystal difference. The spread of the slopes beyond their errors, times the $|q|^2$ span from the median to the 90th percentile, is the intensity error the SNR disk would leave at the resolution edge; it is estimated with a winsorised $\chi^2$ (each crystal's standardised deviation capped at 9, against the null mean 0.995 and variance 1.90 of a capped $\chi^2_1$), so a few wild crystals cannot decide. If it reaches 2 % (`aperture_tolerance`) at $\ge 3\sigma$, the flux disk is taken, otherwise the SNR disk stays. Fewer than 50 usable peaks or 10 crystals keep the SNR disk. The choice, its reason, the common trend, the crystal spread and its significance are printed after calibration; the stream header records the rule actually applied.
 
 ### 7.2 Ring integration of a predicted reflection
 
