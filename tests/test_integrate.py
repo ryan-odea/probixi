@@ -495,6 +495,14 @@ def test_auto_aperture_keeps_snr_for_a_constant_spot_shape():
     choice, diag = _decide(1.2, centres, frame, background=40.0)
     assert choice == "snr", diag
     assert diag["n_crystals"] >= 10 and diag["crystal_spread"] < 0.02
+    # keys the CLI summary reads on the full path
+    assert {
+        "f_mean",
+        "n",
+        "residual_trend",
+        "crystal_spread",
+        "spread_z",
+    } <= diag.keys()
 
 
 def test_auto_aperture_absorbs_a_resolution_trend_common_to_all_crystals():
@@ -534,6 +542,7 @@ def test_auto_aperture_needs_enough_strong_peaks_and_crystals():
     centres, frame, _ = _crystals(n_cryst=6, per=12, seed=8)
     choice, diag = _decide(1.2, centres, frame)
     assert choice == "snr" and diag["reason"].startswith("too few crystals")
+    assert "f_mean" in diag and "crystal_spread" not in diag  # partial diag
     sums, sq, counts, q, nn = _ring_data(1.2, centres)
     assert (
         choose_aperture(sums, sq, counts, q, frame, FLUX_RADII, FLUX_RADII, nn_dist=nn)[
