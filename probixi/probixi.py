@@ -320,9 +320,11 @@ class Probixi:
         """``(aperture, diagnostics)`` of an ``"auto"`` aperture after calibrate.
 
         ``None`` unless :meth:`calibrate` measured the choice. The diagnostics
-        hold the strong-peak count ``n``, the captured fraction ``f_mean`` and
-        its per-|q|-bin means ``f_bins``, the relative ``trend`` (with its
-        ``trend_z``) and excess ``scatter``, both radii and the ``reason``.
+        hold the strong-peak count ``n``, the captured fraction ``f_mean``, its
+        ``common_trend`` over |q|, the per-crystal ``residual_trend`` and
+        ``crystal_spread`` (with ``spread_z``), both radii and the ``reason``.
+        Early exits (too few peaks or crystals) carry only the keys measured
+        so far.
         """
         diag = getattr(self, "_aperture_diag", None)
         if diag is None or self.indexer is None:

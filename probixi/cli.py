@@ -477,9 +477,12 @@ def main(
             ap, d = choice
             msg += f" aperture={ap}"
             if "f_mean" in d:
-                msg += " (f={:.2f} trend={:.1%} scatter={:.1%} n={})".format(
-                    d["f_mean"], d["trend"], d["scatter"], d["n"]
-                )
+                msg += f" (f={d['f_mean']:.2f} n={d['n']}"
+                if "crystal_spread" in d:
+                    msg += " trend={:.1%} spread={:.1%} z={:.1f}".format(
+                        d["residual_trend"], d["crystal_spread"], d["spread_z"]
+                    )
+                msg += ")"
             msg += f": {d['reason']}"
         click.echo(msg)
 
