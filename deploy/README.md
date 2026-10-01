@@ -2,12 +2,12 @@
 ## Install (per version)
 
 ```bash
-mkdir -p /opt/software/probixi/0.7.1
-apptainer pull /opt/software/probixi/0.7.1/probixi.sif \
-    oras://ghcr.io/ryan-odea/probixi:0.7.1
+mkdir -p /opt/software/probixi/0.7.3
+apptainer pull /opt/software/probixi/0.7.3/probixi.sif \
+    oras://ghcr.io/ryan-odea/probixi:0.7.3
 ```
 
-Place `modulefile/probixi.lua` in your MODULEPATH as `probixi/0.7.1.lua`. Set
+Place `modulefile/probixi.lua` in your MODULEPATH as `probixi/0.7.3.lua`. Set
 `PROBIXI_ROOT` if images live somewhere other than `/opt/software/probixi`.
 
 ## Use
