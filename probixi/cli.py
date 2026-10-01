@@ -412,6 +412,7 @@ def main(
             enrich_alpha=enrich_alpha,
             threads_per_worker=threads_per_worker,
             quiet=quiet,
+            force_all=force_all,
             cell_calibrate=cell_calibrate,
             cell_calibrate_after=cell_calibrate_after,
         )
