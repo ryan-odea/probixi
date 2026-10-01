@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 import types
 
 import click
@@ -106,15 +107,17 @@ def test_mps_is_usable_reports_false_when_the_probe_raises(monkeypatch):
 
 
 def test_cli_multi_gpu_forwards_every_option(tmp_path, monkeypatch):
-    # _run_multi_gpu reads kw["..."] for each option it forwards; a flag added
-    # to main() but not to that call only blows up at dispatch time on a
-    # multi-GPU box, so dispatch once here with run_data_parallel stubbed out
     from click.testing import CliRunner
 
     import probixi.multigpu as mg
 
+    sig = inspect.signature(mg.run_data_parallel)
     seen = {}
-    monkeypatch.setattr(mg, "run_data_parallel", lambda *a, **kw: seen.update(kw))
+    monkeypatch.setattr(
+        mg,
+        "run_data_parallel",
+        lambda *a, **kw: seen.update(sig.bind(*a, **kw).arguments),
+    )
     for name in ("f.lst", "f.geom", "f.cell"):
         (tmp_path / name).write_text("")
     res = CliRunner().invoke(

@@ -145,6 +145,12 @@ def merge_dbs(part_paths: Sequence[PathLike], output_path: PathLike) -> int:
                     conn.execute(f"INSERT INTO {tbl} SELECT * FROM {alias}.{tbl}")
             finally:
                 conn.execute(f"DETACH {alias}")
+        conn.execute(
+            "UPDATE frames SET serial = r.rn FROM ("
+            "  SELECT frame_id, row_number() OVER (ORDER BY frame_index) AS rn"
+            "  FROM frames WHERE serial IS NOT NULL"
+            ") AS r WHERE frames.frame_id = r.frame_id"
+        )
         conn.execute(_db._INDEXES)
         row = conn.execute("SELECT COUNT(*) FROM frames WHERE indexed").fetchone()
         n_indexed = row[0] if row else 0
@@ -175,6 +181,7 @@ class BlockConfig:
     warmup_frames: int = 16
     flux_variance: bool = False
     flux_var_floor: float = 0.15
+    frame_screen_frac: float = 0.1
     panel: str = "0"
     enrich_gate: bool = False
     enrich_alpha: float = 1e-3
@@ -218,6 +225,7 @@ def run_block(
         warmup_frames=cfg.warmup_frames,
         flux_variance=cfg.flux_variance,
         flux_var_floor=cfg.flux_var_floor,
+        frame_screen_frac=cfg.frame_screen_frac,
         device=dev,
         random_seed=cfg.random_seed,
         seed=cfg.seed,
@@ -331,6 +339,7 @@ def run_data_parallel(
     warmup_frames: int = 16,
     flux_variance: bool = False,
     flux_var_floor: float = 0.15,
+    frame_screen_frac: float = 0.1,
     panel: str = "0",
     enrich_gate: bool = False,
     enrich_alpha: float = 1e-3,
@@ -376,6 +385,7 @@ def run_data_parallel(
         warmup_frames=warmup_frames,
         flux_variance=flux_variance,
         flux_var_floor=flux_var_floor,
+        frame_screen_frac=frame_screen_frac,
         panel=panel,
         enrich_gate=enrich_gate,
         enrich_alpha=enrich_alpha,

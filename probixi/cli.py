@@ -54,47 +54,41 @@ def format_cell_calibration(cc) -> str:
     )
 
 
-def _run_multi_gpu(device_list: list, **kw) -> None:
+def _run_multi_gpu(device_list: list, opts: dict, refine, integrate) -> None:
     from probixi.indexer import SeedConfig
     from probixi.multigpu import run_data_parallel
 
-    if kw["peaks_only"] or kw["render"] or kw["gif"]:
+    kw = dict(opts)
+    if kw.pop("peaks_only") or kw.pop("render") or kw.pop("gif"):
         raise click.UsageError(
             "--devices/--gpus supports the indexing path only "
             "(not --peaks-only, --render, or --gif)"
         )
+    for name in (
+        "device",
+        "devices",
+        "gpus",
+        "render_out",
+        "no_refine_cell",
+        "aperture",
+    ):
+        kw.pop(name)
     if kw["cell_file"] is None:
         raise click.UsageError("a unit cell (-p/--cell) is required for multi-GPU")
     if kw["output"] is None:
         raise click.UsageError("-o/--output is required for multi-GPU indexing")
+    if kw.pop("force_all"):
+        kw["frame_screen_frac"] = 0.0
     run_data_parallel(
-        kw["list_file"],
-        kw["geometry_file"],
-        kw["cell_file"],
-        kw["output"],
+        kw.pop("list_file"),
+        kw.pop("geometry_file"),
+        kw.pop("cell_file"),
+        kw.pop("output"),
         devices=device_list,
-        start=kw["start"],
-        stop=kw["stop"],
-        batch_size=kw["batch_size"],
-        seed_frames=kw["seed_frames"],
-        random_seed=kw["random_seed"],
-        target_noise_peaks=kw["target_noise_peaks"],
-        noise_mode=kw["noise_mode"],
-        warmup_frames=kw["warmup_frames"],
-        flux_variance=kw["flux_variance"],
-        flux_var_floor=kw["flux_var_floor"],
-        panel=kw["panel"],
-        enrich_gate=kw["enrich_gate"],
-        enrich_alpha=kw["enrich_alpha"],
-        threads_per_worker=kw["threads_per_worker"],
-        quiet=kw["quiet"],
-        frame_screen_frac=0.0 if kw["force_all"] else 0.1,
-        seed=SeedConfig(max_lattices=kw["max_lattices"]),
-        refine=kw["refine"],
-        integrate=kw["integrate"],
-        recalibrate_every=kw["recalibrate_every"],
-        cell_calibrate=kw["cell_calibrate"],
-        cell_calibrate_after=kw["cell_calibrate_after"],
+        seed=SeedConfig(max_lattices=kw.pop("max_lattices")),
+        refine=refine,
+        integrate=integrate,
+        **kw,
     )
 
 
@@ -364,6 +358,7 @@ def main(
     set (readable by 'indexamajig --peaks=cxi') is written to the -o directory
     instead.
     """
+    opts = dict(locals())
     if not peaks_only and not render and cell_file is None:
         raise click.UsageError(
             "a unit cell (-p/--cell) is required unless --peaks-only or --render"
@@ -384,38 +379,7 @@ def main(
     refine_cfg = RefineConfig(cell=not no_refine_cell)
     integrate_cfg = IntegrateConfig(aperture=aperture)
     if device_list is not None and len(device_list) > 1:
-        _run_multi_gpu(
-            device_list,
-            refine=refine_cfg,
-            integrate=integrate_cfg,
-            list_file=list_file,
-            geometry_file=geometry_file,
-            cell_file=cell_file,
-            output=output,
-            peaks_only=peaks_only,
-            gif=gif,
-            render=render,
-            start=start,
-            stop=stop,
-            batch_size=batch_size,
-            max_lattices=max_lattices,
-            recalibrate_every=recalibrate_every,
-            seed_frames=seed_frames,
-            random_seed=random_seed,
-            target_noise_peaks=target_noise_peaks,
-            noise_mode=noise_mode,
-            warmup_frames=warmup_frames,
-            flux_variance=flux_variance,
-            flux_var_floor=flux_var_floor,
-            panel=panel,
-            enrich_gate=enrich_gate,
-            enrich_alpha=enrich_alpha,
-            threads_per_worker=threads_per_worker,
-            quiet=quiet,
-            force_all=force_all,
-            cell_calibrate=cell_calibrate,
-            cell_calibrate_after=cell_calibrate_after,
-        )
+        _run_multi_gpu(device_list, opts, refine_cfg, integrate_cfg)
         return
 
     dev = device_list[0] if device_list else None
@@ -434,6 +398,7 @@ def main(
         integrate=integrate_cfg,
         cell_calibrate=cell_calibrate,
         cell_calibrate_after=cell_calibrate_after,
+        frame_screen_frac=0.0 if force_all else Probixi.frame_screen_frac,
     )
 
     meta = probixi.metadata

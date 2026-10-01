@@ -291,6 +291,10 @@ def test_merge_dbs_unions_blocks_and_dedups_metadata(geometry_dict, cell, tmp_pa
         ).fetchone()[0]
         assert joined == conn.execute("SELECT COUNT(*) FROM reflections").fetchone()[0]
         assert joined > 0
+        serials = conn.execute(
+            "SELECT list(serial ORDER BY frame_index) FROM frames WHERE serial IS NOT NULL"
+        ).fetchone()[0]
+        assert serials == [1, 2]
     finally:
         conn.close()
 
