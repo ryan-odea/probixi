@@ -104,3 +104,16 @@ def test_sampled_frames_are_deterministic_spread_and_disjoint():
     assert not set(training) & set(warmup)
     # a run shorter than the request yields every frame
     assert pipeline(1988, 8)._sample_frame_indices(32) == list(range(8))
+
+
+def test_frames_at_streams_consecutive_indices_in_one_read(monkeypatch):
+    p = object.__new__(Probixi)
+    requested = []
+
+    def frames(start, stop):
+        requested.append((start, stop))
+        return iter(range(start, stop))
+
+    monkeypatch.setattr(p, "frames", frames)
+    assert list(p._frames_at([3, 4, 5, 9, 12, 13])) == [3, 4, 5, 9, 12, 13]
+    assert requested == [(3, 6), (9, 10), (12, 14)]

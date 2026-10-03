@@ -3,6 +3,7 @@ from __future__ import annotations
 import math
 import random
 import warnings
+from collections.abc import Sized
 from dataclasses import dataclass, field
 from functools import lru_cache
 from itertools import chain, islice
@@ -459,9 +460,15 @@ class Probixi:
         return sorted(random.Random(self.random_seed).sample(pool, min(k, len(pool))))
 
     def _frames_at(self, indices: Iterable[int]) -> Iterator[Tensor]:
-        # the loader streams contiguous ranges only; scattered frames go one by one
-        for i in indices:
-            yield next(iter(self.frames(start=i, stop=i + 1)))
+        # the loader streams contiguous ranges only; consecutive indices share a read
+        idx = list(indices)
+        i = 0
+        while i < len(idx):
+            j = i + 1
+            while j < len(idx) and idx[j] == idx[j - 1] + 1:
+                j += 1
+            yield from self.frames(start=idx[i], stop=idx[j - 1] + 1)
+            i = j
 
     def _resolve_frame_index(self, frame: Union[int, str, tuple]) -> int:
         # int -> absolute index; "file//event" or (file, event) -> cumulative index
@@ -644,7 +651,7 @@ class Probixi:
             detector_to_q(pos, geom.to_dict(), dtype=torch.float32), dim=-1
         ).reshape(frame_size)
 
-    def _infer_beamstop_qmin(self, seed: list) -> Optional[float]:
+    def _infer_beamstop_qmin(self, seed: Iterable[Tensor]) -> Optional[float]:
         # Learn a beam-center exclusion |q|_min (A^-1) from the calibrated finder
         if self._noise is None:
             return None
@@ -657,7 +664,7 @@ class Probixi:
         n_bins = _BEAMSTOP_N_BINS
         qs: list[Tensor] = []
         for res in self.peak_stream(
-            seed[:_BEAMSTOP_MAX_FRAMES], update_noise=False, estimate_scale=False
+            islice(seed, _BEAMSTOP_MAX_FRAMES), update_noise=False, estimate_scale=False
         ):
             ks = res.kept_stats
             if ks is None or ks.row_centroid.numel() == 0:
@@ -926,7 +933,9 @@ class Probixi:
             Frames drawn at random from the run to calibrate on when
             ``seed_frames`` is not given.
         seed_frames : iterable of torch.Tensor, optional
-            Explicit calibration frames; overrides ``n_seed``.
+            Explicit calibration frames; overrides ``n_seed``. A sized
+            re-iterable (list, stacked tensor) is streamed pass by pass; a
+            one-shot iterator is materialized first.
         eigen_modes : int, default 0
             If > 0, also fit this many low-rank background modes (XFEL/SFX).
         target_noise_peaks : float or None, default 5.0
@@ -945,8 +954,9 @@ class Probixi:
         seed_indices: list[int] = []
         self.blank_seed_floor = None
         self.n_blank_seeds_dropped = 0
+        seed: Union[Sized, Iterable[Tensor]]
         if seed_frames is not None:
-            seed = list(seed_frames)
+            seed = seed_frames if isinstance(seed_frames, Sized) else list(seed_frames)
         elif self.seed_level_frac > 0.0:
             cand = self._sample_frame_indices(n_seed * _SEED_LEVEL_OVERSAMPLE)
             levels = [_frame_level(f) for f in self._frames_at(cand)]
@@ -964,10 +974,10 @@ class Probixi:
                 keep = cand
                 self.n_blank_seeds_dropped = 0
             seed_indices = keep[:n_seed]
-            seed = list(self._frames_at(seed_indices))
+            seed = _FrameSource(self, seed_indices)
         else:
             seed_indices = self._sample_frame_indices(n_seed)
-            seed = list(self._frames_at(seed_indices))
+            seed = _FrameSource(self, seed_indices)
         if not seed:
             raise ValueError("no seed frames available to calibrate on")
         self._calibration_options = dict(
@@ -1023,7 +1033,7 @@ class Probixi:
             self._calibrate_cell(seed)
         return result
 
-    def _calibrate_cell(self, frames: list[Tensor]) -> None:
+    def _calibrate_cell(self, frames: Iterable[Tensor]) -> None:
         n_screened = len(self.screened_frames)
         tc = self.threshold_calibration
         results = self.indexer.index_frame_stream(
@@ -1312,8 +1322,8 @@ class Probixi:
         with torch.random.fork_rng(devices=devices):
             torch.manual_seed(boundary)
             self.calibrate(
-                seed_frames=self.frames(
-                    start=boundary, stop=boundary + options["n_seed"]
+                seed_frames=_FrameSource(
+                    self, range(boundary, boundary + options["n_seed"])
                 ),
                 **options,
             )
@@ -1384,6 +1394,20 @@ def _beamstop_qmin_from_histogram(
     while hi + 1 <= hi_cap and float(density[hi + 1]) >= thr:
         hi += 1
     return float(edges[hi + 1])
+
+
+class _FrameSource:
+    # Re-iterable view of frames by run index. Every pass re-reads from disk, so
+    # calibration holds one frame at a time instead of the whole seed set.
+    def __init__(self, pipeline: Probixi, indices: Iterable[int]):
+        self._pipeline = pipeline
+        self._indices = list(indices)
+
+    def __len__(self) -> int:
+        return len(self._indices)
+
+    def __iter__(self) -> Iterator[Tensor]:
+        return self._pipeline._frames_at(self._indices)
 
 
 def _frame_level(frame: Tensor) -> float:

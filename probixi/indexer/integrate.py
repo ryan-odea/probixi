@@ -121,12 +121,12 @@ def radial_profile(
 def _ring_pixel_counts(max_radius: int, device) -> Tensor:
     off = torch.arange(-max_radius, max_radius + 1, device=device)
     dr, dc = torch.meshgrid(off, off, indexing="ij")
-    rbin = torch.sqrt((dr * dr + dc * dc).double()).round().long().flatten()
-    return torch.bincount(rbin[rbin <= max_radius], minlength=max_radius + 1).double()
+    rbin = torch.sqrt((dr * dr + dc * dc).float()).round().long().flatten()
+    return torch.bincount(rbin[rbin <= max_radius], minlength=max_radius + 1).float()
 
 
 def snr_disk_radius(profile: Tensor, r_max: float) -> float:
-    p = profile.detach().double()
+    p = profile.detach().float()
     p = (p - p.min()).clamp_min(0.0)
     n = _ring_pixel_counts(len(p) - 1, p.device)
     s = torch.cumsum(p * n, 0)
@@ -210,7 +210,7 @@ def choose_aperture(
     k_s, k_f = int(math.floor(r_snr)), int(round(r_flux))
     k_in, k_out = int(math.ceil(radii_flux[1])), int(math.floor(radii_flux[2]))
     k_out = min(k_out, sums.shape[1] - 1)
-    sums, squares, counts = sums.double(), squares.double(), counts.double()
+    sums, squares, counts = sums.float(), squares.float(), counts.float()
     n_ann = counts[:, k_in : k_out + 1].sum(1)
     s_ann = sums[:, k_in : k_out + 1].sum(1)
     bg = s_ann / n_ann.clamp_min(1)
@@ -239,7 +239,7 @@ def choose_aperture(
     f = i_s / i_f
     y = torch.log(f)
     w = f * f / ((v_s - 2 * f * cov + f * f * v_f) / (i_f * i_f)).clamp_min(1e-12)
-    x = q.double()[strong] ** 2
+    x = q.float()[strong] ** 2
     diag["f_mean"] = float(f.mean())
     order = torch.argsort(x)
     n_bin = max(3, min(8, len(x) // 20))
