@@ -109,8 +109,9 @@ def calibrate_noise(
         A built model whose sources already cover the frame (warmed here when
         ``warm`` is set).
     seed_frames : Iterable[Tensor]
-        Calibration frames. A sized re-iterable is streamed per pass; a
-        one-shot iterator is materialized first.
+        Calibration frames. Anything with a length, such as a list or a
+        stacked tensor, is read one frame at a time. A generator is copied
+        into a list first.
     warm : bool
         Update the running model on the seed frames first.
     subsample : int
@@ -390,7 +391,7 @@ def calibrate_threshold(
     noise_model : NoiseModel
         A calibrated model (post ``calibrate_noise.apply``).
     seed_frames : Iterable[Tensor]
-        The seed frames, streamed one at a time; 16-32 is plenty.
+        The seed frames, read one at a time.
     target_noise_peaks : float
         Target median blobs per quiet frame above the chosen threshold.
     quiet_quantile : float
@@ -459,8 +460,8 @@ def calibrate_threshold(
     )
     thr_list = tgrid.tolist()
 
-    # T mirrors the detector's per-frame local-background correction; each frame
-    # leaves only its max T, a body subsample and per-threshold blob counts behind.
+    # Only the maximum, a body subsample and the blob counts are kept per frame,
+    # so the full T map is freed before the next frame is read.
     t_max_per_frame: list[float] = []
     body_pieces: list[Tensor] = []
     counts: list[list[int]] = []

@@ -460,7 +460,7 @@ class Probixi:
         return sorted(random.Random(self.random_seed).sample(pool, min(k, len(pool))))
 
     def _frames_at(self, indices: Iterable[int]) -> Iterator[Tensor]:
-        # the loader streams contiguous ranges only; consecutive indices share a read
+        # Consecutive indices are read as one contiguous range.
         idx = list(indices)
         i = 0
         while i < len(idx):
@@ -933,9 +933,10 @@ class Probixi:
             Frames drawn at random from the run to calibrate on when
             ``seed_frames`` is not given.
         seed_frames : iterable of torch.Tensor, optional
-            Explicit calibration frames; overrides ``n_seed``. A sized
-            re-iterable (list, stacked tensor) is streamed pass by pass; a
-            one-shot iterator is materialized first.
+            Explicit calibration frames that replace the ``n_seed`` random
+            draw. Anything with a length, such as a list or a stacked tensor,
+            is read one frame at a time. A generator is copied into a list
+            first.
         eigen_modes : int, default 0
             If > 0, also fit this many low-rank background modes (XFEL/SFX).
         target_noise_peaks : float or None, default 5.0
@@ -1397,8 +1398,7 @@ def _beamstop_qmin_from_histogram(
 
 
 class _FrameSource:
-    # Re-iterable view of frames by run index. Every pass re-reads from disk, so
-    # calibration holds one frame at a time instead of the whole seed set.
+    # Each pass re-reads the frames from disk, so only one is resident at a time.
     def __init__(self, pipeline: Probixi, indices: Iterable[int]):
         self._pipeline = pipeline
         self._indices = list(indices)
