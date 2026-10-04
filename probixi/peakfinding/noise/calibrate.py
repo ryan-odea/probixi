@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+from collections.abc import Sized
 from dataclasses import dataclass
 from typing import Iterable, Optional
 
@@ -108,7 +109,9 @@ def calibrate_noise(
         A built model whose sources already cover the frame (warmed here when
         ``warm`` is set).
     seed_frames : Iterable[Tensor]
-        Calibration frames (the warmup slice); consumed once.
+        Calibration frames. Anything with a length, such as a list or a
+        stacked tensor, is read one frame at a time. A generator is copied
+        into a list first.
     warm : bool
         Update the running model on the seed frames first.
     subsample : int
@@ -129,8 +132,8 @@ def calibrate_noise(
     CalibrationResult
         The learned blend, variance scale, and peak mixture parameters.
     """
-    frames = [f for f in seed_frames]
-    if not frames:
+    frames = seed_frames if isinstance(seed_frames, Sized) else list(seed_frames)
+    if len(frames) == 0:
         raise ValueError("seed_frames is empty")
     if warm:
         for f in frames:
@@ -388,7 +391,7 @@ def calibrate_threshold(
     noise_model : NoiseModel
         A calibrated model (post ``calibrate_noise.apply``).
     seed_frames : Iterable[Tensor]
-        The seed frames (consumed once); 16-32 is plenty.
+        The seed frames, read one at a time.
     target_noise_peaks : float
         Target median blobs per quiet frame above the chosen threshold.
     quiet_quantile : float
@@ -421,8 +424,9 @@ def calibrate_threshold(
         ``mu0``, ``sigma0``, the chosen ``threshold``, and diagnostics. Already
         applied if ``finder`` was given.
     """
-    frames = [f for f in seed_frames]
-    if not frames:
+    frames = seed_frames if isinstance(seed_frames, Sized) else list(seed_frames)
+    n_frames = len(frames)
+    if n_frames == 0:
         raise ValueError("seed_frames is empty")
     if not 0.0 < quiet_quantile <= 1.0:
         raise ValueError("quiet_quantile must be in (0, 1]")
@@ -448,11 +452,21 @@ def calibrate_threshold(
         for s in mf_scales
     ]
 
-    # Compute T per frame, mirroring the detector's per-frame local-background
-    # correction so the meta distribution matches what the finder sees at run time.
-    t_maps: list[Tensor] = []
+    n_steps = (
+        int(round((threshold_grid_max - threshold_grid_min) / threshold_grid_step)) + 1
+    )
+    tgrid = torch.linspace(
+        threshold_grid_min, threshold_grid_max, n_steps, device=device, dtype=dtype
+    )
+    thr_list = tgrid.tolist()
+
+    # Only the maximum, a body subsample and the blob counts are kept per frame,
+    # so the full T map is freed before the next frame is read.
     t_max_per_frame: list[float] = []
-    mask_cpu = mask.cpu()
+    body_pieces: list[Tensor] = []
+    counts: list[list[int]] = []
+    per_frame_cap = max(1, body_subsample // n_frames)
+    gen = torch.Generator(device="cpu").manual_seed(rng_seed)
     for f in frames:
         f = f.to(dtype=dtype, device=device)
         lm, lv = local_mean_var(
@@ -475,20 +489,28 @@ def calibrate_threshold(
             t = matched_filter_z(z, k, mask)
             T = t if T is None else torch.maximum(T, t)
         assert T is not None
-        t_max_per_frame.append(float(T[mask].max()))
-        t_maps.append(T.cpu())
-
-    # Pool body pixels across frames (subsampled) for the empirical-null fit.
-    body_pieces: list[Tensor] = []
-    per_frame_cap = max(1, body_subsample // len(t_maps))
-    gen = torch.Generator(device="cpu").manual_seed(rng_seed)
-    for T in t_maps:  # T is on the host
-        flat = T[mask_cpu]
+        flat = T[mask]
+        t_max_per_frame.append(float(flat.max()))
         if flat.numel() > per_frame_cap:
             idx = torch.randperm(flat.numel(), generator=gen)[:per_frame_cap]
-            body_pieces.append(flat[idx])
+            body_pieces.append(flat[idx.to(device)].cpu())
         else:
-            body_pieces.append(flat)
+            body_pieces.append(flat.cpu())
+
+        pooled = F.max_pool2d(T[None, None], kernel_size=3, stride=1, padding=1)
+        is_max = (T >= pooled[0, 0]) & mask
+        row: list[Tensor] = []
+        for thr in thr_list:
+            above = (T > thr) & mask
+            peaks = is_max & above
+            if size_min > 1:
+                local_size = 9.0 * F.avg_pool2d(
+                    above[None, None].to(dtype), kernel_size=3, stride=1, padding=1
+                )
+                peaks = peaks & (local_size[0, 0] >= float(size_min))
+            row.append(peaks.sum())
+        counts.append(torch.stack(row).tolist())
+
     t_body = torch.cat(body_pieces)
     mu0, sigma0 = _empirical_null_central_matching(t_body)
 
@@ -500,36 +522,10 @@ def calibrate_threshold(
     quiet_idx = [i for i, m in enumerate(t_max_per_frame) if m <= quiet_max_T]
     if len(quiet_idx) < 4:
         order = torch.argsort(tmax_t).tolist()
-        quiet_idx = order[: max(4, int(round(quiet_quantile * len(frames))))]
+        quiet_idx = order[: max(4, int(round(quiet_quantile * n_frames)))]
         quiet_max_T = float(tmax_t[quiet_idx[-1]])
 
-    n_steps = (
-        int(round((threshold_grid_max - threshold_grid_min) / threshold_grid_step)) + 1
-    )
-    tgrid = torch.linspace(
-        threshold_grid_min, threshold_grid_max, n_steps, device=device, dtype=dtype
-    )
-    thr_list = tgrid.tolist()
-    counts_per_thr: list[list[int]] = [[] for _ in thr_list]
-    for i in quiet_idx:
-        T = t_maps[i].to(device)
-        Tb = T.unsqueeze(0).unsqueeze(0)
-        pooled = F.max_pool2d(Tb, kernel_size=3, stride=1, padding=1)
-        is_max = (Tb.squeeze() >= pooled.squeeze()) & mask
-        for j, thr in enumerate(thr_list):
-            above = (T > thr) & mask
-            peaks = is_max & above
-            if size_min > 1:
-                Ab = above.unsqueeze(0).unsqueeze(0).to(dtype)
-                local_size = (
-                    9.0 * F.avg_pool2d(Ab, kernel_size=3, stride=1, padding=1).squeeze()
-                )
-                peaks = peaks & (local_size >= float(size_min))
-            counts_per_thr[j].append(int(peaks.sum()))
-    median_counts: list[float] = [
-        float(torch.tensor(c, dtype=torch.float32).median()) for c in counts_per_thr
-    ]
-    counts_t = torch.tensor(median_counts)
+    counts_t = torch.tensor(counts, dtype=torch.float32)[quiet_idx].median(dim=0).values
 
     ok = counts_t <= float(target_noise_peaks)
     if bool(ok.any()):
