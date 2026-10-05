@@ -128,7 +128,7 @@ def refine_cell(
 ) -> Optional[tuple[Tensor, Tensor, Tensor, float, bool]]:
     dtype, out_device = A.dtype, A.device
     device = torch.device("cpu")
-    wd = torch.float64
+    wd = torch.float32
     try:
         c0 = B_to_cell(A)
     except Exception:

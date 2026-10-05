@@ -332,7 +332,7 @@ def test_refine_cell_ties_tetragonal_edges():
     out, _ = _refine_from_target(target, truth, seed=7)
     assert out is not None
     cell = B_to_cell(out[0])
-    assert cell.a == pytest.approx(cell.b, rel=1e-9)
+    assert cell.a == pytest.approx(cell.b, rel=1e-6)
     assert cell.a == pytest.approx(truth.a, rel=2e-4)
     assert cell.c == pytest.approx(truth.c, rel=2e-4)
 

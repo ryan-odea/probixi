@@ -246,3 +246,33 @@ def test_rotational_noise_bins_on_supplied_radius(tmp_path):
 def test_rotational_noise_rejects_mismatched_radius_shape():
     with pytest.raises(ValueError, match="radius shape"):
         RotationalNoise(frame_size=(8, 4), radius=torch.zeros(4, 8))
+
+
+def test_calibration_streams_a_sized_source_identically_to_a_list():
+    shape = (96, 96)
+    frames = _frames(shape, 32, background=100.0, noise_sigma=10.0, seed=5)
+
+    class Source:
+        passes = 0
+
+        def __len__(self):
+            return len(frames)
+
+        def __iter__(self):
+            self.passes += 1
+            return iter(frames)
+
+    src = Source()
+    nm_list = NoiseModel(shape, mode="online", dtype=DTYPE)
+    nm_src = NoiseModel(shape, mode="online", dtype=DTYPE)
+    cal_list = calibrate_noise(nm_list, frames, rng_seed=0).apply(nm_list)
+    cal_src = calibrate_noise(nm_src, src, rng_seed=0).apply(nm_src)
+    assert (cal_src.kappa, cal_src.var_scale, cal_src.weights) == (
+        cal_list.kappa,
+        cal_list.var_scale,
+        cal_list.weights,
+    )
+    tc_list = calibrate_threshold(nm_list, frames, rng_seed=0)
+    tc_src = calibrate_threshold(nm_src, src, rng_seed=0)
+    assert tc_src == tc_list
+    assert src.passes == 3
