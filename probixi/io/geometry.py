@@ -10,6 +10,8 @@ import h5py
 import hdf5plugin  # noqa: F401  (registers bitshuffle)
 import numpy as np
 
+from .cbf import is_cbf
+
 PathLike = Union[str, Path]
 
 # CrystFEL fs/ss axis spec, e.g. "+0.003976x +0.999992y" (exponents allowed).
@@ -30,6 +32,7 @@ EV_ANGSTROM = 12398.419843320026
 _CLEN_MM_THRESHOLD_M = 2.0
 
 DETECTOR_KEYS = ("detector", "detector_type", "type")
+FLAG_KEYS = ("flag_lessthan", "flag_morethan", "flag_equal")
 PANEL_REQUIRED = {"min_fs", "max_fs", "min_ss", "max_ss", "corner_x", "corner_y"}
 MASK_REQUIRED = {"min_fs", "max_fs", "min_ss", "max_ss"}
 LAB_MASK_REQUIRED = {"min_x", "max_x", "min_y", "max_y"}
@@ -100,6 +103,11 @@ class Geometry:
     adu_per_photon : float, optional
         Detector gain (ADU per photon), from ``adu_per_photon`` or
         ``adu_per_eV * photon_energy`` when both are given numerically.
+    panel_flags : dict, optional
+        Per panel, the ``(key, value)`` pixel-value flags (``flag_lessthan``,
+        ``flag_morethan``, ``flag_equal``, in file order, with integer values as
+        in CrystFEL). A flag outside a panel section applies to the panels first
+        mentioned after it; ``None`` when the file has none.
     """
 
     parameters: dict
@@ -115,6 +123,7 @@ class Geometry:
     mask_spec: Optional["MaskSpec"] = None
     panel_layouts: dict[str, "DataLayout"] = field(default_factory=dict)
     panel_masks: dict[str, "MaskSpec"] = field(default_factory=dict)
+    panel_flags: Optional[dict[str, list[tuple[str, int]]]] = None
 
     def to_dict(self) -> dict:
         missing = [
@@ -163,6 +172,8 @@ def read_geometry(path: PathLike) -> Geometry:
 
     parameters: dict = {}
     per_name: dict[str, dict] = {}
+    flags: list[tuple[str, int]] = []
+    panel_flags: dict[str, list[tuple[str, int]]] = {}
     with path.open("r", encoding="utf-8") as fh:
         for line in fh:
             line = line.split(";", 1)[0].strip()
@@ -172,8 +183,13 @@ def read_geometry(path: PathLike) -> Geometry:
             if "/" in key:
                 name, sub = key.split("/", 1)
                 per_name.setdefault(name, {})[sub] = _coerce(value)
+                found = panel_flags.setdefault(name, list(flags))
             else:
+                sub = key
                 parameters[key] = _coerce(value)
+                found = flags
+            if sub in FLAG_KEYS and (number := _flag_value(value)) is not None:
+                found.append((sub, number))
 
     panels: dict[str, dict] = {}
     bad_regions: list[BadRegion] = []
@@ -239,6 +255,7 @@ def read_geometry(path: PathLike) -> Geometry:
         mask_spec=mask_spec,
         panel_layouts=panel_layouts,
         panel_masks=panel_masks,
+        panel_flags={k: v for k, v in panel_flags.items() if v} or None,
     )
 
 
@@ -392,6 +409,17 @@ def _coerce(value: str):
     return value
 
 
+def _flag_value(value: str) -> Optional[int]:
+    try:
+        number = float(value)
+    except ValueError:
+        try:
+            number = int(value, 0)
+        except ValueError:
+            return None
+    return int(number) if np.isfinite(number) else None
+
+
 def resolve_dynamic_fields(geometry: Geometry, data_file: PathLike) -> Geometry:
     # Fill in HDF5-path-valued clen/photon_energy from the data file.
     clen_path = geometry.parameters.get("clen")
@@ -400,6 +428,11 @@ def resolve_dynamic_fields(geometry: Geometry, data_file: PathLike) -> Geometry:
     need_wl = geometry.wavelength is None and isinstance(pe_path, str)
     if not (need_clen or need_wl):
         return geometry
+    if is_cbf(str(data_file)):
+        raise ValueError(
+            f"geometry reads clen/photon_energy ({clen_path!r}, {pe_path!r}) from "
+            f"the data file, but {str(data_file)!r} is a CBF file; give them as numbers"
+        )
     try:
         with h5py.File(data_file, "r") as f:
             if need_clen:

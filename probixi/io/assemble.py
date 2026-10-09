@@ -8,6 +8,7 @@ import h5py
 import hdf5plugin  # noqa: F401  (registers bitshuffle)
 import numpy as np
 
+from .cbf import is_cbf
 from .geometry import Geometry, parse_axis_vector
 
 
@@ -153,6 +154,11 @@ def read_mask(
     if spec is None or spec.mask_path is None:
         return None
     fname = spec.mask_file or data_filename
+    if is_cbf(fname):
+        raise ValueError(
+            f"mask {spec.mask_path!r} cannot be read from the CBF file {fname!r}; "
+            "set mask_file to an HDF5 file"
+        )
     try:
         with h5py.File(fname, "r") as f:
             node = f.get(spec.mask_path)

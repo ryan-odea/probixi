@@ -5,6 +5,7 @@ import h5py
 import numpy as np
 import torch
 
+from .metadata import CbfInfo
 from .writer import _build_frame_ranges
 
 PathLike = str | Path
@@ -21,7 +22,10 @@ class PeakOffloader:
 
     Alongside the ``.cxi`` files it writes ``peaks.lst`` and a companion
     geometry file (the input geometry plus ``peak_list``/``peak_list_type``),
-    so the output directory is drop-in for indexamajig.
+    so the output directory is drop-in for indexamajig. 
+    
+    Note: CBF input has no HDF5 image stack to link; you may wish to 
+    write a ``.duckdb`` peak set for it instead.
 
     Use as a context manager; the instance is the per-frame writer expected by
     ``PeakStream.for_each`` (``__call__`` forwards to :meth:`write`)::
@@ -50,6 +54,11 @@ class PeakOffloader:
         geometry_file: Optional[PathLike] = None,
         files: Optional[dict] = None,
     ):
+        if any(isinstance(info, CbfInfo) for info in (files or {}).values()):
+            raise ValueError(
+                "the CXI peak export links the HDF5 image stack and cannot "
+                "reference CBF input; write a .duckdb output instead"
+            )
         self.out_dir = Path(path)
         self._geometry_file = Path(geometry_file) if geometry_file else None
         self._ranges = _build_frame_ranges(files)

@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Optional, Union
 
 import duckdb
+import numpy as np
 import torch
 
 from ..indexer.lattice import B_to_cell
@@ -93,6 +94,20 @@ _REFLECTION_COLUMNS = (
     "n_pixels",
     "background_model",
     "background_model_var",
+)
+
+_PANEL_COLUMNS = ("name", "min_fs", "max_fs", "min_ss", "max_ss")
+
+_PEAK_COLUMNS = (
+    "frame_id",
+    "fs",
+    "ss",
+    "intensity",
+    "resolution_nm_inv",
+    "panel",
+    "n_pixels",
+    "photons",
+    "background_photons",
 )
 
 _SCHEMA = """
@@ -309,16 +324,20 @@ class DuckDBOffloader(_StreamWriter):
         self._frame_range = frame_range
         self._conn = None
         self._frame_rows: list[tuple] = []
-        self._refl_rows: list[tuple] = []
-        self._peak_rows: list[tuple] = []
+        self._refl_chunks: list[tuple] = []
+        self._peak_chunks: list[tuple] = []
+        self._n_refl = 0
+        self._n_peak = 0
         self._seen: set[int] = set()
 
     def __enter__(self) -> "DuckDBOffloader":
         if self.path.exists():
             self.path.unlink()
         self._conn = duckdb.connect(str(self.path))
+        self._conn.execute("BEGIN TRANSACTION")
         self._conn.execute(_SCHEMA)
         self._write_metadata_tables()
+        self._conn.execute("COMMIT")
         return self
 
     def __exit__(self, *exc) -> None:
@@ -345,50 +364,34 @@ class DuckDBOffloader(_StreamWriter):
         self._serial += 1
         filename, event = self._locate(result.frame_index)
         fid = frame_id(filename, event)
-        peak_recip = self._append_peaks(result, fid)
+        peaks = self._peaks(result)
         total = 0
+        refl_chunks, crystal_rows = [], []
         for lattice_index, crystal in enumerate(crystals):
             cid = f"{fid}:{lattice_index}"
             refl = self._reflections(crystal)
-            total += len(refl)
-            for (row, col), miller, intensity, sigma, peak, background, *extra in refl:
-                n_pix, bg_model, bg_var = extra if extra else (None, None, None)
-                self._refl_rows.append(
-                    (
-                        cid,
-                        fid,
-                        *(int(h) for h in miller),
-                        float(intensity),
-                        float(sigma),
-                        float(peak),
-                        float(background),
-                        float(col),
-                        float(row),
-                        self._panel_for(col, row),
-                        self._resolution_nm_inv(row, col),
-                        None if n_pix is None else int(n_pix),
-                        _as_float(bg_model),
-                        _as_float(bg_var),
-                    )
-                )
-            self._crystal_rows.append(
-                self._crystal_row(crystal, cid, fid, lattice_index, len(refl))
-            )
-        self._frame_rows.append(
-            self._frame_row(
-                fid,
-                filename,
-                event,
-                result.frame_index,
-                result.n_peaks,
-                peak_recip,
-                indexed=bool(crystals),
-                num_reflections=total if crystals else None,
-                scale=crystals[0].scale if crystals else None,
-                scale_sigma=crystals[0].scale_sigma if crystals else None,
-                gain=self._gain(crystals[0] if crystals else None),
-            )
+            n = refl[0].shape[1]
+            total += n
+            refl_chunks.append((cid, fid, *refl))
+            crystal_rows.append(self._crystal_row(crystal, cid, fid, lattice_index, n))
+        frame = self._frame_row(
+            fid,
+            filename,
+            event,
+            result.frame_index,
+            result.n_peaks,
+            indexed=bool(crystals),
+            num_reflections=total if crystals else None,
+            scale=crystals[0].scale if crystals else None,
+            scale_sigma=crystals[0].scale_sigma if crystals else None,
+            gain=self._gain(crystals[0] if crystals else None),
         )
+        self._peak_chunks.append((fid, self._gain(result), peaks))
+        self._refl_chunks += refl_chunks
+        self._crystal_rows += crystal_rows
+        self._frame_rows.append(frame)
+        self._n_peak += peaks.shape[1]
+        self._n_refl += total
         if result.frame_index is not None:
             self._seen.add(int(result.frame_index))
         self._maybe_flush()
@@ -408,7 +411,7 @@ class DuckDBOffloader(_StreamWriter):
         fid = frame_id(filename, event)
 
         stats = result.kept_stats
-        rows, cols, intensities, bg, npix = (
+        peaks = _to_array(
             torch.stack(
                 [
                     stats.row_centroid,
@@ -418,51 +421,28 @@ class DuckDBOffloader(_StreamWriter):
                     stats.size.to(stats.intensity_sum.dtype),
                 ]
             )
-            .detach()
-            .cpu()
-            .tolist()
         )
         gain = self._gain()
-        max_recip = 0.0
-        for row, col, intensity, bg_adu, n_pix in zip(
-            rows, cols, intensities, bg, npix
-        ):
-            recip = self._resolution_nm_inv(row, col)
-            max_recip = max(max_recip, recip)
-            self._peak_rows.append(
-                (
-                    fid,
-                    float(col),
-                    float(row),
-                    float(intensity),
-                    recip,
-                    self._panel_for(col, row),
-                    float(n_pix),
-                    (float(intensity) + float(bg_adu)) / gain,
-                    float(bg_adu) / gain,
-                )
-            )
-
-        self._frame_rows.append(
-            self._frame_row(
-                fid,
-                filename,
-                event,
-                result.frame_index,
-                len(rows),
-                max_recip,
-                indexed=False,
-                gain=self._gain(),
-            )
+        frame = self._frame_row(
+            fid,
+            filename,
+            event,
+            result.frame_index,
+            peaks.shape[1],
+            indexed=False,
+            gain=gain,
         )
+        self._peak_chunks.append((fid, gain, peaks))
+        self._n_peak += peaks.shape[1]
+        self._frame_rows.append(frame)
         if result.frame_index is not None:
             self._seen.add(int(result.frame_index))
         self._maybe_flush()
 
     def _maybe_flush(self) -> None:
         if (
-            len(self._refl_rows) >= _FLUSH_ROWS
-            or len(self._peak_rows) >= _FLUSH_ROWS
+            self._n_refl >= _FLUSH_ROWS
+            or self._n_peak >= _FLUSH_ROWS
             or len(self._frame_rows) >= _FLUSH_ROWS
         ):
             self._flush()
@@ -496,7 +476,7 @@ class DuckDBOffloader(_StreamWriter):
             ],
         )
         if panels:
-            self._conn.executemany("INSERT INTO panels VALUES (?, ?, ?, ?, ?)", panels)
+            self._insert("panels", _columns(_PANEL_COLUMNS, panels))
         if self.integration:
             r = self.integration
             radii = r.get("radii") or (None, None, None)
@@ -540,35 +520,20 @@ class DuckDBOffloader(_StreamWriter):
             return 1.0
         return g if g > 0.0 else 1.0
 
-    def _append_peaks(self, result: "IndexResult", fid: str) -> float:
-        positions = result.positions.detach().cpu().tolist()
-        intensities = result.intensities.detach().cpu().tolist()
-        n = len(intensities)
-        bg = _to_list(result.peak_background_sum, n)
-        npix = _to_list(result.peak_n_pixels, n)
-        gain = self._gain(result)
-        max_recip = 0.0
-        for (row, col), intensity, bg_adu, n_pix in zip(
-            positions, intensities, bg, npix
-        ):
-            recip = self._resolution_nm_inv(row, col)
-            max_recip = max(max_recip, recip)
-            self._peak_rows.append(
-                (
-                    fid,
-                    float(col),
-                    float(row),
-                    float(intensity),
-                    recip,
-                    self._panel_for(col, row),
-                    n_pix,
-                    (float(intensity) + bg_adu) / gain,
-                    bg_adu / gain,
-                )
-            )
-        return max_recip
+    def _peaks(self, result: "IndexResult") -> np.ndarray:
+        n = len(result.intensities)
+        return np.array(
+            [
+                *_to_array(result.positions).reshape(-1, 2).T,
+                _to_array(result.intensities),
+                _to_array(result.peak_background_sum, n),
+                _to_array(result.peak_n_pixels, n),
+            ]
+        )
 
-    def _reflections(self, result: "IndexResult") -> list:
+    def _reflections(self, result: "IndexResult") -> tuple:
+        # (2, N) positions, (3, N) hkl, (4, N) intensity/sigma/peak/background and
+        # (3, N) n_pix/bg_model/bg_var, which are NaN where not recorded
         if result.predicted_hkl is not None:
             assert (
                 result.predicted_positions is not None
@@ -577,9 +542,9 @@ class DuckDBOffloader(_StreamWriter):
                 and result.predicted_peak is not None
                 and result.predicted_background is not None
             )
-            p_pos = result.predicted_positions.detach().cpu().tolist()
-            p_hkl = result.predicted_hkl.detach().cpu().tolist()
-            p_int, p_sig, p_pk, p_bg = (
+            pos = _to_array(result.predicted_positions).T
+            hkl = _to_array(result.predicted_hkl, dtype=np.int64).T
+            vals = _to_array(
                 torch.stack(
                     [
                         result.predicted_intensities,
@@ -588,27 +553,25 @@ class DuckDBOffloader(_StreamWriter):
                         result.predicted_background,
                     ]
                 )
-                .detach()
-                .cpu()
-                .tolist()
             )
-            refl = list(
-                zip(p_pos, p_hkl, p_int, p_sig, p_pk, p_bg, *_reflection_extras(result))
-            )
+            extras = _reflection_extras(result)
+            extras = np.array(extras) if extras else np.full((3, pos.shape[1]), np.nan)
         else:
-            positions = result.positions.detach().cpu().tolist()
-            intensities = result.intensities.detach().cpu().tolist()
-            sigmas = result.sigmas.detach().cpu().tolist()
-            indexed = result.indexed_mask.detach().cpu().tolist()
-            hkl = result.hkl.detach().cpu().tolist()
-            refl = [
-                (rc, hk, i, s, 0.0, 0.0)
-                for rc, hk, keep, i, s in zip(
-                    positions, hkl, indexed, intensities, sigmas
-                )
-                if keep
-            ]
-        return [r for r in refl if math.isfinite(r[3]) and r[3] > 0.0]
+            indexed = _to_array(result.indexed_mask, dtype=bool)
+            pos = _to_array(result.positions)[indexed].T
+            hkl = _to_array(result.hkl, dtype=np.int64)[indexed].T
+            zero = np.zeros(pos.shape[1])
+            vals = np.array(
+                [
+                    _to_array(result.intensities)[indexed],
+                    _to_array(result.sigmas)[indexed],
+                    zero,
+                    zero,
+                ]
+            )
+            extras = np.full((3, pos.shape[1]), np.nan)
+        keep = np.isfinite(vals[1]) & (vals[1] > 0.0)
+        return pos[:, keep], hkl[:, keep], vals[:, keep], extras[:, keep]
 
     def _frame_row(
         self,
@@ -617,7 +580,6 @@ class DuckDBOffloader(_StreamWriter):
         event: int,
         frame_index: Optional[int],
         n_peaks: int,
-        peak_recip: Optional[float],
         *,
         indexed: bool,
         num_reflections: Optional[int] = None,
@@ -633,7 +595,7 @@ class DuckDBOffloader(_StreamWriter):
             indexed,
             int(self._serial),
             int(n_peaks),
-            peak_recip,
+            None,  # peak_resolution_nm_inv: set from the peaks on flush
             _as_float(scale),
             _as_float(scale_sigma),
             None if num_reflections is None else int(num_reflections),
@@ -720,30 +682,140 @@ class DuckDBOffloader(_StreamWriter):
 
     def _flush_rows(self) -> None:
         assert self._conn is not None
-        for table, columns, rows in (
-            ("frames", _FRAME_COLUMNS, self._frame_rows),
-            ("crystals", _CRYSTAL_COLUMNS, self._crystal_rows),
-            ("reflections", _REFLECTION_COLUMNS, self._refl_rows),
+        peaks, recips = self._peak_table()
+        i = _FRAME_COLUMNS.index("peak_resolution_nm_inv")
+        frames = [
+            (*row[:i], recip, *row[i + 1 :])
+            for row, recip in zip(self._frame_rows, recips.tolist())
+        ]
+        frames += self._frame_rows[len(recips) :]
+        for table, columns in (
+            ("frames", _columns(_FRAME_COLUMNS, frames)),
+            ("crystals", _columns(_CRYSTAL_COLUMNS, self._crystal_rows)),
+            ("reflections", self._refl_table()),
+            ("peaks", peaks),
         ):
-            if rows:
-                self._conn.executemany(
-                    f"INSERT INTO {table} VALUES " f"({', '.join('?' * len(columns))})",
-                    rows,
+            if columns:
+                self._insert(table, columns)
+        self._frame_rows.clear()
+        self._crystal_rows.clear()
+        self._refl_chunks.clear()
+        self._peak_chunks.clear()
+        self._n_refl = self._n_peak = 0
+
+    def _peak_table(self) -> tuple[dict, np.ndarray]:
+        if not self._peak_chunks:
+            return {}, np.zeros(0)
+        fid, gain, chunks = zip(*self._peak_chunks)
+        n = [c.shape[1] for c in chunks]
+        row, col, intensity, bg, npix = np.concatenate(chunks, axis=1)
+        recip = np.array(self._resolution_nm_inv_many(zip(row, col)))
+        has = np.array(n) > 0
+        starts = (np.cumsum(n) - n)[has]
+        recips = np.zeros(len(n))
+        recips[has] = np.fmax(0.0, np.fmax.reduceat(recip, starts))
+        gain = np.repeat(gain, n)
+        with np.errstate(all="ignore"):
+            photons, bg_photons = (intensity + bg) / gain, bg / gain
+        columns = (
+            np.repeat(fid, n),
+            col,
+            row,
+            intensity,
+            recip,
+            self._panels_for(col, row),
+            npix,
+            photons,
+            bg_photons,
+        )
+        return dict(zip(_PEAK_COLUMNS, columns)), recips
+
+    def _refl_table(self) -> dict:
+        if not self._refl_chunks:
+            return {}
+        cid, fid, pos, hkl, vals, extras = zip(*self._refl_chunks)
+        n = [p.shape[1] for p in pos]
+        row, col = np.concatenate(pos, axis=1)
+        n_pix, bg_model, bg_var = np.concatenate(extras, axis=1)
+        recorded = ~np.isnan(n_pix)
+        columns = (
+            np.repeat(cid, n),
+            np.repeat(fid, n),
+            *np.concatenate(hkl, axis=1),
+            *np.concatenate(vals, axis=1),
+            col,
+            row,
+            self._panels_for(col, row),
+            np.array(self._resolution_nm_inv_many(zip(row, col))),
+            (np.where(recorded, n_pix, 0).astype(np.int64), recorded),
+            (bg_model, np.isfinite(bg_model)),
+            (bg_var, np.isfinite(bg_var)),
+        )
+        return dict(zip(_REFLECTION_COLUMNS, columns))
+
+    def _panels_for(self, fs: np.ndarray, ss: np.ndarray) -> np.ndarray:
+        if not self._panels:
+            return np.full(len(fs), self.panel)
+        name, min_fs, max_fs, min_ss, max_ss = map(np.array, zip(*self._panels))
+        fs, ss = fs[:, None], ss[:, None]
+        inside = (min_fs <= fs) & (fs <= max_fs) & (min_ss <= ss) & (ss <= max_ss)
+        return np.where(inside.any(axis=1), name[inside.argmax(axis=1)], self.panel)
+
+    def _insert(self, table: str, columns: dict) -> None:
+        assert self._conn is not None
+        cols = [c if isinstance(c, tuple) else (c, None) for c in columns.values()]
+        n = len(cols[0][0])
+        nan = np.zeros(n, dtype=bool)
+        for values, valid in cols:
+            if values.dtype.kind == "f":
+                nan |= np.isnan(values) if valid is None else np.isnan(values) & valid
+        names = ", ".join(columns)
+        start = 0
+        for stop in (*np.flatnonzero(nan), n):
+            if stop > start:
+                data, select = {}, []
+                for i, (values, valid) in enumerate(cols):
+                    data[f"v{i}"] = values[start:stop]
+                    if valid is None:
+                        select.append(f"v{i}")
+                    else:
+                        data[f"ok{i}"] = valid[start:stop]
+                        select.append(f"CASE WHEN ok{i} THEN v{i} END")
+                self._conn.register("buf", data)
+                try:
+                    self._conn.execute(
+                        f"INSERT INTO {table} ({names}) "
+                        f"SELECT {', '.join(select)} FROM buf"
+                    )
+                finally:
+                    self._conn.unregister("buf")
+            if stop < n:
+                self._conn.execute(
+                    f"INSERT INTO {table} ({names}) VALUES ({', '.join('?' * len(cols))})",
+                    [
+                        v[stop].item() if ok is None or ok[stop] else None
+                        for v, ok in cols
+                    ],
                 )
-                rows.clear()
-        if self._peak_rows:
-            self._conn.executemany(
-                "INSERT INTO peaks VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                self._peak_rows,
-            )
-            self._peak_rows.clear()
+            start = stop + 1
 
 
-def _to_list(t, n: int) -> list:
-    """Optional (N,) tensor -> floats, or zeros when it was not recorded."""
+def _to_array(t, n: int = 0, dtype=np.float64) -> np.ndarray:
+    """Optional tensor -> array, or zeros when it was not recorded."""
     if t is None:
-        return [0.0] * n
-    return [float(v) for v in t.detach().cpu().tolist()]
+        return np.zeros(n, dtype=dtype)
+    return t.detach().cpu().numpy().astype(dtype)
+
+
+def _columns(names: tuple, rows: list) -> dict:
+    # rows of Python values (None is NULL) -> arrays, or (array, valid) with NULLs
+    columns = {}
+    for name, values in zip(names, zip(*rows)):
+        valid = np.array([v is not None for v in values])
+        zero = type(next((v for v in values if v is not None), 0.0))()
+        array = np.array([zero if v is None else v for v in values])
+        columns[name] = array if valid.all() else (array, valid)
+    return columns
 
 
 def _as_float(value) -> Optional[float]:
