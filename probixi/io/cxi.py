@@ -22,9 +22,9 @@ class PeakOffloader:
 
     Alongside the ``.cxi`` files it writes ``peaks.lst`` and a companion
     geometry file (the input geometry plus ``peak_list``/``peak_list_type``),
-    so the output directory is drop-in for indexamajig. 
-    
-    Note: CBF input has no HDF5 image stack to link; you may wish to 
+    so the output directory is drop-in for indexamajig.
+
+    Note: CBF input has no HDF5 image stack to link; you may wish to
     write a ``.duckdb`` peak set for it instead.
 
     Use as a context manager; the instance is the per-frame writer expected by
