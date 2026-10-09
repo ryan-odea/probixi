@@ -99,7 +99,8 @@ def _run_multi_gpu(device_list: list, opts: dict, refine, integrate) -> None:
     "list_file",
     required=True,
     type=click.Path(exists=True, dir_okay=False),
-    help="CrystFEL list file (.lst) of HDF5 inputs.",
+    help="CrystFEL list file (.lst) of HDF5 or CBF (.cbf, .cbf.gz, .cbf.bz2) "
+    "inputs, optionally as 'path //event'.",
 )
 @click.option(
     "-g",
@@ -126,7 +127,8 @@ def _run_multi_gpu(device_list: list, opts: dict, refine, integrate) -> None:
     type=click.Path(writable=True),
     help="Output file. A .stream writes a CrystFEL stream; a .duckdb/.db writes "
     "a DuckDB database (frames/reflections/peaks + geometry/cell/panels tables). "
-    "With --peaks-only it is instead an output directory for the CXI peak set. "
+    "With --peaks-only it is instead an output directory for the CXI peak set, "
+    "or a .duckdb file with the peaks (required for CBF input). "
     "Optional when only --render is used.",
 )
 @click.option(
@@ -134,7 +136,8 @@ def _run_multi_gpu(device_list: list, opts: dict, refine, integrate) -> None:
     is_flag=True,
     help="Only run peak finding and export a CXI peak set (one .cxi per input "
     "file with external-linked images, plus peaks.lst and a companion .geom) "
-    "for 'indexamajig --peaks=cxi'. -o is an output directory. No cell needed.",
+    "for 'indexamajig --peaks=cxi'. -o is an output directory (HDF5 input only). "
+    "No cell needed.",
 )
 @click.option(
     "--gif",
@@ -368,6 +371,7 @@ def main(
 
     from probixi.indexer import IntegrateConfig, RefineConfig, SeedConfig
     from probixi.io import (
+        CbfInfo,
         DataOffloader,
         DuckDBOffloader,
         PeakOffloader,
@@ -402,6 +406,15 @@ def main(
     )
 
     meta = probixi.metadata
+    if (
+        peaks_only
+        and not is_duckdb_path(output)
+        and any(isinstance(info, CbfInfo) for info in meta.files.values())
+    ):
+        raise click.UsageError(
+            "the CXI peak export links the HDF5 image stack and cannot "
+            "reference CBF input; write a .duckdb output instead"
+        )
     if not quiet:
         click.echo(f"Loaded {meta.n_frames} frames from {meta.n_files} file(s).")
     if force_all:
