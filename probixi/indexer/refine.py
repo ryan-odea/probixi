@@ -126,6 +126,21 @@ def refine_cell(
     angle_tolerance_rad: float = math.radians(3.0),
     wavelength: Optional[float] = None,
 ) -> Optional[tuple[Tensor, Tensor, Tensor, float, bool]]:
+    kernel = select("refine_cell", True)
+    if kernel is not None:
+        return kernel.refine_analytic(
+            A,
+            q,
+            hkl,
+            indexed,
+            template,
+            q_tolerance,
+            iters,
+            rounds,
+            edge_tolerance,
+            angle_tolerance_rad,
+            wavelength,
+        )
     dtype, out_device = A.dtype, A.device
     device = torch.device("cpu")
     wd = torch.float32

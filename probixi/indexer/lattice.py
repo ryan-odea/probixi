@@ -40,10 +40,17 @@ def B_to_cell(B: Tensor) -> CellParams:
         raise ValueError("B must be (3, 3)")
     M = torch.linalg.inv(B.transpose(-1, -2))
     av, bv, cv = M[:, 0], M[:, 1], M[:, 2]
-    a = float(torch.linalg.vector_norm(av))
-    b = float(torch.linalg.vector_norm(bv))
-    c = float(torch.linalg.vector_norm(cv))
-    alpha = math.acos(float(torch.dot(bv, cv)) / (b * c))
-    beta = math.acos(float(torch.dot(av, cv)) / (a * c))
-    gamma = math.acos(float(torch.dot(av, bv)) / (a * b))
+    a, b, c, bc, ac, ab = torch.stack(
+        [
+            torch.linalg.vector_norm(av),
+            torch.linalg.vector_norm(bv),
+            torch.linalg.vector_norm(cv),
+            torch.dot(bv, cv),
+            torch.dot(av, cv),
+            torch.dot(av, bv),
+        ]
+    ).tolist()
+    alpha = math.acos(bc / (b * c))
+    beta = math.acos(ac / (a * c))
+    gamma = math.acos(ab / (a * b))
     return CellParams(a=a, b=b, c=c, alpha=alpha, beta=beta, gamma=gamma)

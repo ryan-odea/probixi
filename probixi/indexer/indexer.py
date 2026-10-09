@@ -1059,7 +1059,7 @@ class Indexer:
             for i, p in positions_by_frame.items()
         }
         output = {}
-        for _ in range(self.seed.max_lattices):
+        for n in range(1, self.seed.max_lattices + 1):
             if not remaining:
                 break
             results = self.index_frames(
@@ -1085,6 +1085,8 @@ class Indexer:
                 ):
                     continue
                 previous.append(result)
+                if n == self.seed.max_lattices:
+                    continue
                 # peel the peaks this lattice explains, reseed on the residue
                 q = self.lift(
                     result.positions, frame_rotation=(frame_rotations or {}).get(i)
@@ -1253,19 +1255,31 @@ class Indexer:
         positions = torch.cat([r._integration_positions for r in active])
         # panel 0 is off-panel; placements are (min_ss, max_ss, min_fs, max_fs)
         panel = torch.zeros(len(positions), dtype=torch.long, device=positions.device)
-        for i, data in enumerate((self.geometry.get("panels") or {}).values(), 1):
-            inside = (
-                (positions[:, 0] >= data["min_ss"])
-                & (positions[:, 0] <= data["max_ss"])
-                & (positions[:, 1] >= data["min_fs"])
-                & (positions[:, 1] <= data["max_fs"])
+        panels = self.geometry.get("panels") or {}
+        if panels:
+            ss_fs = torch.tensor(
+                [
+                    [d["min_ss"], d["max_ss"], d["min_fs"], d["max_fs"]]
+                    for d in panels.values()
+                ],
+                dtype=positions.dtype,
+                device=positions.device,
             )
-            panel[inside] = i
+            rows, cols = positions[:, :1], positions[:, 1:]
+            inside = (
+                (rows >= ss_fs[:, 0])
+                & (rows <= ss_fs[:, 1])
+                & (cols >= ss_fs[:, 2])
+                & (cols <= ss_fs[:, 3])
+            )
+            ids = torch.arange(1, len(panels) + 1, device=positions.device)
+            panel = torch.where(inside, ids, 0).amax(1)
         keep = keep_non_overlapping(positions, self._radii()[0], panel)
         offset = 0
         for r in active:
             count = len(r._integration_positions)
-            selected = keep[offset : offset + count][r._integration_valid]
+            valid = keep[offset : offset + count][r._integration_valid]
+            selected = torch.where(valid)[0]
             for attribute in (
                 "hkl",
                 "positions",
@@ -1319,8 +1333,9 @@ class Indexer:
         wavelength = float(self.geometry["wavelength"])
         eta = math.radians(self.integrate.mosaicity_deg)
         r_size = self.integrate.domain_size_recip
-        if self.integrate.mosaicity_from_data and bool(result.indexed_mask.any()):
-            q_pred = result.hkl[result.indexed_mask].to(excess.dtype) @ result.A.to(
+        indexed = torch.where(result.indexed_mask)[0]
+        if self.integrate.mosaicity_from_data and len(indexed):
+            q_pred = result.hkl[indexed].to(excess.dtype) @ result.A.to(
                 excess.dtype
             ).transpose(-1, -2)
             eta, r_size = estimate_mosaicity(
@@ -1371,10 +1386,10 @@ class Indexer:
             return
         positions, intensity, sigma, _, peak, background, n_pix, bg_model, bg_var = (
             integrate_rings(
-                pred.positions.to(excess.dtype),
+                diagnostic_positions,  # already snapped to the observed peaks
                 excess,
                 var,
-                result.positions.to(excess.dtype),
+                result.positions[:0].to(excess.dtype),
                 snap_radius=self.integrate.snap_radius,
                 mean=mean.to(excess.dtype) if mean is not None else None,
                 pixel_valid=valid_mask,
@@ -1389,22 +1404,27 @@ class Indexer:
             peak_res_nm = peak_q.norm(dim=-1) * A_INV_TO_NM_INV
 
         sig_ok = torch.isfinite(sigma) & (sigma > 0)
+        keep = torch.where(sig_ok)[0]
         falloff = None
-        if bool(sig_ok.any()):
-            q_nm = pred.resolution[sig_ok].to(excess.dtype) * A_INV_TO_NM_INV
+        if len(keep):
+            q_nm = pred.resolution[keep].to(excess.dtype) * A_INV_TO_NM_INV
             falloff = falloff_resolution_limit(
                 q_nm,
-                intensity[sig_ok] / sigma[sig_ok],
+                intensity[keep] / sigma[keep],
                 target=self.integrate.resolution_isigma,
                 nbins=self.integrate.resolution_nbins,
                 min_refl=self.integrate.resolution_min_refl,
             )
         result.falloff_limit = falloff
         drl = None
-        if peak_res_nm is not None and result.indexed_mask is not None:
-            indexed = result.indexed_mask.to(peak_res_nm.device)
-            if indexed.shape == peak_res_nm.shape and bool(indexed.any()):
-                drl = peak_resolution_limit(peak_res_nm[indexed], 1.0)
+        if (
+            peak_res_nm is not None
+            and result.indexed_mask.shape == peak_res_nm.shape
+            and len(indexed)
+        ):
+            drl = peak_resolution_limit(
+                peak_res_nm[indexed.to(peak_res_nm.device)], 1.0
+            )
         if drl is not None and falloff is not None:
             drl = max(drl, falloff)
         elif drl is None:
@@ -1436,7 +1456,6 @@ class Indexer:
             + 0.5 * eta * q_rep
             + 0.5 * wavelength * self.integrate.bandwidth * q_rep * q_rep
         )
-        keep = torch.isfinite(sigma) & (sigma > 0)
         result.predicted_hkl = pred.hkl[keep]
         result.predicted_positions = positions[keep]
         result.predicted_intensities = intensity[keep]
@@ -1447,4 +1466,4 @@ class Indexer:
         result.predicted_bg_model = bg_model[keep]
         result.predicted_bg_model_var = bg_var[keep]
         result._integration_positions = positions
-        result._integration_valid = keep
+        result._integration_valid = sig_ok

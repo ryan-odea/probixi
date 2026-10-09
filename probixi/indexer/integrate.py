@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+from functools import lru_cache
 
 import torch
 from torch import Tensor
@@ -303,6 +304,15 @@ def choose_aperture(
     )
 
 
+@lru_cache(maxsize=8)
+def _stamp_offsets(extent: int, device) -> tuple[Tensor, Tensor, Tensor]:
+    off = torch.arange(-extent, extent + 1, device=device)
+    dr, dc = torch.meshgrid(off, off, indexing="ij")
+    dr = dr.flatten()
+    dc = dc.flatten()
+    return dr, dc, dr**2 + dc**2
+
+
 @torch.no_grad()
 def integrate_rings(
     pred_positions: Tensor,
@@ -325,12 +335,7 @@ def integrate_rings(
         return positions, empty, empty, snapped, empty, empty, empty, empty, empty
     raw = excess + mean
     # gather one (2*ceil(outer)+1)^2 stamp per centre
-    extent = math.ceil(radii[2])
-    off = torch.arange(-extent, extent + 1, device=raw.device)
-    dr, dc = torch.meshgrid(off, off, indexing="ij")
-    dr = dr.flatten()
-    dc = dc.flatten()
-    radius = dr**2 + dc**2
+    dr, dc, radius = _stamp_offsets(math.ceil(radii[2]), raw.device)
     center = positions.round().long()
     rr = center[:, 0, None] + dr
     cc = center[:, 1, None] + dc
@@ -343,9 +348,8 @@ def integrate_rings(
     bgmask = ok & (radius >= radii[1] ** 2) & (radius <= radii[2] ** 2)
     nb = bgmask.sum(1)
     background = torch.where(bgmask, pixels, 0).sum(1) / nb.clamp_min(1)
-    bgvariance = torch.where(bgmask, (pixels - background[:, None]) ** 2, 0).sum(1) / (
-        nb - 1
-    ).clamp_min(1)
+    net = pixels - background[:, None]
+    bgvariance = torch.where(bgmask, net**2, 0).sum(1) / (nb - 1).clamp_min(1)
     use = ok & (radius <= radii[0] ** 2)
     # Sparse nearest-owner reduction prevents double counting overlapping disks.
     unique, inverse = torch.unique(flat.flatten(), return_inverse=True)
@@ -370,7 +374,7 @@ def integrate_rings(
     )
     use = wins & (owner[inverse] == cid)
     n = use.sum(1)
-    intensity = torch.where(use, pixels - background[:, None], 0).sum(1)
+    intensity = torch.where(use, net, 0).sum(1)
     totalvar = (
         n * bgvariance * (1 + n / nb.clamp_min(1))
         + intensity.clamp_min(0) * adu_per_photon
@@ -387,7 +391,7 @@ def integrate_rings(
     )
     sigma = torch.where(nb >= MIN_ANNULUS_PIXELS, sigma, fallback)
     sigma = torch.where(n > 0, sigma, torch.zeros_like(sigma))
-    peak = torch.where(use, pixels - background[:, None], float("-inf")).amax(1)
+    peak = torch.where(use, net, float("-inf")).amax(1)
     peak = torch.where(torch.isfinite(peak), peak, 0)
     bg_model = torch.where(use, mean.flatten()[flat], torch.zeros_like(pixels)).sum(1)
     if n_bg is not None and n_bg > 0:
@@ -477,6 +481,8 @@ def spot_enrichment(
     # clearing z_threshold, enrichment = observed/chance bright-rate (~1 noise, >>1
     # real), and Poisson p-value P(X >= n_bright), X ~ Poisson(M*p) for background
     # bright-rate p.
+    if positions.shape[0] == 0:
+        return 0, 0.0, 1.0
     z = excess / var.clamp_min(1e-12).sqrt()
     if pixel_valid is not None:
         z = torch.where(pixel_valid, z, z.new_full((), float("-inf")))
@@ -485,9 +491,6 @@ def spot_enrichment(
     )[0, 0]
     bright = zmax > z_threshold
     valid = pixel_valid if pixel_valid is not None else torch.ones_like(bright)
-    M = positions.shape[0]
-    if M == 0:
-        return 0, 0.0, 1.0
     centre = torch.round(positions).to(torch.long)
     r = centre[:, 0].clamp(0, z.shape[0] - 1)
     c = centre[:, 1].clamp(0, z.shape[1] - 1)
