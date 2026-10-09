@@ -3,6 +3,7 @@ from typing import Literal, Optional
 import torch
 from torch import Tensor
 
+from ...kernels import tensor_key
 from .model import NoiseStats
 
 
@@ -79,10 +80,16 @@ class RotationalNoise(NoiseStats):
             sum_per_bin.index_add_(0, flat_idx, frame.flatten())
             counts = self.pixels_per_bin
         else:
-            mask = mask.to(device=frame.device, dtype=frame.dtype)
-            sum_per_bin.index_add_(0, flat_idx, (frame * mask).flatten())
-            counts = torch.zeros_like(self.mean_)
-            counts.index_add_(0, flat_idx, mask.flatten())
+            # per-bin counts (exact integers) only change with the mask
+            key = (tensor_key(mask), frame.dtype, frame.device)
+            cached = getattr(self, "_mask_counts", None)
+            if cached is None or cached[0] != key:
+                weight = mask.to(device=frame.device, dtype=frame.dtype)
+                counts = torch.zeros_like(self.mean_)
+                counts.index_add_(0, flat_idx, weight.flatten())
+                cached = self._mask_counts = (key, mask, weight, counts.clamp_min(1.0))
+            sum_per_bin.index_add_(0, flat_idx, (frame * cached[2]).flatten())
+            return sum_per_bin / cached[3]
         return sum_per_bin / counts.clamp_min(1.0)
 
     def mean(self) -> Tensor:

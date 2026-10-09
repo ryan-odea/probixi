@@ -30,6 +30,8 @@ from .neighborhood import (
     smooth_logits_batch,
 )
 
+_BLOB_MAPS = ("excess", "z", "log_bf", "posterior", "var_eff", "mean_eff")
+
 
 @dataclass
 class Peak:
@@ -614,6 +616,26 @@ class PeakFinder:
                 else self.posterior_threshold
             )
             binary = (scores["posterior"] > thr) & mask
+        maps = [scores.get(k) for k in _BLOB_MAPS]
+        if self.matched_filter:
+            maps.append(scores.get("mf_max"))
+        kernel = select(
+            "blobs",
+            binary.is_cuda
+            and binary.is_contiguous()
+            and all(
+                m is not None
+                and m.dtype == torch.float32
+                and m.is_contiguous()
+                and m.shape == binary.shape
+                and m.device == binary.device
+                for m in maps
+            ),
+        )
+        if kernel is not None:
+            result = kernel.extract(self, binary, scores, frame_index, mask)
+            if result is not None:
+                return result
         labels, n_blobs = label_connected_components(
             binary, connectivity=self.connectivity
         )
