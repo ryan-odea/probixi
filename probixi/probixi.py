@@ -42,7 +42,7 @@ from .io import (
     render_frame,
 )
 from .io.cell import median_cell
-from .kernels import Engine, use_engine
+from .kernels import Engine, select, use_engine
 from .peakfinding import PeakFinder, PeakStream
 from .peakfinding.noise import (
     CalibrationResult,
@@ -88,7 +88,7 @@ _CITATION = r"""
 @software{odea_probixi,
   author  = {O'Dea, Ryan and Weinert, Tobias},
   title   = {{probixi}: Self-Calibrating Probabilistic Peak Finding for Serial X-Ray Crystallographic Data},
-  version = {0.7.4},
+  version = {0.8.0},
   year    = {2026},
   url     = {https://github.com/ryan-odea/probixi}
 }
@@ -374,6 +374,8 @@ class Probixi:
             n = int(getattr(info, "n_frames", 0))
             if offset <= index < offset + n:
                 ev = index - offset + int(getattr(info, "event_start", 0))
+                if getattr(info, "eventless", False):
+                    return f"{info.filename} //"
                 return f"{info.filename} //{ev}"
             offset += n
         return f"frame {index}"
@@ -574,13 +576,21 @@ class Probixi:
                 "detector",
                 stacklevel=2,
             )
+        panels = _panel_boxes(geom, frame_size)
+        valid = self._static_mask(first, frame_size)
+        if panels is not None:
+            covered = torch.zeros_like(valid)
+            for r0, r1, c0, c1 in panels:
+                covered[r0:r1, c0:c1] = True
+            valid &= covered
         self._noise = NoiseModel(
             frame_size=frame_size,
             mode=self.noise_mode,
             warmup_frames=self.warmup_frames,
             beam_center=geom.beam_center if geom is not None else None,
             radial_radius=radius,
-            valid_mask=self._static_mask(first, frame_size),
+            panels=panels,
+            valid_mask=valid,
             device=self.device,
             dtype=self.dtype,
         )
@@ -598,14 +608,28 @@ class Probixi:
         )
 
     def _static_mask(self, frame: Tensor, frame_size: tuple[int, int]) -> Tensor:
-        # a-priori bad pixels: at/above max_adu (gaps/dead/saturated), panel-edge
-        # pixels, and geometry bad regions in either coordinate form -- all kept
-        # out of the background model and detection.
+        # a-priori bad pixels: at/above max_adu (gaps/dead/saturated), pixels
+        # flagged by value (flag_lessthan/morethan/equal, CrystFEL's strict
+        # comparisons), panel-edge pixels, and geometry bad regions in either
+        # coordinate form -- all kept out of the background model and detection.
         mask = torch.ones(frame_size, dtype=torch.bool, device=frame.device)
         geom = self.loader.metadata.geometry
         max_adu = geom.parameters.get("max_adu") if geom else None
         if isinstance(max_adu, (int, float)):
             mask &= frame < float(max_adu)
+        keep = {
+            "flag_lessthan": torch.ge,
+            "flag_morethan": torch.le,
+            "flag_equal": torch.ne,
+        }
+        for name, flags in (geom.panel_flags or {}).items() if geom else []:
+            panel = geom.panels.get(name)
+            if panel is None:
+                continue
+            rows = slice(max(0, int(panel["min_ss"])), int(panel["max_ss"]) + 1)
+            cols = slice(max(0, int(panel["min_fs"])), int(panel["max_fs"]) + 1)
+            for key, value in flags:
+                mask[rows, cols] &= keep[key](frame[rows, cols], value)
         if geom is not None:
             _mask_panel_edges(mask, geom)
         for br in geom.bad_regions if geom else []:
@@ -1100,16 +1124,25 @@ class Probixi:
             for item in frames:
                 self._ensure_built(item)
                 self.noise.record_drift = False
-                blank = floor is not None and _frame_level(item) < floor
+                blank = floor is not None and _is_blank(item, floor)
                 if blank:
                     self.screened_frames.append(start_index + offset)
                 if update_noise and not blank:
                     self._update_noise(item)
                 if estimate_scale and self._scale_ref is not None:
                     subs = item if item.ndim == 3 else item.unsqueeze(0)
+                    pred = (
+                        self.finder._pred()
+                        if self._scale_ref.noise_model is self.noise
+                        and self.noise.mode == "online"
+                        and self._scale_ref._combination() == self.finder.combination
+                        else None
+                    )
                     for sub in subs:
                         idx = start_index + offset
-                        self._frame_scales[idx] = self._scale_ref.estimate(sub, idx)
+                        self._frame_scales[idx] = self._scale_ref.estimate_later(
+                            sub, idx, pred
+                        )
                         offset += 1
                 else:
                     offset += int(item.shape[0]) if item.ndim == 3 else 1
@@ -1415,6 +1448,16 @@ def _frame_level(frame: Tensor) -> float:
     return float(v.median()) if v.numel() else 0.0
 
 
+def _is_blank(frame: Tensor, floor: float) -> bool:
+    kernel = select(
+        "level",
+        frame.is_cuda and frame.dtype == torch.float32 and frame.is_contiguous(),
+    )
+    if kernel is not None:
+        return kernel.below(frame, floor, _SEED_LEVEL_STRIDE)
+    return _frame_level(frame) < floor
+
+
 def _blank_seed_floor(levels: list[float], frac: float) -> float:
     if not levels or frac <= 0.0:
         return float("-inf")
@@ -1447,6 +1490,26 @@ def _lab_radius_map(geom, frame_size: tuple[int, int], device=None) -> Optional[
         xy = _lab_xy_pixels(pos, g, bases)
         out[r0:r1] = torch.linalg.vector_norm(xy, dim=-1).view(n, cols)
     return out
+
+
+def _panel_boxes(geom, frame_size: tuple[int, int]) -> Optional[list]:
+    panels = list((getattr(geom, "panels", None) or {}).values())
+    if len(panels) < 2:
+        return None
+    rows, cols = frame_size
+    boxes = []
+    for panel in panels:
+        try:
+            r0, r1 = int(panel["min_ss"]), int(panel["max_ss"])
+            c0, c1 = int(panel["min_fs"]), int(panel["max_fs"])
+        except (KeyError, TypeError, ValueError):
+            return None
+        r0, r1 = max(0, r0), min(rows - 1, r1)
+        c0, c1 = max(0, c0), min(cols - 1, c1)
+        if r0 > r1 or c0 > c1:
+            return None
+        boxes.append((r0, r1 + 1, c0, c1 + 1))
+    return boxes
 
 
 def _mask_panel_edges(mask: Tensor, geom) -> None:

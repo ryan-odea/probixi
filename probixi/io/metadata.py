@@ -8,6 +8,7 @@ import h5py
 import hdf5plugin  # noqa: F401  (registers bitshuffle)
 
 from .assemble import PanelPlacement, assembled_frame_shape, build_placements
+from .cbf import read_cbf_header
 from .cell import CellParams
 from .geometry import Geometry
 
@@ -50,13 +51,47 @@ class H5Info:
 
 
 @dataclass
+class CbfInfo:
+    """Locator and shape for the single image in one CBF file.
+
+    Parameters
+    ----------
+    filename : str
+        Path to the ``.cbf``, ``.cbf.gz`` or ``.cbf.bz2`` file.
+    frame_shape : tuple[int, ...]
+        Shape of the image ``(ss, fs)``.
+    dtype : str
+        Pixel type of the decoded image, e.g. ``"int32"``.
+    n_frames : int, default 1
+        Number of frames; a CBF file holds one image.
+    event_start : int, default 0
+        Source event of the selection (only ``//0`` exists).
+    source_n_frames : int, optional
+        Set when the list entry names the event ``//0``; ``None`` for an entry
+        without an event, which CrystFEL writes as the empty event ``//``.
+    """
+
+    filename: str
+    frame_shape: tuple[int, ...]
+    dtype: str
+    n_frames: int = 1
+    event_start: int = 0
+    source_n_frames: Optional[int] = None
+
+    @property
+    def eventless(self) -> bool:
+        return self.source_n_frames is None
+
+
+@dataclass
 class Metadata:
     """Everything the loader resolved up front about a run.
 
     Parameters
     ----------
     files : dict
-        Map from filename to its :class:`H5Info` (dataset path, counts, shape).
+        Map from filename to its :class:`H5Info` (dataset path, counts, shape) or
+        :class:`CbfInfo`.
     geometry : Geometry, optional
         Parsed detector geometry, or None if no geometry file was given.
     cell : CellParams, optional
@@ -82,6 +117,15 @@ class Metadata:
     @property
     def distance(self) -> Optional[float]:
         return self.geometry.distance if self.geometry else None
+
+
+def scan_cbf(path: PathLike) -> CbfInfo:
+    header = read_cbf_header(path)
+    return CbfInfo(
+        filename=str(Path(path)),
+        frame_shape=header.shape,
+        dtype=header.dtype.name,
+    )
 
 
 def scan_h5(path: PathLike, geometry: Optional[Geometry] = None) -> H5Info:

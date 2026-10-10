@@ -5,6 +5,7 @@ from typing import Iterable, Literal, Optional
 import torch
 from torch import Tensor, nn
 
+from ...kernels import select
 from ._drift import DriftDiagnostics
 
 
@@ -43,6 +44,18 @@ class NoiseStats(nn.Module):
         x = self._project(self._coerce(frame), mask)
         self.n_ += 1
         if self.decay == 1.0:
+            kernel = select(
+                "noise",
+                x.is_cuda
+                and x.dtype == self.mean_.dtype == torch.float32
+                and x.shape == self.mean_.shape
+                and x.is_contiguous()
+                and self.mean_.is_contiguous()
+                and self.M2_.is_contiguous(),
+            )
+            if kernel is not None:
+                kernel.update_stat(self, x)
+                return
             # Welford: mean += delta/n; M2 += delta*(x - mean_new). var divides by n-1.
             delta = x - self.mean_
             self.mean_.add_(delta / self.n_)
@@ -262,12 +275,32 @@ class NoiseModel(nn.Module):
         # leave pixels with no spread yet (std == 0) untouched
         return torch.where(std > 0, torch.minimum(frame, cap), frame)
 
+    def _fused_pixel(self, frame: Tensor) -> bool:
+        p = self.pixel
+        return (
+            self.mode == "online"
+            and p.decay == 1.0
+            and isinstance(frame, Tensor)
+            and frame.is_cuda
+            and frame.dtype == p.mean_.dtype == torch.float32
+            and frame.shape == p.mean_.shape
+            and frame.device == p.mean_.device
+            and frame.is_contiguous()
+            and not frame.requires_grad
+            and p.mean_.is_contiguous()
+            and p.M2_.is_contiguous()
+        )
+
     @torch.no_grad()
     def update(self, frame: Tensor) -> None:
         if self.mode == "per_frame":
             self._soft_reset()
-        frame_for_stats = self._robust_clip(frame)
-        self.pixel.update(frame_for_stats)
+        kernel = select("noise", self._fused_pixel(frame))
+        if kernel is not None:
+            frame_for_stats = kernel.update_pixel(self, frame)
+        else:
+            frame_for_stats = self._robust_clip(frame)
+            self.pixel.update(frame_for_stats)
         feed_mask = self.valid_mask
         active = self.active_update_sources
         if active is None or "rotational" in active:
@@ -389,6 +422,22 @@ class NoiseModel(nn.Module):
         chosen_var = var_source or preset_var
         if chosen_var not in sources:
             raise ValueError(f"unknown var_source: {chosen_var!r}")
+
+        p = self.pixel
+        kernel = select(
+            "noise",
+            chosen_var == "pixel"
+            and p.decay == 1.0
+            and p.mean_.is_cuda
+            and p.mean_.dtype == torch.float32
+            and p.mean_.is_contiguous()
+            and p.M2_.is_contiguous(),
+        )
+        if kernel is not None:
+            mean, var = kernel.predict_maps(
+                self, weights, total, combination == "calibrated" and use_preset
+            )
+            return {"mean": mean, "var": var, "mask": self.valid_mask}
 
         contributions = [
             (w / total) * sources[k].mean() for k, w in weights.items() if w > 0

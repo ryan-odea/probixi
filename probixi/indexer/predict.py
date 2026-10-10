@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from functools import lru_cache
 
 import torch
 from torch import Tensor
@@ -55,20 +56,25 @@ def _centering_mask(hkl: Tensor, centering: str | None) -> Tensor:
 
 
 def _enumerate_hkls_within(
-    A: Tensor, q_max: float, dtype: torch.dtype, device
+    A: Tensor, q_max: float, dtype: torch.dtype, device, centering: str | None = None
 ) -> Tensor:
     row_norms = torch.linalg.vector_norm(torch.linalg.inv(A), dim=1)
     maxima = torch.ceil(q_max * row_norms).to(torch.long).tolist()
+    return _hkl_box(tuple(maxima), centering, dtype, device)
 
+
+@lru_cache(maxsize=4)
+def _hkl_box(
+    maxima: tuple[int, ...], centering: str | None, dtype: torch.dtype, device
+) -> Tensor:
     def _rng(m: int) -> Tensor:
         m = max(int(m), 1)
         return torch.arange(-m, m + 1, device=device, dtype=dtype)
 
-    H, K, L = torch.meshgrid(
-        _rng(maxima[0]), _rng(maxima[1]), _rng(maxima[2]), indexing="ij"
-    )
+    H, K, L = torch.meshgrid(*map(_rng, maxima), indexing="ij")
     hkl = torch.stack([H, K, L], dim=-1).reshape(-1, 3)
-    return hkl[~((hkl == 0).all(dim=-1))]
+    hkl = hkl[~((hkl == 0).all(dim=-1))]
+    return hkl[_centering_mask(hkl, centering)] if centering else hkl
 
 
 @torch.no_grad()
@@ -94,9 +100,7 @@ def predict_reflections(
     device, dtype = A.device, A.dtype
     wavelength = float(geometry["wavelength"])
 
-    hkl = _enumerate_hkls_within(A, q_max, dtype, device)
-    if centering:
-        hkl = hkl[_centering_mask(hkl, centering)]
+    hkl = _enumerate_hkls_within(A, q_max, dtype, device, centering)
     q = hkl @ A.transpose(-1, -2)  # (M, 3) = (A @ hkl^T)^T
     qn = torch.linalg.vector_norm(q, dim=-1)
 
@@ -117,6 +121,7 @@ def predict_reflections(
         keep = (qn <= q_max) & (Sz > 0) & (eps.abs() < tol)
     else:
         keep = (qn <= q_max) & (Sz > 0) & (eps.abs() < partiality_threshold)
+    keep = torch.where(keep)[0]
     hkl, q, qn, eps = hkl[keep], q[keep], qn[keep], eps[keep]
     if hkl.shape[0] == 0:
         empty = q.new_empty(0)
@@ -133,6 +138,7 @@ def predict_reflections(
             & (cols >= 0)
             & (cols <= frame_shape[1] - 1)
         )
+        on = torch.where(on)[0]
         hkl, positions, q, qn, eps = (
             hkl[on],
             positions[on],

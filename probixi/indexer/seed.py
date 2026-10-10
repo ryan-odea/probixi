@@ -6,6 +6,7 @@ from functools import lru_cache
 import torch
 from torch import Tensor
 
+from ..kernels import tensor_key
 from .refine import _axis_angle_to_rotation
 
 # TORO-style seeding over orientation with the cell fixed
@@ -27,6 +28,29 @@ def _fibonacci_hemisphere(n: int, device, dtype: torch.dtype) -> Tensor:
     r = torch.sqrt((1.0 - z * z).clamp_min(0.0))
     phi = i * (math.pi * (3.0 - math.sqrt(5.0)))  # golden angle
     return torch.stack([r * torch.cos(phi), r * torch.sin(phi), z], dim=-1)
+
+
+_target_axes: dict = {}
+
+
+def _target_axis(
+    B_target: Tensor, device, dtype: torch.dtype, n_directions: int
+) -> tuple[Tensor, Tensor, Tensor]:
+    key = (tensor_key(B_target), device, dtype, n_directions)
+    hit = _target_axes.get(key)
+    if hit is not None and hit[0] is B_target:
+        return hit[1:]
+    A_direct = torch.linalg.inv(B_target.to(device=device, dtype=dtype)).transpose(
+        -1, -2
+    )
+    a_real = A_direct[:, 0]
+    La = torch.linalg.vector_norm(a_real).clamp_min(1e-12)
+    dirs = _fibonacci_hemisphere(n_directions, device, dtype)
+    dirs = torch.cat((dirs, -dirs))
+    if len(_target_axes) >= 8:
+        _target_axes.clear()
+    out = _target_axes[key] = (B_target, a_real / La, La * dirs, dirs)
+    return out[1:]
 
 
 def _rotations_mapping(a: Tensor, b: Tensor) -> Tensor:
@@ -116,16 +140,10 @@ def sphere_seed_candidates(
     q = q_obs.to(device=device, dtype=work)
     w = None if weights is None else weights.to(device=device, dtype=work)
 
-    # columns of B^-T are the direct lattice vectors a, b, c
-    A_direct = torch.linalg.inv(B).transpose(-1, -2)
-    a_real = A_direct[:, 0]
-    La = torch.linalg.vector_norm(a_real).clamp_min(1e-12)
-    a_hat = a_real / La
+    a_hat, La_dirs, dirs = _target_axis(B_target, device, work, n_directions)
 
     # 1/2 from aboev: score a-axis directions by integer-projection fitness
-    dirs = _fibonacci_hemisphere(n_directions, device, work)
-    dirs = torch.cat((dirs, -dirs))
-    proj = (La * dirs) @ q.T  # (D, N) = t . q over observed peaks
+    proj = La_dirs @ q.T  # (D, N) = t . q over observed peaks
     cos = torch.cos(2.0 * math.pi * proj)
     if w is None:
         fitness = cos.mean(dim=1)

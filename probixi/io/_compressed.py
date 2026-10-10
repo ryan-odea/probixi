@@ -66,7 +66,8 @@ class Layout:
         return int(np.prod(self.shape)) * self.dtype.itemsize
 
     def blocks(self, raw, mask):
-        """Return compressed blocks, verbatim copies, shuffle settings and checksum."""
+        """Return compressed blocks (array or list), verbatim copies, shuffle settings
+        and checksum."""
         size = self.frame_bytes
         active = [
             (fid, cd) for i, (fid, cd) in enumerate(self.filters) if not mask & (1 << i)
@@ -116,27 +117,39 @@ class Layout:
         if is_bit and block % (8 * self.dtype.itemsize):
             raise ValueError("invalid bitshuffle block size")
         shuffled = size - size % (8 * self.dtype.itemsize) if is_bit else size
-        offset, decoded = 12, 0
-        blocks, copies = [], []
-        while decoded < shuffled:
-            outsize = min(block, shuffled - decoded)
-            if offset + 4 > len(raw):
-                raise ValueError("truncated compressed block header")
-            length = struct.unpack_from(">I", raw, offset)[0]
-            offset += 4
-            if length == 0 or offset + length > len(raw):
-                raise ValueError("truncated compressed block")
-            if not is_bit and length == outsize:
-                copies.append((offset, decoded, length))
-            else:
-                if self.codec == "Zstd":
-                    self._zstd(raw[offset : offset + length])
-                blocks.append((offset, length, decoded, outsize))
-            offset += length
-            decoded += outsize
-        if decoded < size:
-            copies.append((offset, decoded, size - decoded))
-            offset += size - decoded
+        unpack = struct.Struct(">I").unpack_from
+        zstd = self._zstd if self.codec == "Zstd" else None
+        offset, headers, end = 12, [], len(raw)
+        try:
+            for _ in range((shuffled + block - 1) // block):
+                headers.append(offset)
+                length = unpack(raw, offset)[0]
+                offset += 4 + length
+                if length == 0 or offset > end:
+                    raise ValueError("truncated compressed block")
+                if zstd:
+                    zstd(raw[offset - length : offset])
+        except struct.error:
+            raise ValueError("truncated compressed block header") from None
+        headers = np.array(headers, dtype=np.int64)
+        dest = np.arange(len(headers), dtype=np.int64) * block
+        blocks = np.stack(
+            [
+                headers + 4,
+                np.diff(headers, append=offset) - 4,
+                dest,
+                np.minimum(block, shuffled - dest),
+            ],
+            axis=1,
+        )
+        copies = []
+        if not is_bit:
+            plain = blocks[:, 1] == blocks[:, 3]
+            copies = [(s, d, n) for s, n, d, _ in blocks[plain].tolist()]
+            blocks = blocks[~plain]
+        if shuffled < size:
+            copies.append((offset, shuffled, size - shuffled))
+            offset += size - shuffled
         if offset != len(raw):
             raise ValueError("unexpected compressed chunk tail")
         return blocks, copies, (block if is_bit else 0, byte_shuffle), None
@@ -150,40 +163,41 @@ class Layout:
             raise Unsupported("Zstd dictionary/checksummed frame")
 
 
-def pack(chunks, layout, decoder):
+def pack(chunks, parsed, decoder):
     """Pack stored bytes, aligning compressed blocks as required by each codec."""
     records, copies, shuffle, checksums, parts = [], [], [], [], []
     position = 0
-    for frame, (mask, raw) in enumerate(chunks):
-        blocks, plain, shuf, checksum = layout.blocks(raw, mask)
+    for frame, ((_, raw), (blocks, plain, shuf, checksum)) in enumerate(
+        zip(chunks, parsed)
+    ):
         base = frame * decoder.stride
         # One host copy per frame when arbitrary compressed-pointer alignment is allowed.
         start = position
         parts.append((start, raw))
         position += len(raw)
         copies.extend((start + s, base + d, n) for s, d, n in plain)
-        for source, length, dest, size in blocks:
-            if (base + dest) % decoder.align.output:
-                raise Unsupported("unaligned decoded block")
-            ptr = start + source
-            if ptr % decoder.align.input:
-                ptr = (
-                    (position + decoder.align.input - 1)
-                    // decoder.align.input
-                    * decoder.align.input
-                )
-                parts.append((ptr, memoryview(raw)[source : source + length]))
-                position = ptr + length
-            records.append((ptr, length, base + dest, size))
+        blocks = np.asarray(blocks, dtype=np.int64).reshape(-1, 4)
+        rows = blocks + (start, 0, base, 0)
+        if (rows[:, 2] % decoder.align.output).any():
+            raise Unsupported("unaligned decoded block")
+        for k in np.flatnonzero(rows[:, 0] % decoder.align.input):
+            source, length = blocks[k, :2].tolist()
+            ptr = (
+                (position + decoder.align.input - 1)
+                // decoder.align.input
+                * decoder.align.input
+            )
+            parts.append((ptr, memoryview(raw)[source : source + length]))
+            position = ptr + length
+            rows[k, 0] = ptr
+        records.append(rows)
         shuffle.append(shuf)
         checksums.append(checksum)
     host = torch.empty(position, dtype=torch.uint8, pin_memory=True)
     view = host.numpy()
     for offset, data in parts:
         view[offset : offset + len(data)] = np.frombuffer(data, dtype=np.uint8)
-    metadata = torch.from_numpy(
-        np.asarray(records, dtype=np.int64).reshape(-1, 4)
-    ).pin_memory()
+    metadata = torch.from_numpy(np.concatenate(records)).pin_memory()
     return host, metadata, copies, shuffle, checksums
 
 
@@ -238,8 +252,19 @@ def _frame_sources(d, lo, hi, open_dataset):
     return [result[i] for i in range(lo, hi)]
 
 
-def _read_batches(entries, chosen, lo, hi, strict):
-    """CPU producer owns all HDF5 handles. No CUDA work occurs in this thread."""
+def _stage(d, start, end):
+    """Read a batch into pinned memory so its device copy can be asynchronous."""
+    try:
+        dtype = torch.from_numpy(np.empty(0, dtype=d.dtype)).dtype
+    except (TypeError, ValueError):
+        return np.asarray(d[start:end])
+    staged = torch.zeros((end - start, *d.shape[1:]), dtype=dtype, pin_memory=True)
+    d.read_direct(staged.numpy(), np.s_[start:end])
+    return staged
+
+
+def _read_batches(entries, chosen, lo, hi, strict, decoder_for):
+    """CPU producer owns all HDF5 handles and pinned staging; it launches no kernels."""
     with ExitStack() as stack:
         opened = {}
 
@@ -284,7 +309,7 @@ def _read_batches(entries, chosen, lo, hi, strict):
                         layouts[s.name + "@" + s.file.filename] == layout
                         for s, _ in selected
                     ):
-                        raws = []
+                        raws, parsed = [], []
                         try:
                             for source, i in selected:
                                 if (
@@ -293,20 +318,24 @@ def _read_batches(entries, chosen, lo, hi, strict):
                                 ):
                                     raise Unsupported("unallocated fill chunk")
                                 raw = source.id.read_direct_chunk((i, 0, 0))
-                                layout.blocks(
-                                    raw[1], raw[0]
-                                )  # determine fallback before device execution
+                                parsed.append(layout.blocks(raw[1], raw[0]))
                                 raws.append(raw)
                         except Unsupported as exc:
                             if strict:
                                 raise RuntimeError(str(exc)) from exc
                         else:
-                            yield layout, raws, (info, start, end)
-                            continue
+                            try:
+                                payload = pack(raws, parsed, decoder_for(layout))
+                            except Unsupported:
+                                if strict:
+                                    raise
+                            else:
+                                yield layout, payload
+                                continue
                     elif strict:
                         raise RuntimeError("mixed compression inside a decoding batch")
                 if d is not None:
-                    yield None, np.asarray(d[start:end]), None
+                    yield None, _stage(d, start, end)
                 else:
                     f = opened.get(info.filename)
                     if f is None:
@@ -314,7 +343,7 @@ def _read_batches(entries, chosen, lo, hi, strict):
                         opened[info.filename] = f
                     yield None, assemble_batch(
                         f, start, end, info.placements, info.frame_shape
-                    ), None
+                    )
 
 
 def iter_gpu_frames(
@@ -323,6 +352,14 @@ def iter_gpu_frames(
     """Preserve logical batching/order while transporting compressed batches."""
     q, stop = queue.Queue(max(1, prefetch)), threading.Event()
     sentinel = object()
+    decoders = {}
+    index = torch.cuda.current_device()
+
+    def decoder_for(layout):
+        key = (layout.codec, layout.frame_bytes)
+        if key not in decoders:
+            decoders[key] = kernel.Decoder(layout.codec, layout.frame_bytes, device)
+        return decoders[key]
 
     def put(item):
         while not stop.is_set():
@@ -334,7 +371,10 @@ def iter_gpu_frames(
 
     def produce():
         try:
-            for item in _read_batches(loader.metadata.files, chosen, lo, hi, strict):
+            torch.cuda.set_device(index)  # new threads default to device 0
+            for item in _read_batches(
+                loader.metadata.files, chosen, lo, hi, strict, decoder_for
+            ):
                 if stop.is_set():
                     break
                 put(item)
@@ -345,7 +385,7 @@ def iter_gpu_frames(
 
     worker = threading.Thread(target=produce, daemon=True)
     worker.start()
-    decoders, pending = {}, []
+    pending, copied = [], None
     try:
         while True:
             item = q.get()
@@ -353,32 +393,23 @@ def iter_gpu_frames(
                 break
             if isinstance(item, Exception):
                 raise item
-            layout, data, fallback = item
-            if layout is not None:
-                key = (layout.codec, layout.frame_bytes)
-                if key not in decoders:
-                    decoders[key] = kernel.Decoder(
-                        layout.codec, layout.frame_bytes, device
-                    )
-                decoder = decoders[key]
-                try:
-                    payload = pack(data, layout, decoder)
-                except Unsupported:
-                    if strict:
-                        raise
-                    info, start, end = fallback
-                    with h5py.File(info.filename, "r") as f:
-                        data = np.asarray(f[info.dataset][start:end])
-                    layout = None
+            layout, data = item
             if layout is None:
-                if not data.dtype.isnative:
-                    data = data.astype(data.dtype.newbyteorder("="))
-                frames = torch.from_numpy(data).to(device=device, dtype=dtype)
+                if not isinstance(data, torch.Tensor):
+                    if not data.dtype.isnative:
+                        data = data.astype(data.dtype.newbyteorder("="))
+                    data = torch.from_numpy(data)
+                frames = data.to(
+                    device=device, dtype=dtype, non_blocking=data.dtype == dtype
+                )
+                if copied is not None:  # bound the pinned buffers held by copies
+                    copied.synchronize()
+                copied = torch.cuda.Event()
+                copied.record()
             else:
                 original_dtype = torch.from_numpy(np.empty(0, dtype=layout.dtype)).dtype
-                frames = decoder.decode(*payload, original_dtype, layout.shape).to(
-                    dtype
-                )
+                decoder = decoder_for(layout)
+                frames = decoder.decode(*data, original_dtype, layout.shape).to(dtype)
             for frame in frames.unbind(0):
                 if batch_size == 1:
                     yield frame

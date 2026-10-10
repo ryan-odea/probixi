@@ -1,4 +1,5 @@
 import math
+from functools import lru_cache
 
 import torch
 import triton
@@ -226,6 +227,21 @@ def kernel(
     tl.store(SCORE + c, tl.sum(tl.where(match, w, 0.0), 0))
 
 
+@lru_cache(maxsize=4)
+def _bias_corrections(lr, max_iters, device):
+    bc1 = torch.tensor(
+        [lr / (1 - 0.9 ** (s + 1)) for s in range(max_iters)],
+        device=device,
+        dtype=torch.float32,
+    )
+    bc2 = torch.tensor(
+        [math.sqrt(1 - 0.999 ** (s + 1)) for s in range(max_iters)],
+        device=device,
+        dtype=torch.float32,
+    )
+    return bc1, bc2
+
+
 def refine_triton(
     A_init_per_frame,
     q_obs_per_frame,
@@ -261,16 +277,7 @@ def refine_triton(
         dtype=torch.int32,
     )
     nobs = torch.tensor(ns, device=dev, dtype=torch.int32)
-    bc1 = torch.tensor(
-        [lr / (1 - 0.9 ** (s + 1)) for s in range(max_iters)],
-        device=dev,
-        dtype=torch.float32,
-    )
-    bc2 = torch.tensor(
-        [math.sqrt(1 - 0.999 ** (s + 1)) for s in range(max_iters)],
-        device=dev,
-        dtype=torch.float32,
-    )
+    bc1, bc2 = _bias_corrections(lr, max_iters, dev)
     AO = torch.empty_like(A)
     HK = torch.empty(C, N, 3, device=dev, dtype=torch.int64)
     IDX = torch.empty(C, N, device=dev, dtype=torch.bool)

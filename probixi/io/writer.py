@@ -101,6 +101,11 @@ class _StreamWriter:
         self._event_starts = [
             getattr(info, "event_start", 0) for info in (files or {}).values()
         ]
+        self._eventless = {
+            str(info.filename)
+            for info in (files or {}).values()
+            if getattr(info, "eventless", False)
+        }
         self._fh = None
         self._serial = 0
 
@@ -156,7 +161,7 @@ class _StreamWriter:
         return [
             "----- Begin chunk -----",
             f"Image filename: {filename}",
-            f"Event: //{event}",
+            f"Event: //{'' if filename in self._eventless else event}",
             f"Image serial number: {self._serial}",
             # only frames worth writing are emitted, so every chunk is a hit
             "hit = 1",
