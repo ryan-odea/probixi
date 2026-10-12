@@ -1,99 +1,110 @@
 # Peakfinding
 
-Indexing, integration, and eventually merging are only as good as the peaks you hand them. The usual way to find peaks is to pick a threshold, in ADU or some signal-to-noise proxy, and keep whatever pokes above it. The catch is that the right threshold drifts with the beam, the detector, the background, and the sample, so a value tuned on one run quietly throws away half the hits on the next.
+A conventional peakfinder keeps whatever exceeds a threshold, in detector units or in a signal-to-noise proxy. The appropriate threshold depends on the beam, the detector, the background, and the sample, so a value tuned on one run does not transfer to the next. `probixi` replaces the threshold with a hypothesis test whose null distribution is learned from the data.
 
-`probixi` learns what the detector looks like with no crystal in the beam, then flags whatever is an outlier under that model.
+The numerical constants and their defaults are listed in the [method reference](method.md).
 
-## Modeling the background
+## Two properties of the stream
 
-The first job is to learn, per pixel, what "quiet" looks like. That means a mean $\mu$ and a variance $\sigma^2$, both accumulated online as frames stream past with Welford's method (or an exponentially-weighted variant when you want the model to track drift).
+The method rests on two properties of serial data.
 
-$$\delta = x - \mu,\qquad \mu \mathrel{+}= \tfrac{\delta}{n},\qquad M_2 \mathrel{+}= \delta\,(x - \mu_{\text{new}}),\qquad \sigma^2 = \tfrac{M_2}{n-1}.$$
+1. Every frame records the same detector under the same beam. The background at pixel $i$ is therefore a draw from one distribution $F_i$, common to all frames and changing only slowly within a run.
+2. Bragg signal is sparse. At any pixel only a small fraction of observations carry signal.
 
-A single per-pixel estimate is noisy early on, and it ignores the fact that detector backgrounds have *structure*. So `probixi` keeps three views of the background and blends them.
+The first property makes $F_i$ learnable from the stream. The second makes the learning robust, because almost every value that reaches the estimator is background.
 
-- **per-pixel**, the slow-to-settle estimate above.
-- **radial**, a rotationally-symmetric model in $\sim$2 px annuli about the beam center.
-- **per-panel**, a coarse per-tile estimate for panel-to-panel offsets.
+Detection is then a test at every pixel. Under the null $H_0$ the value $x_i$ is a background draw with mean $\mu_i$ and variance $\sigma_i^2$. Under the alternative $H_1$ it is background plus a positive excess. `probixi` estimates $(\mu_i, \sigma_i)$ online, forms the whitened residual
 
-The default blend, `shrinkage`, leans on the low-variance radial prior while evidence is thin and migrates to per-pixel as it accrues.
+$$z_i = \frac{x_i - \mu_i}{\sigma_i},$$
 
-$$w = \min\!\Big(1,\ \tfrac{n}{n_{\text{warmup}}}\Big),\qquad \mu = w\,\mu_{\text{pixel}} + (1-w)\,\mu_{\text{radial}}.$$
+which is standard normal under $H_0$ once the model is calibrated, and tests $z$.
 
-Two details keep the model honest. **Robust clipping** caps each frame at $\mu + 5\sigma$ before folding it into the statistics, so the Bragg peaks we are hunting cannot inflate the variance we detect them against (a peak must not poison the stats used to find it). And after `warmup_frames` (default 16), any pixel whose across-frame variance is still exactly zero is declared dead and masked out.
+## The background model
 
-## Whitening
+`probixi` accumulates the mean and variance with Welford's update, which avoids the cancellation that $\sum x^2 - n\bar x^2$ suffers in single precision. A per-pixel estimate needs many frames to stabilise and ignores the spatial structure of a detector background, so three estimators of the same form run on the same stream.
 
-With a mean and variance in hand, every frame becomes a **z-map**, how many standard deviations each pixel sits above its own quiet level.
+- **Pixel.** One estimate per pixel.
+- **Radial.** Pixels pooled into annuli 2 pixels wide about the beam centre. This captures solvent and air scatter, which are symmetric about the beam.
+- **Frame-wide.** All pixels pooled. This captures an offset common to the frame, such as a pedestal shift.
 
-$$z = \frac{x - \mu}{\sigma}.$$
+The prediction is a convex blend of the three means with one scale on the per-pixel standard deviation,
 
-Under a crystal-free frame, $z$ should look like standard normal noise, $\mathcal{N}(0,1)$. This expectation anchors everything downstream.
+$$\mu_i = \sum_k w_k\,\mu_{k,i}, \qquad \sigma_i = s\,\sigma_{\text{pix},i}.$$
+
+A Bragg peak that enters the update inflates the variance against which later peaks are tested. Each frame is therefore clipped from above at $\mu_i + 5\sigma_i$ before the update. The clip is one-sided, so a downward excursion updates the model as usual and a peak contributes at most $5\sigma_i$. Pixels whose variance is still zero after 16 frames are masked as dead.
 
 ## Calibration
 
-"Should look like $\mathcal{N}(0,1)$" and "does" are different things, so `probixi` spends a few dozen **seed frames** making it true. A few things get learned here, and each one is learned because a fixed value cannot know your detector.
+The test assumes $z \sim \mathcal N(0,1)$ on background, which holds for no arbitrary choice of blend. `probixi` therefore chooses $(w, s)$ on a set of seed frames drawn at random from the run. On a random subsample of pixels it labels the background set $\{|z| < 3\}$ using the pixel mean alone, so the set does not depend on the blend. For each $w$ on a simplex grid of spacing 0.1 it evaluates
 
-**The blend weights and a variance scale.** Over a random subsample of background pixels, `probixi` searches the convex blend $w$ over $\{$pixel, radial, panel$\}$ that makes the background $z$ most normal, minimizing
+$$\mathcal L(w) = \bar z^{\,2} + (v - 1)^2 + \tfrac12\,\mathrm{kurt}^2,$$
 
-$$\mathcal{L}(w) = \underbrace{m^2}_{\text{mean}\to 0} + \underbrace{(v-1)^2}_{\text{var}\to 1} + \tfrac{1}{2}\underbrace{\operatorname{kurt}^2}_{\text{tails}\to \text{normal}},$$
+where $\bar z$, $v$, and $\mathrm{kurt}$ are the mean, variance, and excess kurtosis of $z$ over that set. The three terms are the departures of location, scale, and tail shape from their standard-normal values, and the loss is zero only when all three agree. The grid holds 66 points, so the search is exhaustive. At the minimiser $v$ is not in general 1, and setting $s = \sqrt v$ restores unit variance exactly.
 
-where $m$, $v$, and $\operatorname{kurt}$ are the mean, variance, and excess kurtosis of the background $z$. A residual variance scale $\text{var\_scale} = \sqrt{v}$ then rescales $\sigma$ so the calibrated background has *exactly* unit variance.
+The alternative hypothesis also needs parameters. `probixi` models a peak pixel as $z \sim \mathcal N(0, \kappa^2)$ with $\kappa > 1$, the weakest assumption consistent with an excursion of unknown size. On the calibrated residuals, expectation maximisation fits
 
-**The peak contrast $\kappa$ and the peak prior $\pi$.** On the calibrated $z$, a two-component EM mixture separates noise from signal, the background pinned at unit variance.
+$$p(z) = (1-\pi)\,\mathcal N(0,1) + \pi\,\mathcal N(0,\kappa^2)$$
 
-$$p(z) = (1-\pi)\,\mathcal{N}(0, 1) + \pi\,\mathcal{N}(0, \kappa^2).$$
+with the background component fixed, which gives the peak contrast $\kappa$ and the prior $\pi$ that a pixel carries signal.
 
-$\kappa > 1$ is how much wider real Bragg pixels are than noise, the detection contrast. $\pi$ is the prior probability that any given pixel is peak. Both are properties of your instrument and sample, so `probixi` reads them off the data.
+## Per-pixel evidence
 
-## Detecting
+With $\kappa$ and $\pi$ known, the log Bayes factor of peak against background is a function of $z$ alone,
 
-Given the calibrated model, `probixi` scores pixels one of two ways.
+$$\log \mathrm{BF}_i = -\log\kappa + \tfrac12 z_i^2\left(1 - \kappa^{-2}\right),$$
 
-**The Bayesian approach.** For each pixel, weigh the peak hypothesis ($x \sim \mathcal{N}(\mu, (\kappa\sigma)^2)$) against the null ($x \sim \mathcal{N}(\mu, \sigma^2)$). The log Bayes factor is a clean function of $z$.
+set to zero wherever the excess is not positive, because a downward fluctuation is not a peak. Adding the log prior odds $\log[\pi/(1-\pi)]$ gives posterior log odds. These are averaged over a small Gaussian window, which lets the pixels of one spot reinforce each other while a single bright pixel cannot, and mapped through the logistic function to a posterior $c_i \in [0,1]$. The posterior does not decide detection. It is the weight each peak carries into [indexing](indexing.md).
 
-$$\log \mathrm{BF} = -\log\kappa + \tfrac{1}{2}z^2\Big(1 - \tfrac{1}{\kappa^2}\Big).$$
+## Per-frame background correction
 
-Add the log prior odds $\log\frac{\pi}{1-\pi}$, smooth the resulting logits with a small Gaussian so pixels in a real spot reinforce their neighbours, and squash through a sigmoid for a per-pixel posterior probability of "peak." Threshold at `posterior_threshold` (default 0.5) and you have candidate pixels.
+The running model is an average over the run. A given frame can sit above or below that average through a pedestal shift or a smooth gradient. `probixi` corrects the model on every frame from a square annulus around each pixel, excluding the inner 9 by 9 box and extending to 19 by 19,
 
-**The matched filter.** Bragg spots have a size. The matched filter correlates the $z$-map against a bank of Gaussian kernels at a few scales (`mf_scales`, default $\sigma \in \{1.0, 1.6, 2.4\}$). Each kernel is normalized to unit energy, $u = K/\lVert K\rVert_2$, and its response is divided by the mask-aware kernel energy.
+$$\mu^{\text{eff}}_i = \mu_i + \operatorname{mean}_{\mathcal A_i}\!\big[\min(r, 5\sigma)\big], \qquad (\sigma^{\text{eff}}_i)^2 = \max\!\Big(\sigma_i^2,\ \operatorname{var}_{\mathcal A_i}\!\big[\min(r, 5\sigma)\big]\Big),$$
 
-$$T_s = \frac{(z\!\cdot\!\text{mask}) \star u_s}{\sqrt{\sum u_s^2\,\text{mask}}}.$$
+with $r = x - \mu$ the residual against the running model. A spot of radius up to 4 pixels never enters its own background estimate, and the clip limits what a neighbouring reflection can contribute. Taking the larger variance means a frame with more local scatter than the model is tested against its own scatter, and a frame with less is not given a lower bar. On weak data this correction contributes more to sensitivity than any other component. Detection uses $z$ formed from $\mu^{\text{eff}}$ and $\sigma^{\text{eff}}$.
 
-Under $z\sim\mathcal{N}(0,1)$ each scale's $T_s$ has $\operatorname{Var}=1$ everywhere, panel edges and masked pixels included, so a single cut means the same thing across the whole detector. Detection thresholds the per-pixel scale-space max $T = \max_s T_s$.
+## The matched filter
 
-## Calibrating the threshold
+A Bragg spot covers several pixels, and a single-pixel test discards that extent. For a known template in white noise the optimal linear filter is the template itself. After whitening the background is white to the extent that calibration succeeded, so `probixi` correlates $z$ with Gaussian templates of width 1.0, 1.6, and 2.4 pixels and takes the maximum response.
 
-After calibration each per-pixel $z$ is $\mathcal{N}(0,1)$ and each scale's $T_s$ has unit variance, but their max $T = \max_s T_s$ is **not** $\mathcal{N}(0,1)$. Taking a max biases it upward, and spatial correlation fattens its right tail, so a fixed $\sigma$ cut on $T$ would mean different things on different detectors.
+One threshold must mean the same thing at every pixel, including beside panel gaps where part of the template falls on masked pixels. With $u_s$ the template scaled to unit energy and $m \in \{0,1\}$ the mask,
 
-`probixi` solves for the cut from a noise budget, as part of the same `calibrate` step. `probixi` measures the real null on the seed frames, marks quiet (crystal-free) frames with the expected maximum of $N$ Gaussians,
+$$T_s(i) = \frac{\sum_j u_{s,j}\,m_{i+j}\,z_{i+j}}{\sqrt{\sum_j u_{s,j}^2\,m_{i+j}}}, \qquad T(i) = \max_s T_s(i).$$
+
+Under $H_0$ the numerator has variance $\sum_j u_{s,j}^2 m_{i+j}^2 = \sum_j u_{s,j}^2 m_{i+j}$, because $m^2 = m$, which is the square of the denominator. Each $T_s$ therefore has unit variance at every pixel, whatever fraction of the template is masked.
+
+## The threshold from a noise budget
+
+Each $T_s$ has unit variance, but $T$ is not standard normal. The maximum over widths shifts its location upward, and the template correlates neighbouring values, which fattens the right tail. Both effects depend on the detector and the mask. `probixi` measures the null on the seed frames instead, taking $\mu_0$ as the median of the pooled $T$ and $\sigma_0$ from the values below the median reflected about it. Peak pixels lie in the right tail and enter neither estimate.
+
+A seed frame is quiet when its largest $T$ falls below
 
 $$T_{\text{quiet}} = \mu_0 + \sigma_0\sqrt{2\ln N},$$
 
-sweeps the threshold $T^\star$ over a grid, counts noise blobs on each quiet frame, and takes the smallest $T^\star$ whose *median* blob count meets the budget.
+the leading-order maximum of $N$ independent normal values, with $N$ the number of valid pixels. A frame whose maximum exceeds this carries something the null does not explain. On the quiet frames `probixi` sweeps candidate thresholds from 3 to 8 and counts the local maxima above each. The median count does not increase with the threshold, so the smallest threshold whose median count is at or below the budget is the most sensitive one that meets it.
 
-`--target-noise-peaks` overrides the default operating point. The matched filter carries a fixed fallback cut (`mf_threshold`, default $5\sigma$), and the budget calibration replaces it whenever a budget is set. One is set by default, so the calibrated cut normally wins. A budget of 5 lands near $5.5\sigma$. Lower it for stricter, cleaner peaks. Raise it for more sensitivity on weak data. It is under increased testing, and you should not need to touch it.
+The budget, five noise detections per signal-free frame by default (`--target-noise-peaks`), is the one operating point left in the method. It is stated in units of noise detections per frame, which mean the same thing on every detector.
 
-## Local background
+## Peaks
 
-A frozen, run-wide background cannot follow a smooth gradient or a shot-to-shot shift. So each frame also gets a **local** background, computed in a box annulus around every pixel (inner radius 4, outer 9 px), with the inner box left out so a peak never sits in its own estimate. The effective background blends the two,
+Pixels above the threshold are grouped into 8-connected components. Each component is reduced to a centroid weighted by the positive excess, a summed excess with its uncertainty, and two shape terms. A component is kept when it has at least two pixels, its second-moment eigenvalue ratio is at most 5, which rejects streaks and cosmic-ray tracks, and its maximum exceeds 1.2 times its mean, which rejects flat regions. The size limit follows from the filter. A Gaussian response of height $R$ exceeds the threshold over an area $2\pi\sigma_s^2\ln(R/T^\star)$, and a component may cover four times that area at the largest width, or 30 pixels if that is larger. A frame with more than 1000 components indicates a failure of the background model and yields no peaks.
 
-$$\mu_{\text{eff}} = \mu + \mu_{\text{local}},\qquad \sigma^2_{\text{eff}} = \max(\sigma^2,\ \sigma^2_{\text{local}}),$$
+## Masks learned from the data
 
-and detection runs on $z = (x - \mu_{\text{eff}})/\sigma_{\text{eff}}$. This local test keeps faint spots alive on a sloped or drifting background, and it is the sensitivity that decides how many weak frames you index (see the [poorly-diffracting](../vignettes/bad_diffraction.md) vignette).
+Pixels that carry no measurement are excluded from every estimate and every test. The static mask combines the geometry's bad regions, panel edges, saturated pixels, and any mask stored with the data. Three more are learned.
 
-Each surviving blob then gets summarized. An intensity $\sum(\text{excess})$, a $\sigma = \sqrt{\sum \text{var}}$, a peak $z$, plus shape terms (eccentricity, peakedness) that reject cosmic rays and streaks.
+- **Dead pixels**, with zero variance after 16 frames.
+- **Static shadows**, such as a beamstop holder. A pixel is dark when its running mean lies far below the radial mean at the same radius. Dark regions are grown by 9 pixels to keep every local-background annulus clear of the edge, and the model is refitted without them.
+- **Beamstop halo.** The seed peaks are histogrammed by $|\mathbf q|$. When the innermost bins hold at least 50 times the median peak density, the exclusion is extended outward, by at most two bins, to where the density falls to a tenth of the spike. This also sets the low-resolution limit the output reports.
 
-## Low flux
+Frames that received no beam, with a median level below a tenth of the run's, are withheld from the running statistics but still pass through detection (`--force-all` disables this).
 
-The running model freezes one variance, measured at the full-dose background. Whitening a genuinely dim, low-flux frame against that variance over-suppresses its real spots. Turning on `flux_variance` (in the Python API) fits a photon-transfer curve so the variance scales with each frame's own level,
+## Variable flux
 
-$$\sigma^2 = \text{read\_var} + \text{gain}\cdot\text{level},$$
+The running variance is measured at the run's typical fluence. With `--flux-variance`, `probixi` fits $\sigma^2 = \sigma^2_{\text{read}} + g\,\mu$ to the calibrated model and whitens each pixel against the variance predicted at that frame's own level, bounded below by 0.15 of the running variance. The [variable-flux vignette](../vignettes/variable_flux.md) covers when to use it.
 
-with a sub-photon floor (`flux_var_floor`, default 0.15 of the running variance) so nothing collapses to zero. It is opt-in, aimed at XFEL/SFX or jet-intensity-variable data. This may be exposed to the CLI in the future; however, more testing is still needed to determine if it makes a significant impact.
+## After calibration
 
-## Safeguards
+The blend, the scale, $\kappa$, $\pi$, and the threshold are frozen after calibration. The running statistics continue to update and follow slow drift within the run. `--recalibrate-every` instead rebuilds the calibration at fixed intervals and freezes the statistics in between, which suits a run that spans an abrupt change. Every run is whitened to the same unit-variance standard, so peak counts and indexing rates are comparable between conditions.
 
-Saturated, dead, and geometry-flagged pixels (anything at or above `max_adu`, plus the file's own mask) stay out of the background and out of detection from the very first frame. One hot pixel left in would poison an entire radial bin. And if a single frame produces more than `max_peaks` (default 1000) blobs, that points to a failed background model, so `probixi` emits nothing for that frame.
-
-The result is a peak finder with essentially no thresholds to set by hand. You give it seed frames and a noise budget, and it calibrates the rest against your data. Where those peaks go next is [Indexing](indexing.md).
+The detected peaks and their posteriors are the input to [indexing](indexing.md).

@@ -1,61 +1,83 @@
-# Getting Started with `probixi`
+# Getting started
 
-Getting started with `probixi` is hopefully quite easy. The primary ethos of this package is to have statistics handle the work for you; therefore, all you need to provide is your list of files, detector geometry, and your unit cell.
+`probixi` needs three things from you: a list of files, the detector geometry, and an approximate unit cell. Everything else, from the noise model to the detection threshold to the integration aperture, is learned from the data. This page covers the CLI, how to check that a run behaved, and the Python API. To skip ahead, see [Using `probixi` with Python](#using-probixi-with-python).
 
-Let's move through a basic tutorial using the CLI, or skip ahead to [Using `probixi` with Python](#using-probixi-with-python).
-
-## `probixi` via the CLI
-
-Going through the required options:
-
-- -i provides the list of files (hdf5/cxi)
-- -g provides the geometry
-- -p provides the unit cell
-- -o provides the output (and inferred format). Use `.stream` to generate a crystfel style stream or `.db` to generate a duckdb.
+## Running from the CLI
 
 ```bash
-probixi -i files.lst -g my_geometry.geom -p my_unit.cell -o output.db --device cuda
+probixi -i files.lst -g my_geometry.geom -p my_unit.cell -o output.db
 ```
 
-And that's it! There are a few more advanced parameters provided in detail below:
+- `-i` is a CrystFEL list file of HDF5 or CXI inputs.
+- `-g` is a CrystFEL geometry file.
+- `-p` is a CrystFEL cell file. It only has to be approximate, because `probixi` re-centres it on the refined cells of the first lattices.
+- `-o` sets the output, and its extension sets the format. `.stream` writes a CrystFEL stream, and `.db` or `.duckdb` writes a DuckDB database.
 
-| Parameter | Accepts | Description |
+The device defaults to `auto`, which picks CUDA, then Apple MPS, then CPU.
+
+No further options are required. Those below serve particular data or workflows.
+
+### Calibration
+
+| Option | Default | What it does |
 | --- | --- | --- |
-| --batch-size | int | Frames per batched refinement pass |
-| --device | str | Torch device (e.g. cuda, cpu, mps) |
-| --devices | str | Comma-separated device list for multi-gpu indexing |
-| --enrich-alpha | float | Max probability to accept a frame under --enrich-gate |
-| --enrich-gate | NA (flag) | Drop indexed frames whose predicted spots are not backed by image signal beyond chance - better for high fluence and good diffraction |
-| --flux-var-floor | float | Variance floor as a fraction of the calibrated per-pixel variance, applied under `--flux-variance` (default 0.15) |
-| --flux-variance | NA (flag) | Fit a photon-transfer curve during calibration and whiten each pixel against its own Poisson noise, instead of a frozen variance floor. Intended for XFEL/SFX or jet-intensity-variable data |
-| --gif | str/Path | Returns a gif of the noise model evolution over the seed frames |
-| --gpus | int | Multi-gpu indexing across first N devices (the same as --devices cuda:0,cuda:1...) |
-| --max-lattices | int | Lattices to search per frame, removing indexed peaks between passes (default 1). Above 1, each image can own several `crystals` rows |
-| --noise-mode | str | `online` (continuously updated) or `per_frame` built noise models |
-| --panel | str | Fallback panel name for peaks that fall **outside** every geometry panel (inter-panel gaps, or a geometry with no named panels). Peaks inside a defined panel already carry that panel's name; this only labels the rest. Default `0`. |
-| --peaks-only | NA (flag) | Returns crystfel readable .cxi peaks, or a duckdb, depending on `-o` |
-| -q/--quiet | NA (flag) | Suppress logger lines |
-| --recalibrate-every | int | Input frames between fresh calibrations; 0 freezes the initial estimate. Requires calibration to have run first |
-| --render | str/int | Recall a frame and write a peaks/index overlay. Either index or 'image_filename//event' |
-| --render-out | str/Path | `--render` destination |
-| --seed-frames | int | Number of frames used to calibrate the noise model and detection threshold |
-| --start | int | First frame index (inclusive) |
-| --stop | int | Stop frame index (exclusive) |
-| --target-noise-peaks | float | Auto-calibrate the peak-detection threshold so a signal-free frame yields at most this many spurious noise blobs (default 5). Lower &rarr; stricter/cleaner peaks; higher &rarr; more sensitive. Acts as an override |
-| --threads-per-worker | int | Threads per GPU worker |
-| --warmup-frames | int | Number of frames observed before learned dead-pixel mask is built |
+| `--seed-frames` | 32 | Frames drawn at random from the run to calibrate the noise model and threshold. More frames steady the estimate. |
+| `--target-noise-peaks` | 5 | Noise budget, the number of spurious detections allowed on a signal-free frame. Lower is stricter, higher is more sensitive. |
+| `--warmup-frames` | 16 | Frames seen before pixels with zero variance are masked as dead. |
+| `--recalibrate-every` | off | Rebuild the calibration every N input frames and freeze the statistics in between. Use it for a run that spans an abrupt change, such as a jet restart. A value of 0 freezes the initial estimate for the whole run. |
+| `--noise-mode` | `online` | `online` keeps updating the background after calibration. `per_frame` rebuilds it for each frame. |
+| `--flux-variance` | off | Scale the noise with each frame's own level. For free-electron laser data with shot-to-shot flux changes. See [Variable flux](variable_flux.md). |
+| `--flux-var-floor` | 0.15 | Lower bound on the flux-scaled variance, as a fraction of the running variance. |
+| `--force-all` | off | Disable the blank-shot screen and index every frame, however dark. |
+| `--random-seed` | 1988 | Seed for every random draw. A run is fully specified by its inputs, version, and this seed. |
 
-### Recovering Results
+### Indexing and integration
 
-Given your output options, a `.stream` or `.db` file has been generated. The stream is analagous to any other crystfel based stream.
+| Option | Default | What it does |
+| --- | --- | --- |
+| `--enrich-gate` | off | Drop lattices whose predicted spots land on signal no more often than chance. Recommended on strong data and still being tested as a possible default. See [Strong diffraction](good_diffraction.md). |
+| `--enrich-alpha` | 0.001 | Largest chance probability a lattice may have under `--enrich-gate`. |
+| `--aperture` | `auto` | Integration disk. `snr` maximises background-limited signal-to-noise, `flux` captures the whole spot, and `auto` keeps `snr` unless it would bias intensities differently between crystals. |
+| `--max-lattices` | 1 | Lattices to search per frame. Indexed peaks are removed between passes. |
+| `--cell-calibrate` / `--no-cell-calibrate` | on | Re-centre the target cell on the median refined cell, at most twice. |
+| `--cell-calibrate-after` | 200 | Accepted lattices pooled before each re-centring. |
+| `--no-refine-cell` | off | Hold every crystal at the target cell and refine orientation only. |
+| `--batch-size` | 8 | Frames per batched refinement pass. |
 
-> NOTE: As this package evolves, the stream option may be dropped or deprecated in favor of database or straight-to-`.hkl` methods. The crystfel stream option exists currently to compare with the method library crystfel contains.
+### Run control and output
 
-#### Database
+| Option | What it does |
+| --- | --- |
+| `--peaks-only` | Peakfinding only. `-o` is then a directory of CXI peak files for `indexamajig --peaks=cxi`, or a DuckDB file. No cell needed. |
+| `--start`, `--stop` | Frame range, start inclusive and stop exclusive. |
+| `--device` | Torch device, for example `cuda`, `cuda:1`, `mps`, or `cpu`. |
+| `--gpus N`, `--devices` | Split the run into contiguous blocks across N GPUs, or an explicit device list, and merge the outputs in order. |
+| `--threads-per-worker` | CPU threads per GPU worker. |
+| `--panel` | Panel name for peaks that fall outside every geometry panel. Default `0`. |
+| `--gif` | Write an animation of the noise model over the seed frames. |
+| `--render`, `--render-out` | Draw one frame (an index or `filename//event`) with its peaks and predicted reflections. |
+| `-q`, `--quiet` | Suppress the progress line. |
 
-Output to a database allows for faster parsing to other libraries, as well as semi-archival storage of all data used in the process. The `.db` (or `.duckdb`) output is a [DuckDB](https://duckdb.org/) file written by `IndexStream.to_db` (via `DuckDBOffloader`), and it is a relational alternative to the CrystFEL `.stream`: the run's metadata, every image, every lattice indexed on it, and the integrated reflections and searched peaks all live in one queryable file.
+## Checking a run
 
-It is organized into six tables. Three small **metadata** tables are written once, up front:
+Each quantity that `probixi` learns from the data can be inspected.
+
+- **Background.** `--gif noise.gif` animates the running mean, its radial profile, and the per-batch drift over the seed frames. The mean settles as frames accumulate, and structure that persists in the drift panel is structure the model has not absorbed.
+- **Calibration.** After calibration `probixi` prints one line with the peak contrast (`kappa`), the peak prior (`prior_peak`), the variance scale (`var_scale`), the detection threshold (`mf_threshold`), any learned beamstop limit, blank-frame floor, and shadow fraction, and the integration radii with the aperture it chose and why. A `var_scale` far from 1 means the raw per-pixel variance was badly off. An `mf_threshold` pinned at 8.0, the top of its search range, means no seed frame looked signal-free, and the usual cause is structure the model does not capture.
+- **Detections.** `--render 1234 --render-out frame.png` overlays detected peaks (open circles) and predicted reflections (crosses) on one frame. It runs directly after calibration, and without `-o` the run stops there, which makes it inexpensive to inspect a few frames.
+- **Lattices.** Every indexed crystal carries its `enrichment` and `enrich_p` in the output, gated or not. A distribution centred near 1 means the lattices are no better than chance.
+
+## Recovering results
+
+A `.stream` is a standard CrystFEL stream and goes straight into `partialator` or `process_hkl`.
+
+> NOTE: The stream output may be deprecated in favour of the database. It exists to compare `probixi` one-to-one with CrystFEL pipelines.
+
+### Database
+
+The `.db` (or `.duckdb`) output is a [DuckDB](https://duckdb.org/) file. It holds the run's metadata, every frame, every lattice, and the integrated reflections and searched peaks in one queryable file.
+
+Three small **metadata** tables are written once, up front.
 
 | Table | Rows | What it stores |
 | --- | --- | --- |
@@ -63,24 +85,24 @@ It is organized into six tables. Three small **metadata** tables are written onc
 | `panels` | one per panel | Each panel's `name` and fast/slow-scan pixel bounds (`min_fs`, `max_fs`, `min_ss`, `max_ss`). |
 | `cell` | one | The target unit cell: edges `a_A`/`b_A`/`c_A`, angles `alpha_deg`/`beta_deg`/`gamma_deg`, `volume_A3`, and the symmetry labels `lattice_type`, `centering`, `unique_axis`. |
 
-The remaining four **result** tables are linked by `frame_id` — a 16-character SHA-1 hash of `filename//event` that uniquely identifies each physical image — and, for anything per-lattice, by `crystal_id`:
+Four **result** tables are linked by `frame_id`, the first 16 hex digits of the SHA-1 of `filename//event`, and per lattice by `crystal_id`.
 
 | Table | Rows | What it stores |
 | --- | --- | --- |
-| `frames` | one per file-event | One row per physical image, keyed by `frame_id` (primary key). Provenance (`frame_index`, `filename`, `event`, `serial`), an `indexed` boolean, the peak search (`n_peaks`, `peak_resolution_nm_inv`), the per-image fluence scale (`scale`, `scale_sigma`), and `num_reflections` integrated across every lattice on the image. |
-| `crystals` | one per accepted lattice | One row per indexed lattice, keyed by `crystal_id` (primary key) and joined to its image by `frame_id`. `lattice_index` orders the lattices found on one image (0 first). Carries that lattice's peak/reflection counts (`n_indexed`, `num_reflections`), fit quality (`rmsd`, `mosaicity_deg`, `profile_radius_nm_inv`), enrichment gate values (`enrichment`, `n_bright`, `enrich_p`), resolution (`diffraction_limit_nm_inv`), the recovered cell (`cell_*`), and the reciprocal basis vectors (`astar_*`, `bstar_*`, `cstar_*`, in nm⁻¹). |
-| `reflections` | one per integrated reflection | The indexed, integrated reflections keyed by both `crystal_id` and `frame_id`: Miller indices `h`/`k`/`l`, `intensity`, `sigma`, `peak`, `background`, detector position (`fs`, `ss`, `panel`), and `resolution_nm_inv`. |
-| `peaks` | one per searched peak | The peaks found by the peak-search keyed by `frame_id`: detector position (`fs`, `ss`, `panel`), `intensity`, and `resolution_nm_inv`. |
+| `frames` | one per file-event | Provenance (`frame_index`, `filename`, `event`, `serial`), an `indexed` flag, the peak search (`n_peaks`, `peak_resolution_nm_inv`), the per-frame fluence scale (`scale`, `scale_sigma`), and `num_reflections` over every lattice on the frame. |
+| `crystals` | one per accepted lattice | Keyed by `crystal_id` and joined to its frame by `frame_id`. `lattice_index` orders the lattices on one frame. Counts (`n_indexed`, `num_reflections`), fit quality (`rmsd`, `mosaicity_deg`, `profile_radius_nm_inv`), enrichment (`enrichment`, `n_bright`, `enrich_p`), resolution (`diffraction_limit_nm_inv`), the refined cell (`cell_*`), and the reciprocal basis (`astar_*`, `bstar_*`, `cstar_*`, in nm⁻¹). |
+| `reflections` | one per integrated reflection | Keyed by `crystal_id` and `frame_id`. Miller indices `h`/`k`/`l`, `intensity`, `sigma`, `peak`, `background`, position (`fs`, `ss`, `panel`), and `resolution_nm_inv`. |
+| `peaks` | one per searched peak | Keyed by `frame_id`. Position (`fs`, `ss`, `panel`), `intensity`, and `resolution_nm_inv`. |
 
-A few things worth knowing when querying:
+Three properties of the schema matter when querying.
 
-- Frames that never indexed still get a `frames` row with `indexed = FALSE`, no `crystals` rows, and null statistics, so the indexed rate is simply `SELECT AVG(indexed::INT) FROM frames`. (Under `--start`/`--stop` or multi-GPU runs, each writer only backfills the frame range it owns.)
-- **A frame keeps one `frames` row however many lattices it yields.** With `--max-lattices` above 1 an image can own several `crystals` rows, so count lattices with `SELECT COUNT(*) FROM crystals` and images with `SELECT COUNT(*) FROM frames WHERE indexed`. Per-lattice statistics such as `rmsd` and the recovered cell live on `crystals`, not `frames`.
-- **`--peaks-only` populates `peaks`, not `reflections`.** Those frames are written with `indexed = FALSE` and their `n_peaks`/`peak_resolution_nm_inv` set; the `reflections` and `crystals` tables stay empty.
+- Frames that never indexed still get a `frames` row with `indexed = FALSE`, so the indexing rate is `SELECT AVG(indexed::INT) FROM frames`. Under `--start`/`--stop` or multi-GPU runs, each writer fills only the frame range it owns.
+- A frame keeps one `frames` row however many lattices it yields. Count lattices with `SELECT COUNT(*) FROM crystals` and frames with `SELECT COUNT(*) FROM frames WHERE indexed`. Per-lattice statistics live on `crystals`.
+- `--peaks-only` fills `peaks`, not `reflections`. Those frames have `indexed = FALSE` and empty `crystals` and `reflections` tables.
 
 ## Using `probixi` with Python
 
-The CLI is a thin wrapper over the `probixi.Probixi` pipeline. Getting an indexed stream out takes three steps: construct, calibrate, drain:
+The CLI is a thin wrapper over `probixi.Probixi`. A run is three steps, construct, calibrate, and drain.
 
 ```python
 from probixi import Probixi
@@ -92,11 +114,8 @@ pipe = Probixi(
     device="cuda",
 )
 
-# Observe seed frames to learn the noise model and detection threshold.
 pipe.calibrate(n_seed=32, target_noise_peaks=5.0)
 
-# Open a lazy stream of solutions and drain it into a DuckDB database
-# (the schema described above) or a CrystFEL `.stream`.
 stream = pipe.index_stream(pipe.frames(), batch_size=8)
 n = stream.to_db(
     "output.db",
@@ -108,4 +127,4 @@ n = stream.to_db(
 print(f"indexed {n} frame(s)")
 ```
 
-> `index_stream` returns a **lazy** `IndexStream`: no frames are read and nothing is indexed until you drain it. A final `to_db`, `to_stream`, `collect`, or iteration pulls frames through the pipeline one batch at a time. Because it is lazy, each `IndexResult` (and the tensors it carries) lives on the configured torch `device`, so you can still maintain downstream torch-torch connections, and only the writers move data off-device as they serialize. A stream is single-use, re-iterating an already-drained stream yields nothing.
+`index_stream` returns a **lazy** `IndexStream`. Nothing is read or indexed until you drain it with `to_db`, `to_stream`, `collect`, or a loop. Each `IndexResult`, and every tensor it carries, stays on the configured device, and only the writers move data off it. A stream is single-use, so iterating an already-drained stream yields nothing.

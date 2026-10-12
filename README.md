@@ -13,7 +13,9 @@ experimental](https://img.shields.io/badge/lifecycle-experimental-orange.svg)](h
 [![Documentation Status](https://readthedocs.org/projects/probixi/badge/?version=latest)](https://probixi.readthedocs.io)
 [![Code Style](https://img.shields.io/badge/code%20style-black-000000.svg)](https://github.com/psf/black)
 
-`probixi` proposes that bragg peaks can be found/recovered from a detector image by observing the background noise distributional shape over time, per pixel, and collecting peak candidates from an outlier set. Since this noise model is determined in an unsupervised fashion, the user does not need to tune hyperparameters for finding peaks. We are still testing robustness to different types of data collection (synchrotron, FEL) and random fluence changes.
+`probixi` treats peakfinding as anomaly detection. Bragg signal is sparse, so the stream of frames is mostly a sample of the detector's own background. `probixi` learns that background at every pixel as frames arrive, whitens each frame against it, and reports what the null cannot explain. The contrast, prior, blend, and detection threshold are all calibrated on the data, so there is nothing to tune. It then indexes, predicts, and integrates each frame, weighting every peak by how confident the detection was.
+
+It has been applied to strongly and weakly diffracting samples at synchrotrons and to variable-flux data at a free-electron laser. The vignettes describe each case.
 
 ![image](https://raw.githubusercontent.com/ryan-odea/Probixi/main/docs/assets/br_fel.gif)
 
@@ -33,9 +35,9 @@ pip install git+https://github.com/ryan-odea/probixi.git
 
 ## Using `probixi`
 
-`probixi` can be interacted with either via the command line interface, or through the python API. In its current implementation, via python, the `Probixi` API returns iterables, which remain on a GPU tensor via pytorch up until collection - meaning that you can further pass information for any downstream processing. Through the CLI, this is currently a one-stop-shop for peakfinding and indexing. **This may change in the future**
+`probixi` runs from the command line or from Python. The CLI goes from raw frames to integrated reflections in one call. The Python API returns lazy streams whose results stay on the GPU until you collect them, so you can branch off your own torch processing at any stage.
 
-`probixi` also has a 'burn-in' phase, where the noise model reaches some stable point, this can be further interrogated with a handy gif.
+Before detection, `probixi` calibrates on a set of seed frames. `--gif` writes an animation of the noise model settling over those frames, which shows whether the background model has converged before the run is trusted.
 
 Via the CLI:
 
@@ -80,7 +82,7 @@ with DataOffloader(
 
 ### DuckDB output
 
-The `.stream` format is convenient for interop (e.g. `partialator`), but querying a
+The `.stream` format is convenient for interop with `partialator`, but querying a
 run means re-parsing a large text file. `probixi` can instead write a
 [DuckDB](https://duckdb.org) database. Please note this may be the default in the future.
 
@@ -103,18 +105,19 @@ stream.to_db(
 
 The database holds run metadata as small tables (`geometry`, `panels`, `cell`) plus:
 
-- **`frames`** — key `frame_id` (a hash of `filename//event`) with additional per-frame information
-- **`reflections`** — the integrated Miller indices (`h k l`, `I`, `sigma`, `peak`,
+- **`frames`**, keyed by `frame_id` (a hash of `filename//event`) with additional per-frame information
+- **`crystals`**, one row per accepted lattice, with its cell, orientation, and fit statistics
+- **`reflections`**, the integrated Miller indices (`h k l`, `I`, `sigma`, `peak`,
   `background`, `fs/ss`, panel, resolution)
-- **`peaks`** — the peak-search results per frame
+- **`peaks`**, the peak-search results per frame
 
 
 ### Resolving indexing ambiguity
 
 When the lattice symmetry is higher than the structure's point group, each crystal can
 be indexed in more than one way. `probixi-resolve` clusters the crystals in a database
-into the two choices and reindexes the ones on the wrong side -- an implementation of
-CrystFEL's `ambigator`, created by Thomas White, in torch/Triton.
+into the two choices and reindexes the ones on the wrong side. It is a torch/Triton implementation of
+CrystFEL's `ambigator`, by Thomas White.
 
 ```bash
 probixi-resolve -i run.duckdb -y 3 -w 321 -o detwinned.duckdb
@@ -136,7 +139,7 @@ amb.reindex(result, output="detwinned.duckdb")
 
 ### Using `probixi` as only a peakfinder
 
-Of course, if you only want to use probixi as a peakfinder and prefer to use your own indexing regime, this is possible -- through the CLI's `--peaks-only` flag or the Python API's `peak_stream`.
+If you prefer your own indexer, use `probixi` as a peakfinder only, through the CLI's `--peaks-only` flag or the Python API's `peak_stream`. The exported peaks also improve conventional indexers on strong data (see the [vignettes](https://probixi.readthedocs.io)).
 
 Via the CLI:
 
@@ -192,4 +195,4 @@ If you would like to contribute actively by merging code, please open a PR with 
 
 1. Code is formatted with `isort`, then `black`, followed by a `ruff --check`. This will initiate on PR, so it might be best to check beforehand.
 2. Docstrings are minimally on user-facing functions in [`numpy` style](https://numpydoc.readthedocs.io/en/latest/format.html). 
-3. Comments, or some explanation (in PR) for the additions, limited to the scope of the project. If fixing a bug, comments should be included in the PR rather than the code itself.
+3. Comments, or some explanation (in PR) for the additions, limited to the scope of the project. For a bug fix, the explanation belongs in the PR rather than in the code.

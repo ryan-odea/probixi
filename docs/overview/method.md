@@ -1,6 +1,6 @@
 # The method, end to end
 
-This page derives what `probixi` computes, in the order it computes it: from a raw detector frame to the reflection list a merging program reads. Every symbol is defined where it first appears and reused afterwards; the notation table at the end collects them. Defaults are quoted with the name of the configuration field or module constant that holds them, and each quantity is marked as **fixed** (a constant in the code) or **learned** (estimated from the data at hand). File and line references point into the package.
+This page derives what `probixi` computes, in the order it computes it, from a raw detector frame to the reflection list a merging program reads. It is the reference behind the [peakfinding](peakfinding.md) and [indexing](indexing.md) pages. Every symbol is defined where it first appears, and the notation table at the end collects them. Defaults are quoted with the configuration field or module constant that holds them, and each quantity is marked as **fixed** (a constant in the code) or **learned** (estimated from the data at hand). Function and file names point into the package.
 
 ## 0. Objects and conventions
 
@@ -16,7 +16,7 @@ Wavelength $\lambda$ (Å) and camera length $L$ (m) come from the geometry file;
 
 ### 1.1 Streaming moments
 
-For each of three "views" of the detector, `probixi` maintains a running mean $\mu$ and second central moment $M_2$ over frames with Welford's update (`NoiseStats.update`, `peakfinding/noise/model.py:40-56`). With $n$ the number of frames seen so far and $y$ the projected, clipped frame (§1.3):
+For each of three "views" of the detector, `probixi` maintains a running mean $\mu$ and second central moment $M_2$ over frames with Welford's update (`NoiseStats.update`, `peakfinding/noise/model.py`). With $n$ the number of frames seen so far and $y$ the projected, clipped frame (§1.3):
 
 $$
 \delta = y - \mu, \qquad \mu \leftarrow \mu + \frac{\delta}{n}, \qquad M_2 \leftarrow M_2 + \delta\,(y - \mu_{\text{new}}), \qquad \hat\sigma^2 = \frac{M_2}{\max(n-1, 1)} .
@@ -27,12 +27,12 @@ With `decay` $= \alpha < 1$ the update is exponentially weighted, $\mu \leftarro
 ### 1.2 Three views
 
 - **Pixel** (`_pixel.py`): $\mu_{\text{pix}}(p)$, $\sigma^2_{\text{pix}}(p)$ per pixel, fed without a mask.
-- **Rotational** (`_radial.py`): with $r(p)$ the lab-frame radius of pixel $p$ from the beam centre in pixels and bin width $\Delta = 2$ px (`radial_bin_width`, fixed), bin $b(p) = \lfloor r(p)/\Delta \rfloor$; each frame is projected to masked bin means $\bar y_b = \sum_{p\in b} m(p)\,y(p) / \max(\sum_{p\in b} m(p), 1)$, and the running statistics live on the bins. Per pixel, $\mu_{\text{rot}}(p) = \mu_{b(p)}$ and $\sigma^2_{\text{rot}}(p) = \hat\sigma^2_{b(p)}\,N_{b(p)}$ with $N_b$ the bin's pixel count (the variance of a bin *mean* re-inflated to a single pixel).
-- **Panel** (`_panel.py`): the same construction per detector panel $\pi(p)$.
+- **Radial** (`_radial.py`): with $r(p)$ the lab-frame radius of pixel $p$ from the beam centre in pixels and bin width $\Delta = 2$ px (`radial_bin_width`, fixed), bin $b(p) = \lfloor r(p)/\Delta \rfloor$; each frame is projected to masked bin means $\bar y_b = \sum_{p\in b} m(p)\,y(p) / \max(\sum_{p\in b} m(p), 1)$, and the running statistics live on the bins. Per pixel, $\mu_{\text{rad}}(p) = \mu_{b(p)}$ and $\sigma^2_{\text{rad}}(p) = \hat\sigma^2_{b(p)}\,N_{b(p)}$ with $N_b$ the bin's pixel count (the variance of a bin *mean* re-inflated to a single pixel).
+- **Frame-wide** (`_panel.py`): the same construction with a single bin covering the frame. The class accepts a tile map for per-panel statistics, but the pipeline passes none.
 
 ### 1.3 Robust update and dead pixels
 
-Before a frame enters any running statistic it is clipped from above against the pixel view (`NoiseModel._robust_clip`, `model.py:252-263`), so that Bragg peaks cannot inflate the variance they are later detected against:
+Before a frame enters any running statistic it is clipped from above against the pixel view (`NoiseModel._robust_clip`, `model.py`). Bragg peaks then cannot inflate the variance they are later detected against,
 
 $$
 \tilde x(p) = \min\!\big(x(p),\ \mu_{\text{pix}}(p) + k_r\,\sigma_{\text{pix}}(p)\big), \qquad k_r = 5 \ (\texttt{robust\_k}, \text{fixed}),
@@ -42,37 +42,37 @@ applied once $n \ge 4$ frames (`robust_min_frames`). After `warmup_frames` (defa
 
 ### 1.4 The blended prediction
 
-The model's prediction for a frame is a convex blend of the three means with weights $w_k$, $k \in \{\text{pix}, \text{rot}, \text{pan}\}$, and one source's variance (`NoiseModel.predict`, `model.py:348-404`):
+The model's prediction for a frame is a convex blend of the three means with weights $w_k$, $k \in \{\text{pix}, \text{rad}, \text{frame}\}$, and one source's variance (`NoiseModel.predict`, `model.py`):
 
 $$
 \mu_0(p) = \sum_k w_k\,\mu_k(p), \qquad \sigma_0^2(p) = s_v^2\,\sigma^2_{\text{pix}}(p),
 $$
 
-where $s_v$ is the variance scale of §2.2. Before calibration the `shrinkage` preset uses $w_{\text{pix}} = \min(1, n/\texttt{warmup\_frames})$, $w_{\text{rot}} = 1 - w_{\text{pix}}$, $s_v = 1$; after calibration the learned weights are used.
+where $s_v$ is the variance scale of §2.2. Before calibration the `shrinkage` preset uses $w_{\text{pix}} = \min(1, n/\texttt{warmup\_frames})$, $w_{\text{rad}} = 1 - w_{\text{pix}}$, $s_v = 1$; after calibration the learned weights are used.
 
 ## 2. Calibration on the seed frames
 
-Calibration runs once on $F_s$ randomly drawn **seed frames** (`--seed-frames`, 1000 in the benchmarks) after they have warmed the model (`Probixi.calibrate`, `probixi.py`). Everything in this section is learned unless marked fixed.
+Calibration runs once on $F_s$ randomly drawn **seed frames** (`--seed-frames`, default 32) after they have warmed the model (`Probixi.calibrate`, `probixi.py`). Everything in this section is learned unless marked fixed.
 
 ### 2.1 Static shadows
 
 A beam-stop arm or mount leaves a region far below the radial model at its own radius. With the pixel and rotational means from the warm-up (`shadow_mask`, `probixi.py`):
 
 $$
-\rho(p) = \frac{\mu_{\text{pix}}(p)}{\mu_{\text{rot}}(p)}, \qquad \ell(p) = \log\rho(p), \qquad \text{cut} = \min\!\big(\operatorname{med}(\ell) - 6\,\text{MAD}(\ell),\ \log\tfrac12\big),
+\rho(p) = \frac{\mu_{\text{pix}}(p)}{\mu_{\text{rad}}(p)}, \qquad \ell(p) = \log\rho(p), \qquad \text{cut} = \min\!\big(\operatorname{med}(\ell) - 6\,\text{MAD}(\ell),\ \log\tfrac12\big),
 $$
 
-with $\text{MAD}$ the median absolute deviation scaled by $1.4826$ (a robust $\sigma$; the constants 6 and $\tfrac12$ are fixed). Dark pixels are $\ell(p) < \text{cut}$; a shadow *core* is a dark pixel whose $(2r_{\text{out}}+1)^2$ window is at least half dark, with $r_{\text{out}}$ the local-background radius of §3.1; the mask is the core grown by $r_{\text{out}}$ so that no background annulus can straddle the edge. When a shadow is found the model is reset and re-warmed with it excluded, so no view ever averages over it. Without a static gradient this masks nothing.
+with $\text{MAD}$ the median absolute deviation scaled by $1.4826$ (a robust $\sigma$; the constants 6 and $\tfrac12$ are fixed). Dark pixels are $\ell(p) < \text{cut}$; a shadow *core* is a dark pixel whose $(2r_{\text{out}}+1)^2$ window is at least half dark, with $r_{\text{out}}$ the local-background radius of §3.1; the mask is the core grown by $r_{\text{out}}$, which keeps every background annulus clear of the edge. When a shadow is found the model is reset and re-warmed with it excluded, so no view ever averages over it. Without a static gradient this masks nothing.
 
 ### 2.2 Blend weights and variance scale
 
-Over a random subsample of $S = 40\,000$ live pixels and all seed frames, with $\sigma(p) = \sigma_{\text{pix}}(p)$, the *background set* is $\mathcal{B} = \{|x - \mu_{\text{pix}}| < 3\sigma\}$. For every weight triple on a step-$0.1$ simplex the calibrated residual $z = (x - \sum_k w_k\mu_k)/\sigma$ restricted to $\mathcal{B}$ is summarised by its mean $\bar z$, population variance $v$ and excess kurtosis $\text{kurt}$, and (`calibrate_noise`, `noise/calibrate.py:90-200`)
+Over a random subsample of $S = 40\,000$ live pixels and all seed frames, with $\sigma(p) = \sigma_{\text{pix}}(p)$, the *background set* is $\mathcal{B} = \{|x - \mu_{\text{pix}}| < 3\sigma\}$. For every weight triple on a step-$0.1$ simplex the calibrated residual $z = (x - \sum_k w_k\mu_k)/\sigma$ restricted to $\mathcal{B}$ is summarised by its mean $\bar z$, population variance $v$ and excess kurtosis $\text{kurt}$, and (`calibrate_noise`, `noise/calibrate.py`)
 
 $$
 w^\star = \arg\min_w \Big[\bar z^2 + (v-1)^2 + \tfrac12\,\text{kurt}^2\Big], \qquad s_v = \sqrt{\max(v_{w^\star},\ 10^{-6})} .
 $$
 
-$s_v$ is the factor by which the pixel variance must be scaled so the background residual has unit variance; it multiplies $\sigma^2_{\text{pix}}$ in every later prediction.
+$s_v$ is the factor by which the pixel variance must be scaled so the background residual has unit variance. It multiplies $\sigma^2_{\text{pix}}$ in every later prediction.
 
 ### 2.3 The peak prior: $\kappa$ and $\pi$
 
@@ -86,13 +86,13 @@ $\pi$ is the prior probability that a pixel carries signal and $\kappa$ the widt
 
 ### 2.4 Photon-transfer (flux) variance
 
-With `--flux-variance`, the per-pixel variance is modelled as a linear function of the level, which lets the noise follow frame-to-frame changes of the background rather than a frozen per-pixel estimate (`fit_photon_transfer`, `calibrate.py:203-271`). Live pixels are binned into 24 quantile bins of $\mu_0$; bins with $\ge 500$ pixels contribute medians $(\bar\mu_b, \bar\sigma^2_b)$ and an ordinary least-squares line gives
+With `--flux-variance`, the per-pixel variance is modelled as a linear function of the level, which lets the noise follow frame-to-frame changes of the background rather than a frozen per-pixel estimate (`fit_photon_transfer`, `calibrate.py`). Live pixels are binned into 24 quantile bins of $\mu_0$; bins with $\ge 500$ pixels contribute medians $(\bar\mu_b, \bar\sigma^2_b)$ and an ordinary least-squares line gives
 
 $$
 \sigma^2 = v_r + g\,\mu, \qquad v_r = \max(a, 0)\ [\text{ADU}^2], \quad g = \max(b, 10^{-6})\ [\text{ADU/photon}],
 $$
 
-falling back to $v_r = 0$, $g = \operatorname{med}_b(\bar\sigma^2_b/\bar\mu_b)$ if the fit is unphysical. $g$ is the *measured* gain (9.9 ADU/photon on the Jungfrau b2AR data whose geometry declares 1) and is what the stream header reports as `probixi/adu_per_photon`.
+falling back to $v_r = 0$, $g = \operatorname{med}_b(\bar\sigma^2_b/\bar\mu_b)$ if the fit is unphysical. $g$ is the *measured* gain and is what the stream header reports as `probixi/adu_per_photon`.
 
 ### 2.5 Eigen-background (optional)
 
@@ -100,7 +100,7 @@ With `eigen_modes` $= r > 0$, the two-sided clipped residuals $R_f = \text{clip}
 
 ### 2.6 The detection threshold
 
-The detection statistic $T$ of §3.4 is not $\mathcal N(0,1)$ under background even when $z$ is: the maximum over scales biases its body and spatial correlation fattens its tail. Both are measured (`calibrate_threshold`, `calibrate.py:354-555`). Pooling up to $10^6$ background values of $T$ over the seed frames,
+The detection statistic $T$ of §3.4 is not $\mathcal N(0,1)$ under background even when $z$ is: the maximum over scales biases its body and spatial correlation fattens its tail. Both are measured (`calibrate_threshold`, `calibrate.py`). Pooling up to $10^6$ background values of $T$ over the seed frames,
 
 $$
 \mu_T = \operatorname{med}(T), \qquad \sigma_T = \operatorname{std}\big(\{T < \mu_T\} \cup \{2\mu_T - T : T < \mu_T\}\big),
@@ -120,7 +120,7 @@ The *level* of a frame is the median of every 97th pixel, $\text{lvl}(x) = \oper
 
 ### 2.8 Beam-stop exclusion
 
-After the threshold is set, the calibrated finder runs on up to 200 seed frames and the $|\mathbf q|$ of every peak is histogrammed in 40 bins against the number of live pixels per bin. A peak density in the innermost populated bins exceeding 50 times the median density identifies the beam-stop halo; $q_{\min}$ is set at the outer edge of that spike (extending while the density stays above 10 % of the peak) provided at least 5 % of the peaks fall inside, and pixels with $|\mathbf q| < q_{\min}$ are removed from $m$ (`_infer_beamstop_qmin`, `_beamstop_qmin_from_histogram`).
+After the threshold is set, the calibrated finder runs on up to 200 seed frames and the $|\mathbf q|$ of every peak is histogrammed in 40 bins against the number of live pixels per bin. At least 200 peaks are required. A peak density in the two innermost populated bins exceeding 50 times the median density identifies the beam-stop halo. $q_{\min}$ is set at the outer edge of that spike, extending while the density stays above 10% of the spike and by at most two bins, provided at least 5% of the peaks fall inside. Pixels with $|\mathbf q| < q_{\min}$ are removed from $m$ (`_infer_beamstop_qmin`, `_beamstop_qmin_from_histogram`).
 
 ### 2.9 Per-frame scale
 
@@ -136,7 +136,7 @@ with $S_w = \sum_I 1/\sigma_0^2$ and $D$ the WLS determinant. $s$ and $\sigma_s$
 
 ### 3.1 Local background and the effective model
 
-The blended mean is corrected per frame by a local annulus, so slow structure the running model does not track (jet scatter, lipid rings) does not read as excess (`PeakFinder._effective_background`, `peaks/peakfinder.py:397-434`; `local_mean_var`, `peaks/neighborhood.py:109-142`). With the square annulus $A_p = \{q : r_{\text{in}} < \|q - p\|_\infty \le r_{\text{out}}\}$, $r_{\text{in}} = 4$, $r_{\text{out}} = 9$ px (fixed; $280$ nominal pixels), the one-sided clipped residual $\tilde\rho = \min(x - \mu_0,\ 5\sigma_0)$ and $C_p = \max(\sum_{A_p} m, 1)$:
+The blended mean is corrected per frame by a local annulus, so slow structure the running model does not track (jet scatter, lipid rings) does not read as excess (`PeakFinder._effective_background`, `peaks/peakfinder.py`; `local_mean_var`, `peaks/neighborhood.py`). With the square annulus $A_p = \{q : r_{\text{in}} < \|q - p\|_\infty \le r_{\text{out}}\}$, $r_{\text{in}} = 4$, $r_{\text{out}} = 9$ px (fixed; $280$ nominal pixels), the one-sided clipped residual $\tilde\rho = \min(x - \mu_0,\ 5\sigma_0)$ and $C_p = \max(\sum_{A_p} m, 1)$:
 
 $$
 \ell_\mu(p) = \frac{1}{C_p}\sum_{q\in A_p} m\,\tilde\rho, \qquad \ell_{\sigma^2}(p) = \max\!\Big(\frac{1}{C_p}\sum_{q\in A_p} m\,\tilde\rho^2 - \ell_\mu^2,\ 0\Big),
@@ -173,7 +173,7 @@ The logits are smoothed with a mask-weighted $5\times5$ Gaussian ($\sigma = 1$ p
 
 ### 3.4 Matched filter
 
-For a bank of unit-energy Gaussian kernels $u_k$ with $\sigma_k \in \{1.0, 1.6, 2.4\}$ px (`mf_scales`, fixed; sizes $2\lceil 3\sigma_k\rceil + 1$) the masked correlation, renormalised by the energy of the kernel that fell on live pixels, is exactly $\mathcal N(0,1)$ under the null even at edges (`matched_filter_z`, `neighborhood.py:146-165`):
+For a bank of unit-energy Gaussian kernels $u_k$ with $\sigma_k \in \{1.0, 1.6, 2.4\}$ px (`mf_scales`, fixed; sizes $2\lceil 3\sigma_k\rceil + 1$) the masked correlation, renormalised by the energy of the kernel that fell on live pixels, is exactly $\mathcal N(0,1)$ under the null even at edges (`matched_filter_z`, `neighborhood.py`):
 
 $$
 \text{MF}_k(p) = \frac{\sum_q u_k(q-p)\,m(q)\,z(q)}{\sqrt{\sum_q u_k(q-p)^2\,m(q)}}, \qquad T(p) = \max_k \text{MF}_k(p) .
@@ -183,7 +183,7 @@ A pixel is a detection when $T(p) > \tau$ with the learned $\tau$ of §2.6. Dete
 
 ### 3.5 Blob statistics and filters
 
-For a blob $B$ with weights $w_p = \max(E(p), 0)$ (`compute_blob_stats`, `peaks/blobs.py:178-350`):
+For a blob $B$ with weights $w_p = \max(E(p), 0)$ (`compute_blob_stats`, `peaks/blobs.py`):
 
 | quantity | definition |
 |---|---|
@@ -202,19 +202,19 @@ $$
 \text{cap}_B = \max\!\Big(\texttt{size\_max},\ 4 \cdot 2\pi\,\sigma_{\max}^2\,\ln\max(R_B/\tau, 1)\Big), \qquad \sigma_{\max} = \max_k\sigma_k,
 $$
 
-four times the area a Gaussian of width $\sigma_{\max}$ and peak response $R_B$ has above $\tau$, so that a bright spot is allowed the footprint its own response implies while `size_max` $= 30$ binds only dim blobs. The kept centroids, $I_B$, $\sigma(I_B)$, background sums and pixel counts are the *peaks* handed to indexing and written to the `Peaks from peak search` table.
+four times the area a Gaussian of width $\sigma_{\max}$ and peak response $R_B$ has above $\tau$, which allows a bright spot the footprint its own response implies while `size_max` $= 30$ binds only dim blobs. The kept centroids, $I_B$, $\sigma(I_B)$, background sums and pixel counts are the *peaks* handed to indexing and written to the `Peaks from peak search` table.
 ## 4. From pixels to reciprocal space
 
 ### 4.1 The forward model
 
-A detector pixel $(i, j)$ maps to laboratory coordinates through its panel's origin $(c_x, c_y)$ and basis vectors $\mathbf f = (f_x, f_y)$, $\mathbf s = (s_x, s_y)$ (in pixel units, from the geometry file; `_lab_xy_pixels`, `indexer/forward.py:82-110`):
+A detector pixel $(i, j)$ maps to laboratory coordinates through its panel's origin $(c_x, c_y)$ and basis vectors $\mathbf f = (f_x, f_y)$, $\mathbf s = (s_x, s_y)$ (in pixel units, from the geometry file; `_lab_xy_pixels`, `indexer/forward.py`):
 
 $$
 x_{\text{px}} = c_x + (j - j_{\min})\,f_x + (i - i_{\min})\,s_x, \qquad
 y_{\text{px}} = c_y + (j - j_{\min})\,f_y + (i - i_{\min})\,s_y,
 $$
 
-and, with pixel size $p$ (Å), camera length $L$ (Å) and the incident direction $\mathbf s_0 = (0,0,1)$ (`detector_to_q`, `forward.py:113-144`):
+and, with pixel size $p$ (Å), camera length $L$ (Å) and the incident direction $\mathbf s_0 = (0,0,1)$ (`detector_to_q`, `forward.py`):
 
 $$
 \mathbf r = (x_{\text{px}}\,p,\ y_{\text{px}}\,p,\ L), \qquad
@@ -225,7 +225,7 @@ Every observed $\mathbf q$ lies on the Ewald sphere of radius $1/\lambda$ centre
 
 ### 4.2 Cells and orientation
 
-A cell $(a, b, c, \alpha, \beta, \gamma)$ defines the direct matrix $\mathbf M = [\mathbf a\ \mathbf b\ \mathbf c]$ with $\mathbf a \parallel x$ and $\mathbf b$ in the $xy$ plane, and the reciprocal basis $\mathbf B = \mathbf M^{-\top}$, whose columns are $\mathbf a^*, \mathbf b^*, \mathbf c^*$ (`cell_to_B`, `indexer/lattice.py:14-37`). A crystal's orientation matrix is
+A cell $(a, b, c, \alpha, \beta, \gamma)$ defines the direct matrix $\mathbf M = [\mathbf a\ \mathbf b\ \mathbf c]$ with $\mathbf a \parallel x$ and $\mathbf b$ in the $xy$ plane, and the reciprocal basis $\mathbf B = \mathbf M^{-\top}$, whose columns are $\mathbf a^*, \mathbf b^*, \mathbf c^*$ (`cell_to_B`, `indexer/lattice.py`). A crystal's orientation matrix is
 
 $$
 \mathbf A = \mathbf U\,\mathbf B, \qquad \mathbf q = \mathbf A\,\mathbf h,
@@ -235,7 +235,7 @@ with $\mathbf U$ a rotation and $\mathbf h = (h, k, l)$ integer. Given $\mathbf 
 
 ### 4.3 The reciprocal tolerance
 
-One tolerance governs seeding, refinement and hkl assignment (`Indexer.__init__`, `indexer/indexer.py:650-656`):
+One tolerance governs seeding, refinement and hkl assignment (`Indexer.__init__`, `indexer/indexer.py`):
 
 $$
 q_{\text{tol}} = f_q\,\min\big(|\mathbf a^*|, |\mathbf b^*|, |\mathbf c^*|\big), \qquad f_q = 0.25 \ (\texttt{q\_tolerance\_fraction}, \text{fixed}),
@@ -247,7 +247,7 @@ a quarter of the shortest reciprocal axis of the target cell, so it scales with 
 
 ### 5.1 Seeding with a known cell
 
-The cell is known; only $\mathbf U$ is sought (`sphere_seed_candidates`, `indexer/seed.py:91-148`). Peaks are capped to the 80 brightest (`max_seed_peaks`) for seeding. With $\hat{\mathbf a}$ the direct $a$-axis of the target cell and $L_a = |\mathbf a|$:
+The cell is known; only $\mathbf U$ is sought (`sphere_seed_candidates`, `indexer/seed.py`). Peaks are capped to the 80 brightest (`max_seed_peaks`) for seeding. With $\hat{\mathbf a}$ the direct $a$-axis of the target cell and $L_a = |\mathbf a|$:
 
 1. **Directions.** $2n_d$ directions $\pm\hat{\mathbf d}_i$ from a Fibonacci hemisphere, $n_d = 6000$ (`n_directions`).
 2. **Integer-projection fitness.** Placing $\mathbf a$ along $\hat{\mathbf d}$, every peak's projection $L_a\,\hat{\mathbf d}\cdot\mathbf q_i$ must be near an integer if the direction is right:
@@ -260,7 +260,7 @@ Frames with fewer than 5 peaks are not attempted; below 30 peaks the direction a
 
 ### 5.2 Orientation refinement
 
-For every candidate an axis-angle perturbation $\boldsymbol\omega \in \mathbb R^3$ is optimised with the cell fixed, $\mathbf A(\boldsymbol\omega) = \mathbf R(\boldsymbol\omega)\,\mathbf A^{\text{seed}}$ with $\mathbf R$ the Rodrigues rotation (`refine_multiframe_known_B`, `indexer/refine.py:268-427`, Triton twin in `kernels/refine.py`). With inlier indicators $m_i$ re-assigned every 10 steps and residuals $\mathbf r_i = \mathbf A\mathbf h_i - \mathbf q_i$:
+For every candidate an axis-angle perturbation $\boldsymbol\omega \in \mathbb R^3$ is optimised with the cell fixed, $\mathbf A(\boldsymbol\omega) = \mathbf R(\boldsymbol\omega)\,\mathbf A^{\text{seed}}$ with $\mathbf R$ the Rodrigues rotation (`refine_multiframe_known_B`, `indexer/refine.py`, Triton twin in `kernels/refine.py`). With inlier indicators $m_i$ re-assigned every 10 steps and residuals $\mathbf r_i = \mathbf A\mathbf h_i - \mathbf q_i$:
 
 $$
 \mathcal L(\boldsymbol\omega) = \frac{\sum_i w_i m_i\,|\mathbf r_i|^2}{\max(\sum_i w_i m_i, 1)},
@@ -274,7 +274,7 @@ Candidates are ranked by $\text{score}_k = \sum_i w_i m_{ki} - \text{rmsd}_k / (
 
 ### 5.4 Cell refinement
 
-Holding every crystal at the target cell puts its predictions systematically off (0.5 % of the radius on b2AR), so orientation and the lattice-type-allowed cell parameters are refined jointly (`refine_cell`, `indexer/refine.py:117-233`). With $\mathbf p_0$ the candidate's own cell parameters and $\mathbf T \in \{0,1\}^{6\times m_c}$ the map from the $m_c$ free parameters $\boldsymbol\rho$ to the six cell values (ties and fixed angles per lattice type: monoclinic frees $a, b, c$ and the unique angle; hexagonal ties $a = b$ and frees $c$; cubic ties all three edges, etc.),
+Holding every crystal at the target cell puts its predictions systematically off, so orientation and the lattice-type-allowed cell parameters are refined jointly (`refine_cell`, `indexer/refine.py`). With $\mathbf p_0$ the candidate's own cell parameters and $\mathbf T \in \{0,1\}^{6\times m_c}$ the map from the $m_c$ free parameters $\boldsymbol\rho$ to the six cell values (ties and fixed angles per lattice type: monoclinic frees $a, b, c$ and the unique angle; hexagonal ties $a = b$ and frees $c$; cubic ties all three edges, etc.),
 
 $$
 \mathbf A(\boldsymbol\theta) = \mathbf R(\boldsymbol\omega)\,\mathbf U_0\,\mathbf B(\mathbf p_0 + \mathbf T\boldsymbol\rho), \qquad \boldsymbol\theta = (\boldsymbol\omega, \boldsymbol\rho).
@@ -293,7 +293,7 @@ $$
 \boldsymbol\sigma_{\text{prior}} = \tfrac13\,(0.05\,a_0,\ 0.05\,b_0,\ 0.05\,c_0,\ 3^\circ, 3^\circ, 3^\circ).
 $$
 
-The prior is a unit-variance Tikhonov term of width one third of the cell-match tolerance, centred on the starting cell; it is what stops a cell axis that lies along the beam (unconstrained by the data) from drifting. $\mathcal L = |\mathbf f|^2$ is minimised by Levenberg–Marquardt, $\delta\boldsymbol\theta = -(\mathbf H + \lambda_{\text{LM}}\operatorname{diag}\mathbf H)^{-1}\mathbf J^\top\mathbf f$ with $\mathbf J$ from autograd, 8 iterations per round, two rounds with hkl re-assignment in between, solved on the host in float64. The result replaces the orientation-only solution when the whitened data residual has not increased, $n_{\text{idx}} \ge 6$ and the refined cell still matches the target.
+The prior is a unit-variance Tikhonov term of width one third of the cell-match tolerance, centred on the starting cell. It stops a cell axis that lies along the beam (unconstrained by the data) from drifting. $\mathcal L = |\mathbf f|^2$ is minimised by Levenberg–Marquardt, $\delta\boldsymbol\theta = -(\mathbf H + \lambda_{\text{LM}}\operatorname{diag}\mathbf H)^{-1}\mathbf J^\top\mathbf f$ with $\mathbf J$ from autograd, 8 iterations per round, two rounds with hkl re-assignment in between, solved on the host in float64. The result replaces the orientation-only solution when the whitened data residual has not increased, $n_{\text{idx}} \ge 6$ and the refined cell still matches the target.
 
 ### 5.5 Several lattices per frame
 
@@ -301,7 +301,7 @@ With `max_lattices` $> 1$ the peaks explained by an accepted lattice, $|\mathbf 
 
 ## 6. Predicting the full reflection set
 
-For an accepted $\mathbf A$ every $\mathbf h$ with $|\mathbf A\mathbf h| \le q_{\max}$ (the largest $|\mathbf q|$ at the detector corners) and the cell's centering condition is enumerated (`predict_reflections`, `indexer/predict.py:64-140`). Its excitation error is the distance of $\mathbf q$ from the Ewald sphere,
+For an accepted $\mathbf A$ every $\mathbf h$ with $|\mathbf A\mathbf h| \le q_{\max}$ (the largest $|\mathbf q|$ at the detector corners) and the cell's centering condition is enumerated (`predict_reflections`, `indexer/predict.py`). Its excitation error is the distance of $\mathbf q$ from the Ewald sphere,
 
 $$
 \varepsilon(\mathbf h) = |\lambda\,\mathbf A\mathbf h + \hat{\mathbf z}| - 1 ,
@@ -319,13 +319,13 @@ where $r_{\text{size}} = 5\times10^{-5}\ \text{Å}^{-1}$ is the domain-size term
 
 ### 7.1 Learning the aperture
 
-Integration radii are not configured; they are read off the data once, after calibration (`_learn_integration_radii`, `probixi.py`). Peaks from a seeded random sample of frames (until at least 200 peaks on more than 32 frames, at most 512 frames) are stacked into a radial profile of the excess (`radial_profile`, `indexer/integrate.py:52-88`): for ring $b = \operatorname{round}\sqrt{\delta r^2 + \delta c^2} \le 16$ around each peak centroid, $\bar E_i(b)$ is the mean excess on that ring and
+Integration radii are not configured. They are read off the data once, after calibration (`_learn_integration_radii`, `probixi.py`). Peaks from a seeded random sample of frames (more than 32 frames and at least 200 peaks, or 4000 peaks under `--aperture auto`, from at most 512 frames outside the seed set) are stacked into a radial profile of the excess (`radial_profile`, `indexer/integrate.py`): for ring $b = \operatorname{round}\sqrt{\delta r^2 + \delta c^2} \le 16$ around each peak centroid, $\bar E_i(b)$ is the mean excess on that ring and
 
 $$
 P(b) = \operatorname{med}_i\,\bar E_i(b), \qquad p(b) = P(b) - \min_b P(b), \qquad b = 0, \dots, 16 .
 $$
 
-**Flux rule** (`radii_from_profile`, `integrate.py:110-156`). A Gaussian is fitted to the core, $\ln p(b) = \text{const} + s\,b^2$ over the rings before $p$ first drops below $10\,\%$ of $p(0)$, giving $\sigma_{\text{spot}} = \sqrt{-1/2s}$ and the radius at which the spot falls to the `floor` of 2 %:
+**Flux rule** (`radii_from_profile`, `integrate.py`). A Gaussian is fitted to the core, $\ln p(b) = \text{const} + s\,b^2$ over the rings before $p$ first drops below $10\,\%$ of $p(0)$, giving $\sigma_{\text{spot}} = \sqrt{-1/2s}$ and the radius at which the spot falls to the `floor` of 2 %:
 
 $$
 r_{\text{sig}} = \sigma_{\text{spot}}\sqrt{-2\ln 0.02} \approx 2.8\,\sigma_{\text{spot}}, \qquad
@@ -335,7 +335,7 @@ $$
 
 so the background annulus always holds about 120 pixels (`background_pixels`, fixed) and starts one pixel outside the spot.
 
-**SNR rule** (`--aperture snr`; `snr_disk_radius`, `integrate.py:98-107`). With $n(b)$ the number of integer offsets on ring $b$, the disk radius is the one maximising the background-limited signal-to-noise of the *profile*:
+**SNR rule** (`--aperture snr`; `snr_disk_radius`, `integrate.py`). With $n(b)$ the number of integer offsets on ring $b$, the disk radius is the one maximising the background-limited signal-to-noise of the *profile*:
 
 $$
 S(k) = \sum_{b\le k} p(b)\,n(b), \qquad N(k) = \sum_{b\le k} n(b), \qquad
@@ -344,11 +344,11 @@ $$
 
 with $r_{\text{in}}, r_{\text{out}}$ left at the flux-rule values so the annulus still clears the 2 % radius. On 1 px spots this gives a $3\times3$ disk ($r_{\text{sig}} = 1.5$) where the flux rule gave 5 px; on broad spots both rules agree. If too few peaks are found the indexer falls back to $(3.0, 4.0, 7.36)$ px (`FALLBACK_RADII`).
 
-**Auto rule** (default, `--aperture auto`; `choose_aperture`). The SNR disk captures a fraction $f$ of each spot's flux. Not every loss survives merging: a per-crystal constant is absorbed by that crystal's scale factor, and a resolution trend common to all crystals by an overall $B$. What no scale model removes is a resolution dependence of $f$ that *differs between crystals*, as it does when their mosaicity differs, so that is what the rule measures. On strong ($I/\sigma \ge 10$ in the flux disk, both disks corrected by the peak's own annulus as in 7.2), isolated (no neighbour within $2 r_{\text{sig}}^{\text{flux}} + 1$ px) calibration peaks with their frame ids, the trend common to all crystals is estimated first (weighted means of $\log f$ in $|q|^2$ bins, interpolated) and removed, since a curved common trend would otherwise read as crystal-specific slopes wherever crystals sample different $|q|$ ranges. Each crystal's residual $\log f$ is then regressed on $|q|^2$; the slope errors are calibrated on the pooled within-crystal residuals, so per-reflection scatter (sub-pixel centring, spot shape) does not count as a crystal difference. The spread of the slopes beyond their errors, times the $|q|^2$ span from the median to the 90th percentile, is the intensity error the SNR disk would leave at the resolution edge; it is estimated with a winsorised $\chi^2$ (each crystal's standardised deviation capped at 9, against the null mean 0.995 and variance 1.90 of a capped $\chi^2_1$), so a few wild crystals cannot decide. If it reaches 2 % (`aperture_tolerance`) at $\ge 3\sigma$, the flux disk is taken, otherwise the SNR disk stays. Fewer than 50 usable peaks or 10 crystals keep the SNR disk. The choice, its reason, the common trend, the crystal spread and its significance are printed after calibration; the stream header records the rule actually applied.
+**Auto rule** (default, `--aperture auto`; `choose_aperture`). The SNR disk captures a fraction $f$ of each spot's flux. Not every loss survives merging: a per-crystal constant is absorbed by that crystal's scale factor, and a resolution trend common to all crystals by an overall $B$. What no scale model removes is a resolution dependence of $f$ that *differs between crystals*, as it does when their mosaicity differs, and that is what the rule measures. On strong ($I/\sigma \ge 10$ in the flux disk, both disks corrected by the peak's own annulus as in 7.2), isolated (no neighbour within $2 r_{\text{sig}}^{\text{flux}} + 1$ px) calibration peaks with their frame ids, the trend common to all crystals is estimated first (weighted means of $\log f$ in $|q|^2$ bins, interpolated) and removed, since a curved common trend would otherwise read as crystal-specific slopes wherever crystals sample different $|q|$ ranges. Each crystal's residual $\log f$ is then regressed on $|q|^2$; the slope errors are calibrated on the pooled within-crystal residuals, so per-reflection scatter (sub-pixel centring, spot shape) does not count as a crystal difference. The spread of the slopes beyond their errors, times the $|q|^2$ span from the median to the 90th percentile, is the intensity error the SNR disk would leave at the resolution edge. It is estimated with a winsorised $\chi^2$ (each crystal's standardised deviation capped at 9, against the null mean 0.995 and variance 1.90 of a capped $\chi^2_1$), so a few wild crystals cannot decide. If it reaches 2 % (`aperture_tolerance`) at $\ge 3\sigma$, the flux disk is taken, otherwise the SNR disk stays. Fewer than 50 usable peaks or 10 crystals keep the SNR disk. The choice, its reason, the common trend, the crystal spread and its significance are printed after calibration; the stream header records the rule actually applied.
 
 ### 7.2 Ring integration of a predicted reflection
 
-For each predicted position (`integrate_rings`, `integrate.py:159-250`), first snapped onto an observed peak centroid within 5 px (`snap_radius`) when one exists, the raw frame is $R = E + \mu_{\text{eff}}$ and pixel offsets $(\delta r, \delta c)$ about the rounded centre have $\rho^2 = \delta r^2 + \delta c^2$:
+For each predicted position (`integrate_rings`, `integrate.py`), first snapped onto an observed peak centroid within 5 px (`snap_radius`) when one exists, the raw frame is $R = E + \mu_{\text{eff}}$ and pixel offsets $(\delta r, \delta c)$ about the rounded centre have $\rho^2 = \delta r^2 + \delta c^2$:
 
 - **annulus** $\mathcal A_i = \{r_{\text{in}}^2 \le \rho^2 \le r_{\text{out}}^2\}$ on live in-frame pixels, $n_{b,i} = |\mathcal A_i|$,
   $$B_i = \frac{1}{n_{b,i}}\sum_{\mathcal A_i} R_p \ [\text{ADU/px}], \qquad s^2_{b,i} = \frac{1}{n_{b,i}-1}\sum_{\mathcal A_i}(R_p - B_i)^2 ;$$
@@ -376,11 +376,11 @@ $$
 \text{bg\_model\_var}_i = \frac{n_i}{n_{\text{bg}}}\sum_{p\in\mathcal U_i} V_p\ [\text{ADU}^2].
 $$
 
-The variance follows from §3.1: the only frame-dependent part of $\mu_{\text{eff}}$ under a disk is the single local-annulus mean $\ell_\mu$ shared by all $n_i$ pixels, whose variance is $\bar V/n_{\text{bg}}$, so the summed background has variance $n_i^2\,\bar V/n_{\text{bg}}$. Compared with the ring estimate's $c\,B_i n_i$ with $c = n_i/n_{b,i}$, this is smaller by roughly $n_{b,i}/n_{\text{bg}}$ and carries no Poisson-count bias; it is written as the extra columns `n_pix bg_model bg_model_var` for a merging program that models the background explicitly (torchsx `--background model`).
+The variance follows from §3.1: the only frame-dependent part of $\mu_{\text{eff}}$ under a disk is the single local-annulus mean $\ell_\mu$ shared by all $n_i$ pixels, whose variance is $\bar V/n_{\text{bg}}$, so the summed background has variance $n_i^2\,\bar V/n_{\text{bg}}$. Compared with the ring estimate's $c\,B_i n_i$ with $c = n_i/n_{b,i}$, this is smaller by roughly $n_{b,i}/n_{\text{bg}}$ and carries no Poisson-count bias. It is written as the extra columns `n_pix bg_model bg_model_var` for a merging program that models the background explicitly (torchsx `--background model`).
 
 ### 7.4 Enrichment: is this lattice real?
 
-A lattice that explains a handful of noise blobs must not survive. Before integrating, the predicted positions are tested against the image (`spot_enrichment`, `integrate.py:310-364`). With $z = E/\sqrt{V}$, a pixel is *bright* when the $5\times5$ maximum of $z$ around it exceeds the detection threshold $\tau$; the background bright rate is $p_0 = \#\{\text{bright live pixels}\}/\#\{\text{live pixels}\}$. Of the $n_{\text{keep}}$ predicted centres on live pixels, $n_{\text{bright}}$ land on bright pixels, and
+A lattice that explains a handful of noise blobs must not survive. Before integrating, the predicted positions are tested against the image (`spot_enrichment`, `integrate.py`). With $z = E/\sqrt{V}$, a pixel is *bright* when the $5\times5$ maximum of $z$ around it exceeds the detection threshold $\tau$; the background bright rate is $p_0 = \#\{\text{bright live pixels}\}/\#\{\text{live pixels}\}$. Of the $n_{\text{keep}}$ predicted centres on live pixels, $n_{\text{bright}}$ land on bright pixels, and
 
 $$
 \text{enrichment} = \frac{n_{\text{bright}}/n_{\text{keep}}}{p_0}, \qquad
@@ -391,7 +391,7 @@ An enrichment near 1 is a lattice indistinguishable from chance; `--enrich-gate`
 
 ### 7.5 Resolution limit and profile radius
 
-The crystal's diffraction limit is where its shell-averaged $I/\sigma$ crosses 1 (`falloff_resolution_limit`): predicted reflections are sorted by $|\mathbf q|$ into 10 equal-count shells and the crossing is interpolated linearly between the two shells bracketing $\langle I/\sigma\rangle = 1$ (`resolution_isigma`); with fewer than 40 reflections the 0.90 quantile of the observed peaks' $|\mathbf q|$ is used instead. It is reported (`diffraction_resolution_limit`, nm$^{-1}$) but never used to truncate the reflection list. The `profile_radius` is the rocking half-width of §6 evaluated at that limit, $R(q_{\text{lim}})$, converted to nm$^{-1}$ and clamped to $[5\times10^{-4}, 2\times10^{-2}]$.
+The crystal's diffraction limit is the more generous of two estimates. The first is the highest $|\mathbf q|$ among its indexed peaks. The second is where its shell-averaged $I/\sigma$ falls to 0.5 (`falloff_resolution_limit`, `resolution_isigma`), with predicted reflections sorted by $|\mathbf q|$ into 10 equal-count shells and the crossing interpolated linearly between the two shells that bracket it. With fewer than 40 reflections the second estimate is skipped, and when neither exists the 0.90 quantile of the observed peaks' $|\mathbf q|$ is used. It is reported (`diffraction_resolution_limit`, nm$^{-1}$) but never used to truncate the reflection list. The `profile_radius` is the rocking half-width of §6 evaluated at that limit, $R(q_{\text{lim}})$, converted to nm$^{-1}$ and clamped to $[5\times10^{-4}, 2\times10^{-2}]$.
 
 ## 8. What is written
 
@@ -421,7 +421,7 @@ b_i^{\text{ring}} = \frac{B_i\,n_i^{\text{px}}}{g}\ \text{with}\ \operatorname{V
 b_i^{\text{model}} = \frac{\text{bg\_model}_i}{g}\ \text{with}\ \operatorname{Var} = \frac{\text{bg\_model\_var}_i}{g^2} .
 $$
 
-The ring pair is the CrystFEL convention (torchsx `--background annulus`); the model pair replaces the annulus count by the noise model's expectation, whose variance is measured rather than assumed Poisson (`--background model`). On b2AR the model background's standard deviation is about a third of the ring estimate's.
+The ring pair is the CrystFEL convention (torchsx `--background annulus`); the model pair replaces the annulus count by the noise model's expectation, whose variance is measured rather than assumed Poisson (`--background model`).
 
 ## 10. Notation
 
@@ -429,7 +429,7 @@ The ring pair is the CrystFEL convention (torchsx `--background annulus`); the m
 |---|---|---|---|
 | $x_f, x(p)$ | raw frame, pixel value | ADU | §0 |
 | $m(p)$ | live-pixel mask (geometry, dead, shadow, beam stop) | | §1.3, §2.1, §2.8 |
-| $\mu_k, \sigma^2_k$ | running mean and variance of view $k \in \{\text{pix}, \text{rot}, \text{pan}\}$ | ADU, ADU$^2$ | §1.1–1.2 |
+| $\mu_k, \sigma^2_k$ | running mean and variance of view $k \in \{\text{pix}, \text{rad}, \text{frame}\}$ | ADU, ADU$^2$ | §1.1–1.2 |
 | $w_k$, $s_v$ | learned blend weights and variance scale | | §2.2 |
 | $\mu_0, \sigma_0^2$ | blended model prediction | ADU, ADU$^2$ | §1.4 |
 | $\kappa, \pi$ | peak-hypothesis width inflation and prior | | §2.3 |

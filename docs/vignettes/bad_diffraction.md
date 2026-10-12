@@ -1,6 +1,10 @@
-# Poorly Diffracting Samples
+# Weak diffraction
 
-You may notice that the [call from the well-diffracting walkthrough](good_diffraction.md) is exactly the same here, minus the `--enrich-gate`: on weak data a genuine lattice may put only a handful of predicted spots on measurable signal, so a gate tuned for strong shots would throw away real hits along with the noise. Even in poorly diffracting environments, `probixi` aims to let you get the most from your data, without a speed penalty from low signal-to-noise. Here, we'll work through an example of C1C2 crystals at the synchrotron.
+A threshold-based peakfinder requires a gap between Bragg signal and background in which to place its threshold. On weakly diffracting samples that gap narrows, and on many frames no single threshold admits the real peaks without also admitting noise. `probixi` instead fixes the false-positive rate against a calibrated null, and that rate does not depend on the strength of the signal.
+
+## The run
+
+This example uses the chimeric channelrhodopsin C1C2 at a synchrotron, recorded on an Eiger detector at 200 Hz.
 
 ```bash
 probixi \
@@ -8,20 +12,25 @@ probixi \
   -g synchrotron.geom \
   -p c1c2.cell \
   -o c1c2.stream \
-  --device cuda \
+  --gpus 4 \
   --gif noise_model.gif
 ```
 
-## Turning up sensitivity
-
-Because weak signal leaves little margin, a clean background estimate matters most. `--gif noise_model.gif` is the quickest way to confirm the noise model has converged, and calibrating on more frames with `--seed-frames` steadies it if a hit rate looks lower than expected. The auto-calibrated detection threshold usually handles the rest, but if you do need to push sensitivity harder, `--target-noise-peaks` raises it by tolerating a few more noise blobs per frame.
-
-> NOTE: `--target-noise-peaks` is still being tested to ensure you don't merge more noise downstream
-
 ![image](../assets/c1c2_sync.gif)
 
-## Sparse patterns index themselves
+The call differs from the strong-diffraction call only in omitting `--enrich-gate`. A real but weak lattice puts few of its predicted spots on measurable signal, and a gate at a strict level would discard real lattices along with the noise. Every crystal still records its `enrichment` and `enrich_p`, and the distribution can be inspected and thresholded afterwards if overprediction is a concern.
 
-With few peaks, seeding an orientation is the hard part, and it is handled for you. The Fibonacci-sphere seeder adapts per frame: on peak-starved frames it automatically widens the orientation search (at the cost of some computation), more sample directions and in-plane angles, so a sparse pattern still gets a fair shot, then narrows back on richer frames. A candidate must still explain a minimum handful of peaks (six by default) to be accepted, so an information-starved frame simply goes unindexed rather than indexing wrongly.
+## Peakfinding and indexing together
 
-Since the gate is off, nothing is dropped for weak prediction, but every indexed frame still records its `enrichment`, `n_bright`, and `enrich_p` in the output (see the `frames` table). If overprediction does turn out to be a concern on a given dataset, you can inspect that distribution and threshold it after the fact.
+On weak data the built-in indexer is preferable to exporting the peaks with `--peaks-only`. A conventional indexer receives a thresholded list and treats every entry as certain. The built-in indexer weights every peak by its detection posterior, and a faint detection contributes in proportion to its evidence rather than being included or excluded outright.
+
+On frames with fewer than 30 peaks the orientation search doubles the number of trial directions and rolls. A candidate still requires six inliers and a cell that matches the target, and a frame with too little information is reported as unindexed rather than assigned an incorrect lattice.
+
+## Sensitivity
+
+The defaults are the recommended starting point.
+
+- The background model is the first thing to check. `--gif` shows whether it has settled, and a larger `--seed-frames` reduces the variance of the calibration.
+- `--target-noise-peaks` raises sensitivity by allowing more noise detections per signal-free frame. Higher values admit more noise into the peak list, so compare the merged statistics before and after.
+
+The [peakfinding page](../overview/peakfinding.md) explains what each of these controls.
