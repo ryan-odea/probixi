@@ -1,8 +1,6 @@
 # Indexing and integration
 
-[Peakfinding](peakfinding.md) produces a list of peaks, each with a detection posterior $c_i$. Indexing finds the crystal orientation that places those peaks on reciprocal-lattice points. Prediction and integration then measure every reflection the lattice implies, whether or not it was detected.
-
-The numerical constants and their defaults are listed in the [method reference](method.md).
+[Peakfinding](peakfinding.md) produces a list of peaks, each with a detection posterior $c_i$. Indexing finds the crystal orientation that places those peaks on reciprocal-lattice points. Prediction and integration then measure every reflection the lattice implies, whether or not it was detected. Constants and defaults are listed in the [method reference](method.md).
 
 ## The target
 
@@ -50,7 +48,7 @@ Candidates are ranked by their weighted inlier sum. The first with at least six 
 
 ## Acceptance
 
-A candidate is accepted only when its refined cell matches the target, with sorted edges within 5% and sorted angles within 3°. Sorting makes the check independent of axis labelling. A frame with no acceptable candidate is reported as unindexed, which is preferable to committing a wrong lattice. With `--max-lattices` above 1, the peaks an accepted lattice explains are removed and the remainder is searched again.
+A candidate is accepted only when its refined cell matches the target, with sorted edges within 5% and sorted angles within 3°. Sorting makes the check independent of axis labelling. A frame with no acceptable candidate is reported as unindexed. With `--max-lattices` above 1, the peaks an accepted lattice explains are removed and the remainder is searched again.
 
 ## Correcting the target cell
 
@@ -68,7 +66,7 @@ and a reflection is predicted when $|\varepsilon| < 1.5\,\lambda\,\rho$. The mos
 
 ### The aperture
 
-The integration aperture is learned from the data. After calibration, `probixi` stacks the radial profiles of peaks from a further random sample of frames and fits a Gaussian to the core. The full-flux radius is where that Gaussian falls to 2% of its centre. The background annulus begins one pixel beyond it and holds 120 pixels. The signal disk defaults to the smaller radius that maximises the background-limited signal-to-noise ratio of the profile. A smaller disk captures a smaller fraction of each spot. A constant fraction is absorbed by each crystal's scale factor in merging, and a trend with resolution common to all crystals by an overall $B$ factor. What scaling cannot remove is a resolution trend that differs between crystals, so `probixi` tests for that on the calibration peaks and reverts to the full-flux radius when it is significant (`--aperture auto`).
+After calibration, `probixi` stacks the radial profiles of peaks from a further random sample of frames and fits a Gaussian to the core. The full-flux radius is where that Gaussian falls to 2% of its centre. The background annulus begins one pixel beyond it and holds 120 pixels. The signal disk defaults to the smaller radius that maximises the background-limited signal-to-noise ratio of the profile. A smaller disk captures a smaller fraction of each spot. A constant fraction is absorbed by each crystal's scale factor in merging, and a trend with resolution common to all crystals by an overall $B$ factor. What scaling cannot remove is a resolution trend that differs between crystals, so `probixi` tests for that on the calibration peaks and reverts to the full-flux radius when it is significant (`--aperture auto`).
 
 ### Integrating a reflection
 
@@ -88,6 +86,4 @@ An orientation can fit a sparse peak list without being the true lattice. Once t
 
 $$\text{enrichment} = \frac{n_{\text{bright}}/M}{p}, \qquad \texttt{enrich\_p} = P(X \ge n_{\text{bright}}),\quad X \sim \mathrm{Poisson}(Mp).$$
 
-An enrichment near 1 means the predictions land on signal as often as chance. With `--enrich-gate`, a lattice is kept only when `enrich_p` is at most `--enrich-alpha` (default $10^{-3}$). The gate runs before the overlap exclusion, so a rejected lattice cannot remove reflections from one that is kept. The gate is off by default and is still being tested to determine whether it becomes the default. The [strong-diffraction](../vignettes/good_diffraction.md) and [weak-diffraction](../vignettes/bad_diffraction.md) vignettes discuss when to enable it.
-
-Every indexed crystal carries these statistics, its cell, its orientation, and its integrated reflections into the output. See [Inputs and outputs](io.md).
+An enrichment near 1 means the predictions land on signal as often as chance. With `--enrich-gate`, a lattice is kept only when `enrich_p` is at most `--enrich-alpha` (default $10^{-3}$). The gate runs before the overlap exclusion, so a rejected lattice cannot remove reflections from one that is kept. The gate is off by default and is still being tested to determine whether it becomes the default.
