@@ -13,9 +13,7 @@ experimental](https://img.shields.io/badge/lifecycle-experimental-orange.svg)](h
 [![Documentation Status](https://readthedocs.org/projects/probixi/badge/?version=latest)](https://probixi.readthedocs.io)
 [![Code Style](https://img.shields.io/badge/code%20style-black-000000.svg)](https://github.com/psf/black)
 
-`probixi` treats peakfinding as anomaly detection. Bragg signal is sparse, so the stream of frames is mostly a sample of the detector's own background. `probixi` learns that background at every pixel as frames arrive, whitens each frame against it, and reports what the null cannot explain. The contrast, prior, blend, and detection threshold are all calibrated on the data, so there is nothing to tune. It then indexes, predicts, and integrates each frame, weighting every peak by how confident the detection was.
-
-It has been applied to strongly and weakly diffracting samples at synchrotrons and to variable-flux data at a free-electron laser. The vignettes describe each case.
+`probixi` treats peakfinding as anomaly detection. Bragg signal is sparse, and the stream of frames is therefore mostly a sample of the detector's background. `probixi` learns that background at every pixel as frames arrive, whitens each frame against it, and reports the pixels the background does not explain. The peak contrast, peak prior, background blend, and detection threshold are calibrated on the data, and no parameter requires tuning. Each frame is then indexed, predicted, and integrated, with every peak weighted by its detection posterior.
 
 ![image](https://raw.githubusercontent.com/ryan-odea/Probixi/main/docs/assets/br_fel.gif)
 
@@ -35,9 +33,9 @@ pip install git+https://github.com/ryan-odea/probixi.git
 
 ## Using `probixi`
 
-`probixi` runs from the command line or from Python. The CLI goes from raw frames to integrated reflections in one call. The Python API returns lazy streams whose results stay on the GPU until you collect them, so you can branch off your own torch processing at any stage.
+The command line goes from raw frames to integrated reflections in one call. The Python API returns lazy streams whose results remain on the GPU until collected, and any stage can feed further torch processing.
 
-Before detection, `probixi` calibrates on a set of seed frames. `--gif` writes an animation of the noise model settling over those frames, which shows whether the background model has converged before the run is trusted.
+`probixi` calibrates on a set of seed frames before detection. `--gif` writes an animation of the noise model over those frames.
 
 Via the CLI:
 

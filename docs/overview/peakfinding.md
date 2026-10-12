@@ -1,12 +1,8 @@
 # Peakfinding
 
-A conventional peakfinder keeps whatever exceeds a threshold, in detector units or in a signal-to-noise proxy. The appropriate threshold depends on the beam, the detector, the background, and the sample, so a value tuned on one run does not transfer to the next. `probixi` replaces the threshold with a hypothesis test whose null distribution is learned from the data.
-
-The numerical constants and their defaults are listed in the [method reference](method.md).
+A conventional peakfinder keeps whatever exceeds a threshold, in detector units or in a signal-to-noise proxy. The appropriate threshold depends on the beam, the detector, the background, and the sample, so a value tuned on one run does not transfer to the next. `probixi` replaces the threshold with a hypothesis test whose null distribution is learned from the data. Constants and defaults are listed in the [method reference](method.md).
 
 ## Two properties of the stream
-
-The method rests on two properties of serial data.
 
 1. Every frame records the same detector under the same beam. The background at pixel $i$ is therefore a draw from one distribution $F_i$, common to all frames and changing only slowly within a run.
 2. Bragg signal is sparse. At any pixel only a small fraction of observations carry signal.
@@ -41,7 +37,7 @@ $$\mathcal L(w) = \bar z^{\,2} + (v - 1)^2 + \tfrac12\,\mathrm{kurt}^2,$$
 
 where $\bar z$, $v$, and $\mathrm{kurt}$ are the mean, variance, and excess kurtosis of $z$ over that set. The three terms are the departures of location, scale, and tail shape from their standard-normal values, and the loss is zero only when all three agree. The grid holds 66 points, so the search is exhaustive. At the minimiser $v$ is not in general 1, and setting $s = \sqrt v$ restores unit variance exactly.
 
-The alternative hypothesis also needs parameters. `probixi` models a peak pixel as $z \sim \mathcal N(0, \kappa^2)$ with $\kappa > 1$, the weakest assumption consistent with an excursion of unknown size. On the calibrated residuals, expectation maximisation fits
+For the alternative, `probixi` models a peak pixel as $z \sim \mathcal N(0, \kappa^2)$ with $\kappa > 1$, the weakest assumption consistent with an excursion of unknown size. On the calibrated residuals, expectation maximisation fits
 
 $$p(z) = (1-\pi)\,\mathcal N(0,1) + \pi\,\mathcal N(0,\kappa^2)$$
 
@@ -61,7 +57,7 @@ The running model is an average over the run. A given frame can sit above or bel
 
 $$\mu^{\text{eff}}_i = \mu_i + \operatorname{mean}_{\mathcal A_i}\!\big[\min(r, 5\sigma)\big], \qquad (\sigma^{\text{eff}}_i)^2 = \max\!\Big(\sigma_i^2,\ \operatorname{var}_{\mathcal A_i}\!\big[\min(r, 5\sigma)\big]\Big),$$
 
-with $r = x - \mu$ the residual against the running model. A spot of radius up to 4 pixels never enters its own background estimate, and the clip limits what a neighbouring reflection can contribute. Taking the larger variance means a frame with more local scatter than the model is tested against its own scatter, and a frame with less is not given a lower bar. On weak data this correction contributes more to sensitivity than any other component. Detection uses $z$ formed from $\mu^{\text{eff}}$ and $\sigma^{\text{eff}}$.
+with $r = x - \mu$ the residual against the running model. A spot of radius up to 4 pixels never enters its own background estimate, and the clip limits what a neighbouring reflection can contribute. Taking the larger variance means a frame with more local scatter than the model is tested against its own scatter, and a frame with less is not given a lower bar. Detection uses $z$ formed from $\mu^{\text{eff}}$ and $\sigma^{\text{eff}}$.
 
 ## The matched filter
 
@@ -101,10 +97,8 @@ Frames that received no beam, with a median level below a tenth of the run's, ar
 
 ## Variable flux
 
-The running variance is measured at the run's typical fluence. With `--flux-variance`, `probixi` fits $\sigma^2 = \sigma^2_{\text{read}} + g\,\mu$ to the calibrated model and whitens each pixel against the variance predicted at that frame's own level, bounded below by 0.15 of the running variance. The [variable-flux vignette](../vignettes/variable_flux.md) covers when to use it.
+The running variance is measured at the run's typical fluence. With `--flux-variance` ([vignette](../vignettes/variable_flux.md)), `probixi` fits $\sigma^2 = \sigma^2_{\text{read}} + g\,\mu$ to the calibrated model and whitens each pixel against the variance predicted at that frame's own level, bounded below by 0.15 of the running variance.
 
 ## After calibration
 
 The blend, the scale, $\kappa$, $\pi$, and the threshold are frozen after calibration. The running statistics continue to update and follow slow drift within the run. `--recalibrate-every` instead rebuilds the calibration at fixed intervals and freezes the statistics in between, which suits a run that spans an abrupt change. Every run is whitened to the same unit-variance standard, so peak counts and indexing rates are comparable between conditions.
-
-The detected peaks and their posteriors are the input to [indexing](indexing.md).

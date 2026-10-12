@@ -1,6 +1,6 @@
 # The method, end to end
 
-This page derives what `probixi` computes, in the order it computes it, from a raw detector frame to the reflection list a merging program reads. It is the reference behind the [peakfinding](peakfinding.md) and [indexing](indexing.md) pages. Every symbol is defined where it first appears, and the notation table at the end collects them. Defaults are quoted with the configuration field or module constant that holds them, and each quantity is marked as **fixed** (a constant in the code) or **learned** (estimated from the data at hand). Function and file names point into the package.
+The derivation follows the pipeline from a raw detector frame to the reflection list a merging program reads. Every symbol is defined at first use and collected in the notation table at the end. Defaults are quoted with the configuration field or module constant that holds them, and each quantity is marked as **fixed** (a constant in the code) or **learned** (estimated from the data at hand).
 
 ## 0. Objects and conventions
 

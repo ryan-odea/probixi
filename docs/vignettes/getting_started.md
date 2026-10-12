@@ -1,6 +1,6 @@
 # Getting started
 
-`probixi` needs three things from you: a list of files, the detector geometry, and an approximate unit cell. Everything else, from the noise model to the detection threshold to the integration aperture, is learned from the data. This page covers the CLI, how to check that a run behaved, and the Python API. To skip ahead, see [Using `probixi` with Python](#using-probixi-with-python).
+A run requires a list of files, the detector geometry, and an approximate unit cell. The noise model, the detection threshold, and the integration aperture are learned from the data.
 
 ## Running from the CLI
 
@@ -14,8 +14,6 @@ probixi -i files.lst -g my_geometry.geom -p my_unit.cell -o output.db
 - `-o` sets the output, and its extension sets the format. `.stream` writes a CrystFEL stream, and `.db` or `.duckdb` writes a DuckDB database.
 
 The device defaults to `auto`, which picks CUDA, then Apple MPS, then CPU.
-
-No further options are required. Those below serve particular data or workflows.
 
 ### Calibration
 
@@ -60,24 +58,20 @@ No further options are required. Those below serve particular data or workflows.
 
 ## Checking a run
 
-Each quantity that `probixi` learns from the data can be inspected.
-
-- **Background.** `--gif noise.gif` animates the running mean, its radial profile, and the per-batch drift over the seed frames. The mean settles as frames accumulate, and structure that persists in the drift panel is structure the model has not absorbed.
-- **Calibration.** After calibration `probixi` prints one line with the peak contrast (`kappa`), the peak prior (`prior_peak`), the variance scale (`var_scale`), the detection threshold (`mf_threshold`), any learned beamstop limit, blank-frame floor, and shadow fraction, and the integration radii with the aperture it chose and why. A `var_scale` far from 1 means the raw per-pixel variance was badly off. An `mf_threshold` pinned at 8.0, the top of its search range, means no seed frame looked signal-free, and the usual cause is structure the model does not capture.
-- **Detections.** `--render 1234 --render-out frame.png` overlays detected peaks (open circles) and predicted reflections (crosses) on one frame. It runs directly after calibration, and without `-o` the run stops there, which makes it inexpensive to inspect a few frames.
+- **Background.** `--gif noise.gif` animates the running mean, its radial profile, and the per-batch drift over the seed frames. Structure that persists in the drift panel has not been absorbed by the model.
+- **Calibration.** After calibration `probixi` prints one line with the peak contrast (`kappa`), the peak prior (`prior_peak`), the variance scale (`var_scale`), the detection threshold (`mf_threshold`), any learned beamstop limit, blank-frame floor, and shadow fraction, and the integration radii with the aperture it chose and why. A `var_scale` far from 1 means the raw per-pixel variance did not match the background scatter. An `mf_threshold` pinned at 8.0, the top of its search range, means no seed frame looked signal-free, and the usual cause is structure the model does not capture.
+- **Detections.** `--render 1234 --render-out frame.png` overlays detected peaks (open circles) and predicted reflections (crosses) on one frame. It runs directly after calibration, and without `-o` the run stops there.
 - **Lattices.** Every indexed crystal carries its `enrichment` and `enrich_p` in the output, gated or not. A distribution centred near 1 means the lattices are no better than chance.
 
 ## Recovering results
 
-A `.stream` is a standard CrystFEL stream and goes straight into `partialator` or `process_hkl`.
+A `.stream` is a standard CrystFEL stream, read by `partialator` and `process_hkl`.
 
 > NOTE: The stream output may be deprecated in favour of the database. It exists to compare `probixi` one-to-one with CrystFEL pipelines.
 
 ### Database
 
-The `.db` (or `.duckdb`) output is a [DuckDB](https://duckdb.org/) file. It holds the run's metadata, every frame, every lattice, and the integrated reflections and searched peaks in one queryable file.
-
-Three small **metadata** tables are written once, up front.
+The `.db` (or `.duckdb`) output is a [DuckDB](https://duckdb.org/) file. Three **metadata** tables are written once, at the start of the run.
 
 | Table | Rows | What it stores |
 | --- | --- | --- |
@@ -94,15 +88,13 @@ Four **result** tables are linked by `frame_id`, the first 16 hex digits of the 
 | `reflections` | one per integrated reflection | Keyed by `crystal_id` and `frame_id`. Miller indices `h`/`k`/`l`, `intensity`, `sigma`, `peak`, `background`, position (`fs`, `ss`, `panel`), and `resolution_nm_inv`. |
 | `peaks` | one per searched peak | Keyed by `frame_id`. Position (`fs`, `ss`, `panel`), `intensity`, and `resolution_nm_inv`. |
 
-Three properties of the schema matter when querying.
-
 - Frames that never indexed still get a `frames` row with `indexed = FALSE`, so the indexing rate is `SELECT AVG(indexed::INT) FROM frames`. Under `--start`/`--stop` or multi-GPU runs, each writer fills only the frame range it owns.
 - A frame keeps one `frames` row however many lattices it yields. Count lattices with `SELECT COUNT(*) FROM crystals` and frames with `SELECT COUNT(*) FROM frames WHERE indexed`. Per-lattice statistics live on `crystals`.
 - `--peaks-only` fills `peaks`, not `reflections`. Those frames have `indexed = FALSE` and empty `crystals` and `reflections` tables.
 
 ## Using `probixi` with Python
 
-The CLI is a thin wrapper over `probixi.Probixi`. A run is three steps, construct, calibrate, and drain.
+The CLI wraps `probixi.Probixi`. A run constructs the pipeline, calibrates it, and drains the stream.
 
 ```python
 from probixi import Probixi
@@ -127,4 +119,4 @@ n = stream.to_db(
 print(f"indexed {n} frame(s)")
 ```
 
-`index_stream` returns a **lazy** `IndexStream`. Nothing is read or indexed until you drain it with `to_db`, `to_stream`, `collect`, or a loop. Each `IndexResult`, and every tensor it carries, stays on the configured device, and only the writers move data off it. A stream is single-use, so iterating an already-drained stream yields nothing.
+`index_stream` returns a **lazy** `IndexStream`. Nothing is read or indexed until you drain it with `to_db`, `to_stream`, `collect`, or a loop. Each `IndexResult`, and every tensor it carries, stays on the configured device, and only the writers move data off it. A stream is single-use.

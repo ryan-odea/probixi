@@ -19,7 +19,7 @@ probixi \
 
 ![image](../assets/br_fel.gif)
 
-The animation shows the noise model settling on bacteriorhodopsin at an FEL.
+The animation shows the noise model for bacteriorhodopsin at an FEL.
 
 ## What `--flux-variance` does
 
@@ -29,6 +29,6 @@ With `--flux-variance`, calibration fits a photon-transfer curve across the seed
 
 $$\sigma^2 = \sigma^2_{\text{read}} + g\,\mu ,$$
 
-where the intercept is the read variance and the slope $g$ is the detector gain in ADU per photon. At detection time each pixel is whitened against the variance the curve predicts at that frame's own background level. A bright shot and a dim one are then tested on the same footing. `--flux-var-floor` (default 0.15) bounds the predicted variance below by that fraction of the running variance. The fitted gain also goes to integration, so the shot-noise term in each σ(I) is in the right units.
+where the intercept is the read variance and the slope $g$ is the detector gain in ADU per photon. At detection time each pixel is whitened against the variance the curve predicts at that frame's own background level. `--flux-var-floor` (default 0.15) bounds the predicted variance below by that fraction of the running variance. The fitted gain also sets the shot-noise term of each σ(I) in integration.
 
-It is opt-in because it only helps when flux varies. On steady synchrotron exposures the running variance already describes the noise. It has so far been tested on one FEL dataset.
+The option is off by default, because on steady synchrotron exposures the running variance already describes the noise. It has so far been tested on one FEL dataset.

@@ -18,7 +18,7 @@ probixi \
 
 ![image](../assets/c1c2_sync.gif)
 
-The call differs from the strong-diffraction call only in omitting `--enrich-gate`. A real but weak lattice puts few of its predicted spots on measurable signal, and a gate at a strict level would discard real lattices along with the noise. Every crystal still records its `enrichment` and `enrich_p`, and the distribution can be inspected and thresholded afterwards if overprediction is a concern.
+The call differs from the strong-diffraction call only in omitting `--enrich-gate`. A real but weak lattice puts few of its predicted spots on measurable signal, and a gate at a strict level would discard real lattices along with the noise. Overprediction can still be assessed afterwards from the recorded `enrichment` and `enrich_p`.
 
 ## Peakfinding and indexing together
 
@@ -28,9 +28,5 @@ On frames with fewer than 30 peaks the orientation search doubles the number of 
 
 ## Sensitivity
 
-The defaults are the recommended starting point.
-
-- The background model is the first thing to check. `--gif` shows whether it has settled, and a larger `--seed-frames` reduces the variance of the calibration.
-- `--target-noise-peaks` raises sensitivity by allowing more noise detections per signal-free frame. Higher values admit more noise into the peak list, so compare the merged statistics before and after.
-
-The [peakfinding page](../overview/peakfinding.md) explains what each of these controls.
+- `--gif` shows whether the background model has settled, and a larger `--seed-frames` reduces the variance of the calibration.
+- `--target-noise-peaks` raises sensitivity by allowing more noise detections per signal-free frame ([noise budget](../overview/peakfinding.md#the-threshold-from-a-noise-budget)). Higher values also admit more noise into the peak list.
