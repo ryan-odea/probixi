@@ -1,35 +1,37 @@
-# Input/Output
+# Inputs and outputs
 
-`probixi` is built to slot into an existing serial-crystallography workflow, so it speaks CrystFEL. The same `.geom`, `.cell`, and `.lst` files go in, and a CrystFEL `.stream` (or a DuckDB database) comes out. This page follows the data in and back out.
+`probixi` reads and writes CrystFEL formats, so it fits into an existing serial-crystallography workflow. The same `.geom`, `.cell`, and `.lst` files go in, and a CrystFEL `.stream` or a DuckDB database comes out.
 
-> NOTE: .stream format may be deprecated in the future and left 'as-is'
+## Inputs
 
-## Input
+1. A CrystFEL geometry file for the detector.
+2. A CrystFEL cell file. It only has to be approximate, because `probixi` re-centres it on the data.
+3. A list file of the HDF5 or CXI files to process.
 
-`probixi` requires minimal user inputs:
+Any pixel mask stored with the data is read and combined with the masks `probixi` learns.
 
-1. A crystfel style geometry file from your beamline
-2. Your crystal unit-cell
-3. A list file containing all the files you would like indexed.
+## Reading frames
 
+Frames are read lazily. A background thread reads slices into a bounded queue a few batches ahead, which overlaps disk reads with GPU compute. For bitshuffle-LZ4 datasets chunked one frame per chunk, the common case, `probixi` reads the raw compressed chunks and decompresses them on the GPU, and uncompressed frames never pass through host memory. Each frame or batch is moved to the chosen device and data type as it is handed out.
 
-## Streaming frames
+## Outputs
 
-Frames are pulled off disk lazily by `iter_frames`. A background worker thread reads slices into a bounded queue, up to `prefetch` batches ahead, so (hopefully) disk reads overlap with GPU compute. For the common case of bitshuffle-LZ4-compressed, per-frame-chunked datasets, it reads the raw compressed chunks and decodes them across a thread pool. Everything is moved to your chosen device and dtype as it is handed out, one `(H, W)` frame or a `(B, H, W)` batch at a time.
+**CrystFEL stream (`.stream`).** The per-frame, per-reflection text format, readable by `partialator` and `process_hkl`. Three extra reflection columns (`n_pix`, `bg_model`, `bg_model_var`) carry the noise model's background under each disk for merging programs that model the background explicitly. CrystFEL ignores them.
 
+**DuckDB (`.db` or `.duckdb`).** Run metadata goes into small `geometry`, `panels`, and `cell` tables. Every file-event becomes a row in `frames`, indexed or not, and lattices, integrated reflections, and searched peaks are linked to it by `frame_id`. The key is deterministic, the first 16 hex digits of the SHA-1 of `filename//event`, so a peaks-only pass, an indexed pass, and separate multi-GPU shards agree on which row is which frame. Under `--start`/`--stop` or multi-GPU runs, each writer fills only the frame range it owns. The [getting-started guide](../vignettes/getting_started.md) documents the schema.
 
-## Output
+**Peaks only (`--peaks-only`).** With a directory as `-o`, `probixi` writes one `.cxi` per input file with the raw frames externally linked, a `peaks.lst`, and a companion `<geometry>_cxi.geom`, ready for `indexamajig --peaks=cxi`. With a `.db` file as `-o`, the peaks go into the database instead.
 
-`probixi` writes results three ways, each for a different purpose.
+> NOTE: The stream output may be deprecated in favour of the database.
 
-**CXI peaks (`--peaks-only`).** This exports the peak search in CrystFEL's CXI layout. With one `.cxi` per input file (the raw image stack is external-linked, so nothing is duplicated), a `peaks.lst`, and a companion `.geom` annotated so the directory is drop-in for `indexamajig --peaks=cxi`.
+## Resolving the indexing ambiguity
 
-**CrystFEL stream (`.stream`).** The familiar per-frame, per-reflection text stream, written in CrystFEL 2.3 format so existing merging tools (`partialator`, `process_hkl`) read it directly.
+When the lattice symmetry is higher than the point group, each crystal can be indexed in more than one way. `probixi-resolve` implements the Brehm and Diederichs method, as in CrystFEL's `ambigator`, on a DuckDB output. It clusters the crystals into the two indexing choices and reindexes those on the wrong side, transforming `h k l`, the reciprocal axes, and the cell, and records each assignment in an `ambiguity` table.
 
-**DuckDB (`.db`/`.duckdb`).** Run metadata lands in small `geometry`/`panels`/`cell` tables, every file-event becomes a row in `frames` (indexed or not, with its per-frame statistics), and the integrated `reflections` and searched `peaks` hang off each frame by a `frame_id`. That key is stable and deterministic, the first 16 hex digits of `sha1("filename//event")`, so a peaks-only pass, an indexed pass, and separate multi-GPU shards all agree on which row is which frame.
+```bash
+probixi-resolve -i run.duckdb -y 3 -w 321 -o resolved.duckdb
+```
 
-Under `--start`/`--stop` or multi-GPU, each writer backfills only the frame range it owns, so a shard never declares the rest of the dataset unindexed. The [getting-started guide](../vignettes/getting_started.md) documents the full schema.
+## Viewing a frame
 
-## Seeing a frame
-
-`render_frame` draws a frame with its overlays, detected peaks as open lime circles and indexed reflections as red crosses, scaling the display to percentiles of the valid pixels only so masked and dead pixels do not wreck the contrast. It is the quickest way to eyeball whether the peaks and the predicted lattice agree with the image.
+`render_frame` (or `--render` on the CLI) draws a frame with detected peaks as open circles and predicted reflections as crosses. The display is scaled to percentiles of the valid pixels only, so masked and dead pixels do not set the contrast. It shows directly whether the peaks and the predicted lattice agree with the image.
