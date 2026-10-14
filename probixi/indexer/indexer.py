@@ -12,9 +12,9 @@ from ..peakfinding.peaks import PeakResult
 from .forward import detector_to_q
 from .integrate import (
     A_INV_TO_NM_INV,
+    disk_overlap_counts,
     falloff_resolution_limit,
     integrate_rings,
-    keep_non_overlapping,
     peak_resolution_limit,
     snap_positions,
     spot_enrichment,
@@ -128,12 +128,23 @@ class IndexResult:
     predicted_bg_model_var : Tensor, optional
         (M,) variance of that estimate (ADU^2) from the local-background
         annulus the disk pixels share; zero when no local annulus is used.
+    predicted_n_pixels_total : Tensor, optional
+        (M,) pixels in each nominal signal disk, masked or not.
+    predicted_n_masked : Tensor, optional
+        (M,) of those, the pixels lost to the detector mask or the frame edge.
+    predicted_n_overlap : Tensor, optional
+        (M,) of those, the pixels also inside another predicted disk on the
+        same panel, over every lattice on the frame. The stream writer skips a
+        reflection with either count above zero; the database keeps it, flagged.
     peak_background_sum : Tensor, optional
         (N,) noise-model background summed over each *detected* peak's own
         pixels, aligned with ``positions``/``intensities``. Only searched peaks
         carry this: a predicted position has no measured blob to sum over.
     peak_n_pixels : Tensor, optional
         (N,) pixel count of each detected peak's blob.
+    peak_n_masked : Tensor, optional
+        (N,) pixels of each detected peak's blob that border the mask or the
+        frame edge; the stream's peak list skips a peak with any.
     adu_per_photon : float, optional
         Detector gain the frame was processed with, for turning the ADU columns
         into photon counts.
@@ -187,8 +198,12 @@ class IndexResult:
     predicted_n_pixels: Optional[Tensor] = None
     predicted_bg_model: Optional[Tensor] = None
     predicted_bg_model_var: Optional[Tensor] = None
+    predicted_n_pixels_total: Optional[Tensor] = None
+    predicted_n_masked: Optional[Tensor] = None
+    predicted_n_overlap: Optional[Tensor] = None
     peak_background_sum: Optional[Tensor] = None
     peak_n_pixels: Optional[Tensor] = None
+    peak_n_masked: Optional[Tensor] = None
     adu_per_photon: Optional[float] = None
     diffraction_limit: Optional[float] = None
     falloff_limit: Optional[float] = None
@@ -220,9 +235,9 @@ class FrameIndexResult:
         Accepted lattices in search order.
     positions, intensities : Tensor
         Detected peaks supplied to the first lattice search.
-    peak_background_sum, peak_n_pixels : Tensor, optional
-        Per-peak background sum (ADU) and pixel count, aligned with
-        ``positions``; the writers turn these into photon counts.
+    peak_background_sum, peak_n_pixels, peak_n_masked : Tensor, optional
+        Per-peak background sum (ADU), pixel count and count of pixels
+        bordering the mask, aligned with ``positions``.
     adu_per_photon : float, optional
         Gain the frame was processed with.
     """
@@ -233,6 +248,7 @@ class FrameIndexResult:
     intensities: Tensor
     peak_background_sum: Optional[Tensor] = None
     peak_n_pixels: Optional[Tensor] = None
+    peak_n_masked: Optional[Tensor] = None
     adu_per_photon: Optional[float] = None
 
     @property
@@ -259,8 +275,11 @@ class SeedConfig:
         Peaks fed to the seeder are capped to this many (the brightest, by
         intensity, when available). The full peak set still drives refinement and
         the final solution.
-    n_directions : int
-        Number of unsigned Fibonacci axes; both signs are searched.
+    n_directions : int, optional
+        Number of unsigned Fibonacci axes; both signs are searched. ``None``
+        (default) scales 6000 by ``(a / 55 A)**2``, never below 6000, so the
+        grid spacing keeps up with the a-axis fitness peak, which narrows as
+        the axis gets longer.
     n_spin : int
         Number of in-plane (roll) angles tried per kept direction.
     top_directions : int
@@ -277,8 +296,9 @@ class SeedConfig:
         Gaussian residual width (A^-1) for geometric candidate ranking.
     max_lattices : int
         Maximum successive lattices per image.
-    peel_radius : float
-        Reciprocal residual (A^-1) below which a peak is removed before reseeding.
+    peel_radius : float, optional
+        Reciprocal residual (A^-1) below which a peak is removed before reseeding;
+        ``None`` uses the indexing tolerance.
     sparse_scale : float
         Multiplier applied to the sphere search counts on sparse frames.
     """
@@ -287,7 +307,7 @@ class SeedConfig:
     q_tolerance_fraction: float = 0.25
     max_candidates: int = 64
     max_seed_peaks: int = 80
-    n_directions: int = 6000
+    n_directions: Optional[int] = None
     n_spin: int = 120
     top_directions: int = 32
     adaptive_sparse: bool = True
@@ -296,7 +316,7 @@ class SeedConfig:
     max_index_peaks: Optional[int] = None
     rank_sigma: Optional[float] = None
     max_lattices: int = 1
-    peel_radius: float = 0.006
+    peel_radius: Optional[float] = None
 
     def __post_init__(self) -> None:
         if self.max_lattices < 1:
@@ -684,6 +704,9 @@ class Indexer:
         else:
             min_spacing = float(torch.linalg.vector_norm(self.B_target, dim=0).min())
             self.q_tolerance = self.seed.q_tolerance_fraction * min_spacing
+        self.n_directions = self.seed.n_directions or max(
+            6000, round(6000 * (self.target_cell.a / 55.0) ** 2)
+        )
 
     def _cell_matches_target(
         self, cell: CellParams, target: Optional[CellParams] = None
@@ -723,6 +746,7 @@ class Indexer:
         weights_by_frame: Optional[dict[int, Tensor]] = None,
         peak_bg_by_frame: Optional[dict[int, Tensor]] = None,
         peak_npix_by_frame: Optional[dict[int, Tensor]] = None,
+        peak_nmask_by_frame: Optional[dict[int, Tensor]] = None,
     ) -> dict[int, IndexResult]:
         """Index many frames with batched refinement.
 
@@ -740,10 +764,10 @@ class Indexer:
             row-for-row with ``positions_by_frame``. Default to zeros when omitted.
         weights_by_frame : dict of int -> Tensor, optional
             Per-peak detection confidences for soft seeding/refinement.
-        peak_bg_by_frame, peak_npix_by_frame : dict of int -> Tensor, optional
-            Per-peak background sum (ADU) and pixel count, aligned with
-            ``positions_by_frame``. Carried through the peak cap onto the result
-            so the writers can report photon counts.
+        peak_bg_by_frame, peak_npix_by_frame, peak_nmask_by_frame : dict of int -> Tensor, optional
+            Per-peak background sum (ADU), pixel count and count of pixels
+            bordering the mask, aligned with ``positions_by_frame``. Carried
+            through the peak cap onto the result for the writers.
 
         Returns
         -------
@@ -761,11 +785,12 @@ class Indexer:
                 (weights_by_frame or {}).get(i),
                 (peak_bg_by_frame or {}).get(i),
                 (peak_npix_by_frame or {}).get(i),
+                (peak_nmask_by_frame or {}).get(i),
             )
             for i, p in positions_by_frame.items()
         }
         seeded: list[tuple[int, int, Tensor, Tensor, Optional[Tensor]]] = []
-        for idx, (positions, intensities, _, weights, _, _) in data.items():
+        for idx, (positions, intensities, _, weights, _, _, _) in data.items():
             if (
                 positions.ndim != 2
                 or positions.shape[-1] != 2
@@ -815,6 +840,7 @@ class Indexer:
                 sigmas=data[idx][2],
                 peak_bg=data[idx][4],
                 peak_npix=data[idx][5],
+                peak_nmask=data[idx][6],
             )
             if built is not None:
                 out[idx] = built
@@ -840,7 +866,7 @@ class Indexer:
         weights: Optional[Tensor] = None,
     ) -> Tensor:
         n_dir, n_spin, top_dir, top_k = (
-            self.seed.n_directions,
+            self.n_directions,
             self.seed.n_spin,
             self.seed.top_directions,
             self.seed.max_candidates,
@@ -877,6 +903,7 @@ class Indexer:
         q: Optional[Tensor] = None,
         peak_bg: Optional[Tensor] = None,
         peak_npix: Optional[Tensor] = None,
+        peak_nmask: Optional[Tensor] = None,
     ) -> Optional[IndexResult]:
         # Pick the best refined candidate whose cell matches the target, or None.
         if result.A.shape[0] == 0:
@@ -938,6 +965,7 @@ class Indexer:
                 loss_history=result.history,
                 peak_background_sum=peak_bg,
                 peak_n_pixels=peak_npix,
+                peak_n_masked=peak_nmask,
                 adu_per_photon=self._adu_per_photon(),
             )
         return None
@@ -976,9 +1004,7 @@ class Indexer:
             return A, hkl, indexed, n_indexed, rmsd
         return A_r, hkl_r, indexed_r, n_r, rmsd_r
 
-    def _positions_from_frame(
-        self, r: PeakResult
-    ) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor, Tensor]:
+    def _positions_from_frame(self, r: PeakResult) -> tuple[Optional[Tensor], ...]:
         # Pull kept peak-blob centroids and photometry off a PeakResult
         stats = r.kept_stats
         positions = torch.stack([stats.row_centroid, stats.col_centroid], dim=-1).to(
@@ -989,8 +1015,11 @@ class Indexer:
         weights = stats.posterior_mean.to(device=self.device, dtype=self.dtype)
         bg_sum = stats.background_sum.to(device=self.device, dtype=self.dtype)
         n_pix = stats.size.to(device=self.device, dtype=self.dtype)
+        n_mask = stats.n_masked
+        if n_mask is not None:
+            n_mask = n_mask.to(device=self.device, dtype=self.dtype)
         return self._cap_peak_data(
-            positions, intensities, sigmas, weights, bg_sum, n_pix
+            positions, intensities, sigmas, weights, bg_sum, n_pix, n_mask
         )
 
     def _cap_peak_data(
@@ -1001,10 +1030,19 @@ class Indexer:
         weights: Optional[Tensor],
         peak_bg: Optional[Tensor] = None,
         peak_npix: Optional[Tensor] = None,
+        peak_nmask: Optional[Tensor] = None,
     ) -> tuple[Optional[Tensor], ...]:
         # Keep only the max_index_peaks brightest peaks, across every array that
         # is aligned with positions, so downstream photometry stays in step
-        values = (positions, intensities, sigmas, weights, peak_bg, peak_npix)
+        values = (
+            positions,
+            intensities,
+            sigmas,
+            weights,
+            peak_bg,
+            peak_npix,
+            peak_nmask,
+        )
         cap = self.seed.max_index_peaks
         if cap is None or len(positions) <= cap:
             return values
@@ -1025,6 +1063,10 @@ class Indexer:
         frame_rotations: Optional[dict[int, Tensor]] = None,
         peak_bg_by_frame: Optional[dict[int, Tensor]] = None,
         peak_npix_by_frame: Optional[dict[int, Tensor]] = None,
+        peak_nmask_by_frame: Optional[dict[int, Tensor]] = None,
+        maps_by_frame: Optional[dict[int, tuple]] = None,
+        bright_threshold: float = 5.0,
+        enrich_alpha: Optional[float] = None,
     ) -> dict[int, list[IndexResult]]:
         """Index successive lattices by peeling explained peaks.
 
@@ -1037,15 +1079,21 @@ class Indexer:
             ``positions_by_frame``.
         frame_rotations : dict of int -> Tensor, optional
             Per-frame (3, 3) lab->crystal rotations.
-        peak_bg_by_frame, peak_npix_by_frame : dict of int -> Tensor, optional
-            Per-peak background sum (ADU) and pixel count, carried through the
-            peel so each lattice keeps the photometry of its own peaks.
+        peak_bg_by_frame, peak_npix_by_frame, peak_nmask_by_frame : dict of int -> Tensor, optional
+            Per-peak background sum (ADU), pixel count and mask-bordering pixel
+            count, carried through the peel so each lattice keeps the
+            photometry of its own peaks.
+        maps_by_frame : dict of int -> tuple, optional
+            Per-frame ``(excess, var, mask, mean)`` maps; with ``enrich_alpha``,
+            each lattice is integrated and gated as it is found, and a rejected
+            lattice is not kept but its peaks are still peeled.
+        bright_threshold, enrich_alpha
+            As for :meth:`index_frame_stream`.
 
         Returns
         -------
         dict of int -> list of IndexResult
-            Accepted lattices keyed by frame index, in search order and before
-            the enrichment gate.
+            Accepted lattices keyed by frame index, in search order.
         """
         remaining = {
             i: self._cap_peak_data(
@@ -1055,6 +1103,7 @@ class Indexer:
                 weights_by_frame[i],
                 (peak_bg_by_frame or {}).get(i),
                 (peak_npix_by_frame or {}).get(i),
+                (peak_nmask_by_frame or {}).get(i),
             )
             for i, p in positions_by_frame.items()
         }
@@ -1070,6 +1119,7 @@ class Indexer:
                 weights_by_frame={i: v[3] for i, v in remaining.items()},
                 peak_bg_by_frame={i: v[4] for i, v in remaining.items()},
                 peak_npix_by_frame={i: v[5] for i, v in remaining.items()},
+                peak_nmask_by_frame={i: v[6] for i, v in remaining.items()},
             )
             next_remaining = {}
             for i, result in results.items():
@@ -1084,7 +1134,16 @@ class Indexer:
                     for r in previous
                 ):
                     continue
-                previous.append(result)
+                maps = (maps_by_frame or {}).get(i)
+                gated = enrich_alpha is not None and maps is not None
+                if gated:
+                    self._integrate_result(
+                        result, *maps, bright_threshold, enrich_alpha=enrich_alpha
+                    )
+                if not gated or (
+                    result.enrich_p is not None and result.enrich_p <= enrich_alpha
+                ):
+                    previous.append(result)
                 if n == self.seed.max_lattices:
                     continue
                 # peel the peaks this lattice explains, reseed on the residue
@@ -1092,7 +1151,9 @@ class Indexer:
                     result.positions, frame_rotation=(frame_rotations or {}).get(i)
                 )
                 hkl = torch.round(q @ torch.linalg.inv(result.A).T)
-                assigned = (hkl @ result.A.T - q).norm(dim=-1) < self.seed.peel_radius
+                assigned = (hkl @ result.A.T - q).norm(dim=-1) < (
+                    self.seed.peel_radius or self.q_tolerance
+                )
                 if (
                     int(assigned.sum()) >= MIN_PEAKS_PER_LATTICE
                     and int((~assigned).sum()) >= MIN_PEAKS_PER_LATTICE
@@ -1176,11 +1237,19 @@ class Indexer:
                 weights_by_frame={b["idx"]: b["w"] for b in hits},
                 peak_bg_by_frame={b["idx"]: b["peak_bg"] for b in hits},
                 peak_npix_by_frame={b["idx"]: b["peak_npix"] for b in hits},
+                peak_nmask_by_frame={b["idx"]: b["peak_nmask"] for b in hits},
+                maps_by_frame={
+                    b["idx"]: (b["excess"], b["var"], b["mask"], b["mean"])
+                    for b in hits
+                    if self.integrate.enabled and b["excess"] is not None
+                },
+                bright_threshold=bright_threshold,
+                enrich_alpha=enrich_alpha,
             )
             for b in buf:
                 crystals = results.get(b["idx"], [])
                 if self.integrate.enabled and b["excess"] is not None:
-                    for result in crystals:
+                    for result in (r for r in crystals if r.enrich_p is None):
                         self._integrate_result(
                             result,
                             b["excess"],
@@ -1196,7 +1265,7 @@ class Indexer:
                         for r in crystals
                         if r.enrich_p is not None and r.enrich_p <= enrich_alpha
                     ]
-                self._exclude_overlaps(crystals)
+                self._flag_overlaps(crystals)
                 stats.indexed += bool(crystals)
                 stats.crystals += len(crystals)
                 yield FrameIndexResult(
@@ -1206,6 +1275,7 @@ class Indexer:
                     b["I"],
                     peak_background_sum=b["peak_bg"],
                     peak_n_pixels=b["peak_npix"],
+                    peak_n_masked=b["peak_nmask"],
                     adu_per_photon=self._adu_per_photon(),
                 )
 
@@ -1221,6 +1291,7 @@ class Indexer:
                     weights,
                     peak_bg,
                     peak_npix,
+                    peak_nmask,
                 ) = self._positions_from_frame(r)
                 buf.append(
                     dict(
@@ -1231,6 +1302,7 @@ class Indexer:
                         w=weights,
                         peak_bg=peak_bg,
                         peak_npix=peak_npix,
+                        peak_nmask=peak_nmask,
                         excess=r.scores.get("excess") if r.scores else None,
                         var=r.var,
                         mask=r.valid_mask,
@@ -1245,10 +1317,8 @@ class Indexer:
 
         return FrameIndexStream(_gen(), stats=stats)
 
-    def _exclude_overlaps(self, crystals: list[IndexResult]) -> None:
-        # Drop reflections whose integration disks crowd a same-panel
-        # neighbour, judged over every lattice on the frame at once so a pair
-        # split across two lattices is still caught
+    def _flag_overlaps(self, crystals: list[IndexResult]) -> None:
+        # disk pixels shared with any predicted disk on the panel, across all lattices
         active = [r for r in crystals if r._integration_positions is not None]
         if not active:
             return
@@ -1274,27 +1344,13 @@ class Indexer:
             )
             ids = torch.arange(1, len(panels) + 1, device=positions.device)
             panel = torch.where(inside, ids, 0).amax(1)
-        keep = keep_non_overlapping(positions, self._radii()[0], panel)
+        shared = disk_overlap_counts(positions, self._radii()[0], panel)
         offset = 0
         for r in active:
             count = len(r._integration_positions)
-            valid = keep[offset : offset + count][r._integration_valid]
-            selected = torch.where(valid)[0]
-            for attribute in (
-                "hkl",
-                "positions",
-                "intensities",
-                "sigmas",
-                "peak",
-                "background",
-                "n_pixels",
-                "bg_model",
-                "bg_model_var",
-            ):
-                name = "predicted_" + attribute
-                value = getattr(r, name)
-                if value is not None:
-                    setattr(r, name, value[selected])
+            r.predicted_n_overlap = shared[offset : offset + count][
+                r._integration_valid
+            ]
             offset += count
             r._integration_positions = r._integration_valid = None
 
@@ -1381,10 +1437,25 @@ class Indexer:
                 "n_pixels",
                 "bg_model",
                 "bg_model_var",
+                "n_pixels_total",
+                "n_masked",
+                "n_overlap",
             ):
                 setattr(result, "predicted_" + name, excess.new_empty(0))
             return
-        positions, intensity, sigma, _, peak, background, n_pix, bg_model, bg_var = (
+        (
+            positions,
+            intensity,
+            sigma,
+            _,
+            peak,
+            background,
+            n_pix,
+            bg_model,
+            bg_var,
+            n_total,
+            n_masked,
+        ) = (
             integrate_rings(
                 diagnostic_positions,  # already snapped to the observed peaks
                 excess,
@@ -1404,13 +1475,13 @@ class Indexer:
             peak_res_nm = peak_q.norm(dim=-1) * A_INV_TO_NM_INV
 
         sig_ok = torch.isfinite(sigma) & (sigma > 0)
-        keep = torch.where(sig_ok)[0]
+        measured = torch.where(sig_ok)[0]
         falloff = None
-        if len(keep):
-            q_nm = pred.resolution[keep].to(excess.dtype) * A_INV_TO_NM_INV
+        if len(measured):
+            q_nm = pred.resolution[measured].to(excess.dtype) * A_INV_TO_NM_INV
             falloff = falloff_resolution_limit(
                 q_nm,
-                intensity[keep] / sigma[keep],
+                intensity[measured] / sigma[measured],
                 target=self.integrate.resolution_isigma,
                 nbins=self.integrate.resolution_nbins,
                 min_refl=self.integrate.resolution_min_refl,
@@ -1456,6 +1527,9 @@ class Indexer:
             + 0.5 * eta * q_rep
             + 0.5 * wavelength * self.integrate.bandwidth * q_rep * q_rep
         )
+        # a disk with no usable pixel (sigma 0) is kept, flagged, for the database
+        stored = torch.isfinite(sigma)
+        keep = torch.where(stored)[0]
         result.predicted_hkl = pred.hkl[keep]
         result.predicted_positions = positions[keep]
         result.predicted_intensities = intensity[keep]
@@ -1465,5 +1539,7 @@ class Indexer:
         result.predicted_n_pixels = n_pix[keep]
         result.predicted_bg_model = bg_model[keep]
         result.predicted_bg_model_var = bg_var[keep]
+        result.predicted_n_pixels_total = n_total[keep]
+        result.predicted_n_masked = n_masked[keep]
         result._integration_positions = positions
-        result._integration_valid = sig_ok
+        result._integration_valid = stored

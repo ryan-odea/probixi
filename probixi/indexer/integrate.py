@@ -24,29 +24,41 @@ def snap_positions(
     return positions, snapped
 
 
-def keep_non_overlapping(
+@torch.no_grad()
+def disk_overlap_counts(
     positions: Tensor,
-    integration_radius_px: float,
+    radius_px: float,
     panels: Tensor | None = None,
 ) -> Tensor:
+    # per centre: disk pixels shared with another centre's disk on the same panel
     if positions.ndim != 2 or positions.shape[1] != 2:
         raise ValueError("positions must have shape (N, 2)")
-    if not math.isfinite(integration_radius_px) or integration_radius_px <= 0:
+    if not math.isfinite(radius_px) or radius_px <= 0:
         raise ValueError("integration radius must be finite and positive")
-    keep = torch.ones(len(positions), dtype=torch.bool, device=positions.device)
-    positions = positions.float()
-    cutoff2 = (1.5 * integration_radius_px) ** 2
-    for start in range(0, len(positions), 512):
-        block = positions[start : start + 512]
-        distance2 = (block[:, None] - positions[None]).square().sum(-1)
-        row = torch.arange(len(block), device=positions.device)
-        distance2[row, start + row] = float("inf")  # ignore self-distance
+    device = positions.device
+    centre = positions.round().long()
+    dr, dc, r2 = _stamp_offsets(math.ceil(radius_px), device)
+    disk = r2 <= radius_px**2
+    pr = centre[:, 0, None] + dr[disk]
+    pc = centre[:, 1, None] + dc[disk]
+    covered = torch.zeros(pr.shape, dtype=torch.long, device=device)
+    reach = (2 * radius_px) ** 2
+    far = 1 << 40
+    for start in range(0, len(centre), 512):
+        block = centre[start : start + 512]
+        d2 = (block[:, None] - centre[None]).square().sum(-1)
+        row = torch.arange(len(block), device=device)
+        d2[row, start + row] = far  # ignore self-distance
         if panels is not None:
-            distance2.masked_fill_(
-                panels[start : start + 512, None] != panels[None], float("inf")
-            )
-        keep[start : start + 512] = distance2.amin(1) >= cutoff2
-    return keep
+            d2.masked_fill_(panels[start : start + 512, None] != panels[None], far)
+        i, j = (d2 <= reach).nonzero(as_tuple=True)
+        if len(i):
+            i = i + start
+            inside = (pr[i] - centre[j, 0, None]) ** 2 + (
+                pc[i] - centre[j, 1, None]
+            ) ** 2 <= radius_px**2
+            covered.index_add_(0, i, inside.long())
+    return (covered > 0).sum(1)
 
 
 @torch.no_grad()
@@ -326,13 +338,13 @@ def integrate_rings(
     n_bg: float | None = None,
     *,
     radii: tuple[float, float, float],
-) -> tuple[Tensor, Tensor, Tensor, Tensor, Tensor, Tensor]:
+) -> tuple[Tensor, ...]:
     if mean is None:
         raise ValueError("circular integration requires the background mean image")
     positions, snapped = snap_positions(pred_positions, obs_positions, snap_radius)
     if not len(positions):
         empty = excess.new_empty(0)
-        return positions, empty, empty, snapped, empty, empty, empty, empty, empty
+        return (positions, empty, empty, snapped) + (empty,) * 7
     raw = excess + mean
     # gather one (2*ceil(outer)+1)^2 stamp per centre
     dr, dc, radius = _stamp_offsets(math.ceil(radii[2]), raw.device)
@@ -350,7 +362,8 @@ def integrate_rings(
     background = torch.where(bgmask, pixels, 0).sum(1) / nb.clamp_min(1)
     net = pixels - background[:, None]
     bgvariance = torch.where(bgmask, net**2, 0).sum(1) / (nb - 1).clamp_min(1)
-    use = ok & (radius <= radii[0] ** 2)
+    disk = radius <= radii[0] ** 2
+    use = ok & disk
     # Sparse nearest-owner reduction prevents double counting overlapping disks.
     unique, inverse = torch.unique(flat.flatten(), return_inverse=True)
     inverse = inverse.reshape_as(flat)
@@ -398,6 +411,9 @@ def integrate_rings(
         bg_model_var = model_var_sum * n / float(n_bg)
     else:
         bg_model_var = torch.zeros_like(model_var_sum)
+    # nominal disk size and the pixels it lost to the mask or the frame edge
+    n_total = torch.full_like(n, int(disk.sum()))
+    n_masked = (disk & ~ok).sum(1)
     return (
         positions,
         intensity,
@@ -408,6 +424,8 @@ def integrate_rings(
         n,
         bg_model,
         bg_model_var,
+        n_total,
+        n_masked,
     )
 
 

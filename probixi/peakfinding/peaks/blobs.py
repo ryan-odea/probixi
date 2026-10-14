@@ -45,7 +45,8 @@ class BlobStats:
     peakedness (intensity_max / mean intensity), background_sum (noise-model
     mean summed over the blob's own pixels; 0 when no mean map was supplied),
     response_max (peak matched-filter response over the blob; None when the
-    detection ran without a response map).
+    detection ran without a response map), n_masked (pixels bordering the
+    mask or the frame edge; None until counted).
     """
 
     label_id: Tensor
@@ -66,6 +67,7 @@ class BlobStats:
     peakedness: Tensor
     background_sum: Tensor
     response_max: Optional[Tensor] = None
+    n_masked: Optional[Tensor] = None
 
     def __len__(self) -> int:
         return int(self.label_id.numel())
@@ -155,6 +157,7 @@ def empty_stats(device: torch.device, dtype: torch.dtype) -> BlobStats:
         peakedness=ef,
         background_sum=ef,
         response_max=ef,
+        n_masked=el,
     )
 
 
@@ -171,6 +174,20 @@ def select_blobs(stats: BlobStats, keep: Tensor) -> BlobStats:
             for f in fields(stats)
         }
     )
+
+
+@torch.no_grad()
+def mask_touch_counts(labels: Tensor, n_blobs: int, valid: Tensor) -> Tensor:
+    # Per blob: pixels with a masked or off-frame 8-neighbour
+    bad = torch.nn.functional.pad(
+        (~valid).to(torch.float32)[None, None], (1, 1, 1, 1), value=1.0
+    )
+    touch = torch.nn.functional.max_pool2d(bad, 3, stride=1)[0, 0] > 0
+    lbl = labels.flatten()
+    fg = ((lbl > 0) & (lbl <= n_blobs)).nonzero(as_tuple=True)[0]
+    out = torch.zeros(n_blobs + 1, dtype=torch.long, device=labels.device)
+    out.scatter_add_(0, lbl[fg].long(), touch.flatten()[fg].to(torch.long))
+    return out[1:]
 
 
 @torch.no_grad()

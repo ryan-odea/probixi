@@ -24,7 +24,7 @@ A blind search over all rotations is too expensive. Following TORO, `probixi` fa
 
 ### Directions
 
-Trial directions $\hat{\mathbf d}$ are laid out on a Fibonacci sphere, 6000 points with both signs. Each is scored with the trial vector $\mathbf t = |\mathbf a|\,\hat{\mathbf d}$ by
+Trial directions $\hat{\mathbf d}$ are laid out on a Fibonacci sphere with both signs, $\max(6000,\;6000\,(|\mathbf a|/55\,\text{Å})^2)$ points by default so the spacing follows the fitness peak width $\sim 1/(|\mathbf a| q)$. Each is scored with the trial vector $\mathbf t = |\mathbf a|\,\hat{\mathbf d}$ by
 
 $$F(\hat{\mathbf d}) = \frac{\sum_i c_i \cos\!\left(2\pi\,\mathbf t\cdot\mathbf q_i\right)}{\sum_i c_i}.$$
 
@@ -86,4 +86,4 @@ An orientation can fit a sparse peak list without being the true lattice. Once t
 
 $$\text{enrichment} = \frac{n_{\text{bright}}/M}{p}, \qquad \texttt{enrich\_p} = P(X \ge n_{\text{bright}}),\quad X \sim \mathrm{Poisson}(Mp).$$
 
-An enrichment near 1 means the predictions land on signal as often as chance. With `--enrich-gate`, a lattice is kept only when `enrich_p` is at most `--enrich-alpha` (default $10^{-3}$). The gate runs before the overlap exclusion, so a rejected lattice cannot remove reflections from one that is kept. The gate is off by default and is still being tested to determine whether it becomes the default.
+An enrichment near 1 means the predictions land on signal as often as chance. With `--enrich-gate`, a lattice is kept only when `enrich_p` is at most `--enrich-alpha` (default $10^{-3}$). The gate runs on each lattice as it is found, before the next is searched and before the overlap exclusion, so a rejected lattice cannot remove reflections from one that is kept. Its peaks are still removed before the next search. The gate is off by default and is still being tested to determine whether it becomes the default.

@@ -9,6 +9,7 @@ import torch
 from probixi.indexer.forward import detector_to_q
 from probixi.indexer.indexer import Indexer, RefineConfig, SeedConfig
 from probixi.indexer.lattice import cell_to_B
+from probixi.io.cell import CellParams
 
 # seeding/refinement that sim.py verified as fast and reliable on CPU
 SEED = SeedConfig(n_directions=1500, n_spin=60, top_directions=12, max_candidates=32)
@@ -28,6 +29,14 @@ def test_lattice_dtype_defaults_to_float32(geometry_dict, cell):
     assert idxr.B_target.dtype is torch.float32
     assert cell_to_B(cell).dtype is torch.float32
     assert detector_to_q(torch.zeros(1, 2), geometry_dict).dtype is torch.float32
+
+
+def test_n_directions_scales_with_the_a_axis(geometry_dict, cell):
+    # bR a=62.23 A -> 6000 * (62.23/55)^2; never below 6000; an explicit count is kept
+    assert Indexer(geometry_dict, cell).n_directions == round(6000 * (cell.a / 55.0) ** 2)
+    short = CellParams(10.0, 10.0, 10.0, *(math.pi / 2,) * 3)
+    assert Indexer(geometry_dict, short).n_directions == 6000
+    assert _make_indexer(geometry_dict, cell).n_directions == 1500
 
 
 @pytest.mark.mps

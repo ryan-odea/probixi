@@ -263,10 +263,10 @@ def run_block(
         geometry_file=cfg.geometry_file,
         files=p.metadata.files,
         panel=cfg.panel,
-        integration=p.integration_recipe,
     )
     if cfg.db:
         offloader = DuckDBOffloader
+        offload_kwargs["integration"] = p.integration_recipe
         # each rank backfills only its own block's non-indexed frames
         offload_kwargs["frame_range"] = (lo, hi)
     else:

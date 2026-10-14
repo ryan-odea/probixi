@@ -16,7 +16,7 @@ Frames are read lazily. A background thread reads slices into a bounded queue a 
 
 ## Outputs
 
-**CrystFEL stream (`.stream`).** The per-frame, per-reflection text format, readable by `partialator` and `process_hkl`. Three extra reflection columns (`n_pix`, `bg_model`, `bg_model_var`) carry the noise model's background under each disk for merging programs that model the background explicitly. CrystFEL ignores them.
+**CrystFEL stream (`.stream`).** The per-frame, per-reflection text format, readable by `partialator` and `process_hkl`. It carries only what CrystFEL reads; probixi's own quantities (the integration recipe, the model background under each disk, pixel counts, per-crystal diagnostics) are in the database. A reflection whose signal disk touches the detector mask, the frame edge or another predicted disk is left out of the stream, as is a peak bordering the mask; the database keeps them, flagged by pixel counts.
 
 **DuckDB (`.db` or `.duckdb`).** Run metadata goes into small `geometry`, `panels`, and `cell` tables ([schema](../vignettes/getting_started.md#database)). Every file-event becomes a row in `frames`, indexed or not, and lattices, integrated reflections, and searched peaks are linked to it by `frame_id`. The key is deterministic, the first 16 hex digits of the SHA-1 of `filename//event`, so a peaks-only pass, an indexed pass, and separate multi-GPU shards agree on which row is which frame. Under `--start`/`--stop` or multi-GPU runs, each writer fills only the frame range it owns.
 

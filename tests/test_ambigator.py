@@ -167,6 +167,9 @@ def _twinned_database(path, n_crystals=180, seed=5):
         "crystal_id": np.array(ids, dtype=object),
         **{axis: hkl[:, i].numpy() for i, axis in enumerate("hkl")},
         "intensity": torch.cat(value).numpy(),
+        "sigma": np.ones(len(ids)),
+        "n_masked": np.zeros(len(ids), dtype=np.int64),
+        "n_overlap": np.zeros(len(ids), dtype=np.int64),
         "resolution_nm_inv": torch.cat(resolution).numpy(),
     }
     identity = np.tile(np.eye(3, dtype=np.float64).ravel(), (n_crystals, 1))

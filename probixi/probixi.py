@@ -334,7 +334,7 @@ class Probixi:
 
     @property
     def integration_recipe(self) -> Optional[dict]:
-        """Integration settings recorded in the stream header / database.
+        """Integration settings recorded in the database's ``integration`` table.
 
         ``radii`` (disk, annulus_in, annulus_out) in pixels, ``adu_per_photon``,
         the local-background ``bg_annulus_pixels`` and the ``aperture`` rule, as

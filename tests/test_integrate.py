@@ -11,7 +11,7 @@ from probixi.indexer.indexer import Indexer
 from probixi.indexer.integrate import (
     choose_aperture,
     integrate_rings,
-    keep_non_overlapping,
+    disk_overlap_counts,
     nearest_neighbour_distance,
     radial_profile,
     radii_from_profile,
@@ -55,32 +55,32 @@ def test_snap_positions_handles_empty_inputs():
     assert not bool(snapped.any())
 
 
-def test_keep_non_overlapping_drops_both_members_of_a_close_pair():
-    # 1.5 * radius = 6 px cutoff; the pair is 4 px apart, the third is far
+def test_disk_overlap_counts_flags_both_members_of_a_close_pair():
+    # radius-4 disks 4 px apart share pixels; the third centre is far away
     positions = torch.tensor([[10.0, 10.0], [10.0, 14.0], [40.0, 40.0]])
-    keep = keep_non_overlapping(positions, 4.0)
-    assert keep.tolist() == [False, False, True]
+    n = disk_overlap_counts(positions, 4.0).tolist()
+    assert n[0] == n[1] > 0 and n[2] == 0
 
 
-def test_keep_non_overlapping_ignores_neighbours_on_another_panel():
+def test_disk_overlap_counts_ignores_neighbours_on_another_panel():
     positions = torch.tensor([[10.0, 10.0], [10.0, 14.0]])
     panels = torch.tensor([0, 1])
-    assert keep_non_overlapping(positions, 4.0, panels).tolist() == [True, True]
+    assert disk_overlap_counts(positions, 4.0, panels).tolist() == [0, 0]
 
 
-def test_keep_non_overlapping_spans_block_boundary():
+def test_disk_overlap_counts_spans_block_boundary():
     # blocks are 512 wide: a conflicting pair straddling the boundary is caught
     far = torch.arange(600, dtype=torch.float32)[:, None].repeat(1, 2) * 20.0
     positions = torch.cat([far, torch.tensor([[0.0, 3.0]])])
-    keep = keep_non_overlapping(positions, 4.0)
-    assert not bool(keep[0]) and not bool(keep[-1])
+    n = disk_overlap_counts(positions, 4.0)
+    assert int(n[0]) > 0 and int(n[-1]) > 0 and int(n[1]) == 0
 
 
-def test_keep_non_overlapping_rejects_bad_input():
+def test_disk_overlap_counts_rejects_bad_input():
     with pytest.raises(ValueError, match="shape"):
-        keep_non_overlapping(torch.zeros(4), 4.0)
+        disk_overlap_counts(torch.zeros(4), 4.0)
     with pytest.raises(ValueError, match="finite and positive"):
-        keep_non_overlapping(torch.zeros((2, 2)), 0.0)
+        disk_overlap_counts(torch.zeros((2, 2)), 0.0)
 
 
 def test_integrate_rings_requires_the_background_mean():
@@ -107,7 +107,7 @@ def test_integrate_rings_returns_empty_for_no_predictions():
     )
     for t in (positions, intensity, sigma, snapped, peak, background, *extras):
         assert len(t) == 0
-    assert len(extras) == 3
+    assert len(extras) == 5
 
 
 def test_integrate_rings_recovers_intensity_above_flat_background():
@@ -219,42 +219,43 @@ def _result(cell, positions: torch.Tensor, keep: torch.Tensor) -> IndexResult:
     return r
 
 
-def test_exclude_overlaps_filters_across_lattices_and_clears_scratch(
+def test_flag_overlaps_counts_shared_pixels_across_lattices_and_clears_scratch(
     geometry_dict, cell
 ):
     idxr = Indexer(geometry_dict, cell)
     idxr._measured_radii = (4.0, 6.0, 8.0)
     # one crystal per lattice; their single centres are 4 px apart, so the
-    # 1.5 * 4 = 6 px rule must drop both even though neither conflicts alone
+    # radius-4 disks share pixels even though neither conflicts alone
     keep = torch.ones(1, dtype=torch.bool)
     a = _result(cell, torch.tensor([[20.0, 20.0]]), keep)
     b = _result(cell, torch.tensor([[20.0, 24.0]]), keep)
-    idxr._exclude_overlaps([a, b])
+    idxr._flag_overlaps([a, b])
     for r in (a, b):
-        assert len(r.predicted_positions) == 0
+        assert len(r.predicted_positions) == 1
+        assert int(r.predicted_n_overlap[0]) > 0
         assert r._integration_positions is None and r._integration_valid is None
 
 
-def test_exclude_overlaps_keeps_well_separated_reflections(geometry_dict, cell):
+def test_flag_overlaps_leaves_well_separated_reflections_clean(geometry_dict, cell):
     idxr = Indexer(geometry_dict, cell)
     idxr._measured_radii = (4.0, 6.0, 8.0)
     keep = torch.ones(1, dtype=torch.bool)
     a = _result(cell, torch.tensor([[20.0, 20.0]]), keep)
     b = _result(cell, torch.tensor([[80.0, 80.0]]), keep)
-    idxr._exclude_overlaps([a, b])
+    idxr._flag_overlaps([a, b])
     for r in (a, b):
-        assert len(r.predicted_positions) == 1
+        assert r.predicted_n_overlap.tolist() == [0]
 
 
-def test_exclude_overlaps_ignores_crystals_without_circular_integration(
+def test_flag_overlaps_ignores_crystals_without_circular_integration(
     geometry_dict, cell
 ):
     idxr = Indexer(geometry_dict, cell)
     idxr._measured_radii = (4.0, 6.0, 8.0)
     r = _result(cell, torch.tensor([[20.0, 20.0]]), torch.ones(1, dtype=torch.bool))
     r._integration_positions = r._integration_valid = None
-    idxr._exclude_overlaps([r])  # no scratch state -> nothing to do
-    assert len(r.predicted_positions) == 1
+    idxr._flag_overlaps([r])  # no scratch state -> nothing to do
+    assert r.predicted_n_overlap is None
 
 
 @pytest.mark.parametrize(
