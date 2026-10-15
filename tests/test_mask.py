@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import warnings
 from pathlib import Path
 
 import numpy as np
@@ -118,6 +119,69 @@ def test_read_mask_missing_file_warns_and_returns_none(tmp_path):
     assert good is None
 
 
+def test_read_mask_override_replaces_broken_mask_file(tmp_path):
+    mask = np.zeros((8, 6), dtype=np.int32)
+    mask[2, 3] = 1
+    mfile = sim.write_external_mask(tmp_path / "m.h5", mask, mask_path="/pixel_mask")
+    geom = read_geometry(
+        _single_panel_geom(
+            tmp_path, mask_path="/pixel_mask", mask_file="/no/such/file.h5"
+        )
+    )
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        good = read_mask(geom, "unused.h5", (8, 6), mask_file=str(mfile))
+    assert not bool(good[2, 3])
+    assert bool(good[0, 0])
+
+
+def test_read_mask_override_raises_instead_of_skipping(tmp_path):
+    geom = read_geometry(_single_panel_geom(tmp_path, mask_path="/pixel_mask"))
+    other = sim.write_external_mask(
+        tmp_path / "other.h5", np.zeros((8, 6), np.int32), mask_path="/other"
+    )
+    with pytest.raises(ValueError, match="no mask dataset"):
+        read_mask(geom, "unused.h5", (8, 6), mask_file=str(other))
+    with pytest.raises(ValueError, match="could not open"):
+        read_mask(geom, "unused.h5", (8, 6), mask_file=str(tmp_path / "gone.h5"))
+    small = sim.write_external_mask(tmp_path / "small.h5", np.zeros((5, 6), np.int32))
+    with pytest.raises(ValueError, match="shape"):
+        read_mask(geom, "unused.h5", (8, 6), mask_file=str(small))
+
+
+def test_read_mask_override_reads_master_pixel_mask(tmp_path):
+    # a geometry with no mask, pointed at an Eiger master file: NeXus flags,
+    # any set bit (1 gap, 16 noisy, ...) is bad
+    mask = np.zeros((8, 6), dtype=np.uint32)
+    mask[2, 3] = 1
+    mask[5, 1] = 16
+    master = sim.write_external_mask(
+        tmp_path / "run_master.h5",
+        mask,
+        mask_path="/entry/instrument/detector/detectorSpecific/pixel_mask",
+    )
+    geom = read_geometry(_single_panel_geom(tmp_path))
+    geom.mask_spec = None  # a geometry with no 'mask =' line
+    assert read_mask(geom, str(master), (8, 6)) is None
+    good = read_mask(geom, "unused.h5", (8, 6), mask_file=str(master))
+    assert (~good).sum() == 2
+    assert not bool(good[2, 3]) and not bool(good[5, 1])
+
+
+def test_read_mask_override_falls_back_from_geometry_path(tmp_path):
+    mask = np.zeros((8, 6), dtype=np.uint32)
+    mask[0, 0] = 2
+    master = sim.write_external_mask(
+        tmp_path / "run_master.h5",
+        mask,
+        mask_path="/entry/instrument/detector/pixel_mask",
+    )
+    geom = read_geometry(_single_panel_geom(tmp_path, mask_path="/pixel_mask"))
+    with pytest.warns(UserWarning, match="using '/entry/instrument/detector"):
+        good = read_mask(geom, "unused.h5", (8, 6), mask_file=str(master))
+    assert (~good).sum() == 1 and not bool(good[0, 0])
+
+
 def test_read_mask_slices_one_event_from_per_event_mask(tmp_path):
     # a per-event (N, ss, fs) mask: read_mask must slice event 0, not the whole stack
     h, w = 8, 6
@@ -173,6 +237,26 @@ def test_static_mask_combines_hdf5_mask_maxadu_and_bad_region(tmp_path, cell_fil
     assert not bool(vm[6, 0])  # bad region
     assert not bool(vm[h - 1, w - 1])  # hdf5 mask
     assert bool(vm[3, 3])  # untouched
+
+
+def test_static_mask_uses_mask_file_override(tmp_path, cell_file):
+    # the geometry's mask_file no longer resolves; Probixi(mask_file=...) does
+    h, w = 8, 6
+    geom_path = _single_panel_geom(
+        tmp_path, h=h, w=w, mask_path="/pixel_mask", mask_file="/no/such/file.h5"
+    )
+    mask = np.zeros((h, w), dtype=np.int32)
+    mask[1, 4] = 1
+    mfile = sim.write_external_mask(tmp_path / "m.h5", mask, mask_path="/pixel_mask")
+    _, lst = sim.write_cxi_run(tmp_path, np.full((4, h, w), 100.0, np.float32))
+
+    px = Probixi(
+        list_file=lst, geometry_file=geom_path, cell_file=cell_file, mask_file=mfile
+    )
+    px.fit_noise(list(px.frames()))
+    vm = px.noise.valid_mask
+    assert not bool(vm[1, 4])
+    assert int((~vm).sum()) == 1
 
 
 def test_static_mask_without_mask_spec_is_unaffected(tmp_path, cell_file):

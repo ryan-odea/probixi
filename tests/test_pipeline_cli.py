@@ -257,6 +257,10 @@ def test_cli_indexing_run_writes_nonempty_stream(tmp_path, run_files, geom_path)
         ],
     )
     assert result.exit_code == 0, result.output
+    # the citation comes first (the bundled entry, as tests run offline)
+    assert result.output.startswith(
+        "If you use probixi, please cite:\n@software{odea_probixi"
+    )
     assert out.is_file()
     text = out.read_text()
     assert len(text) > 0

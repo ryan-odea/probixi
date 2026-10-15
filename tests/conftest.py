@@ -9,6 +9,17 @@ from probixi.io import CellParams, Geometry, read_crystfel_cell, read_geometry
 FIXTURES = Path(__file__).parent / "fixtures"
 
 
+@pytest.fixture(autouse=True)
+def _offline_citation(monkeypatch):
+    # the CLI pulls the citation from GitHub at start; keep tests off the network
+    import urllib.request
+
+    def offline(*args, **kwargs):
+        raise OSError("tests run offline")
+
+    monkeypatch.setattr(urllib.request, "urlopen", offline)
+
+
 @pytest.fixture(scope="session")
 def cell_file() -> Path:
     """Path to the committed real bacteriorhodopsin ``.cell`` fixture."""

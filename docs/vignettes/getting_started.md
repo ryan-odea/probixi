@@ -12,6 +12,7 @@ probixi -i files.lst -g my_geometry.geom -p my_unit.cell -o output.db
 - `-g` is a CrystFEL geometry file.
 - `-p` is a CrystFEL cell file. It only has to be approximate, because `probixi` re-centres it on the refined cells of the first lattices.
 - `-o` sets the output, and its extension sets the format. `.stream` writes a CrystFEL stream, and `.db` or `.duckdb` writes a DuckDB database.
+- `--mask` is optional. It names the HDF5 file that holds the bad-pixel mask and overrides the geometry's `mask_file`. Use it when the list names the `_data_*.h5` files of an Eiger run and the mask is in the master file, or when the geometry's mask path no longer resolves. See [Inputs and outputs](../overview/io.md).
 
 The device defaults to `auto`, which picks CUDA, then Apple MPS, then CPU.
 

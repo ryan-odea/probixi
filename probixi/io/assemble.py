@@ -136,6 +136,14 @@ def _read_static_mask_slab(dset: h5py.Dataset, geometry: Geometry) -> np.ndarray
     return np.asarray(dset[()])
 
 
+# NXdetector pixel_mask in an Eiger/JUNGFRAU master file, where --mask looks
+# when the geometry's own mask path is not in the file
+NEXUS_MASK_PATHS = (
+    "/entry/instrument/detector/pixel_mask",
+    "/entry/instrument/detector/detectorSpecific/pixel_mask",
+)
+
+
 def _apply_mask_bits(raw: np.ndarray, mask_good: int, mask_bad: int) -> np.ndarray:
     m = np.asarray(raw)
     if not np.issubdtype(m.dtype, np.unsignedinteger):
@@ -149,30 +157,49 @@ def read_mask(
     geometry: Geometry,
     data_filename: str,
     frame_shape: tuple[int, int],
+    mask_file: Optional[str] = None,
 ) -> Optional[np.ndarray]:
+    # mask_file overrides the geometry's mask_file, e.g. with the master file
+    # when the list names its data files: the geometry's mask path is tried
+    # first, then the NeXus pixel_mask. Asked for explicitly, a mask it cannot
+    # supply raises instead of being skipped
     spec = geometry.mask_spec
-    if spec is None or spec.mask_path is None:
+    named = spec.mask_path if spec is not None else None
+    paths = [named] if named is not None else []
+    if mask_file is not None:
+        paths += [p for p in NEXUS_MASK_PATHS if p != named]
+    if not paths:
         return None
-    fname = spec.mask_file or data_filename
+    fname = mask_file or (spec.mask_file if spec else None) or data_filename
+
+    def skip(msg: str) -> None:
+        if mask_file is not None:
+            raise ValueError(msg)
+        warnings.warn(f"{msg}; skipping mask")
+
     if is_cbf(fname):
         raise ValueError(
-            f"mask {spec.mask_path!r} cannot be read from the CBF file {fname!r}; "
-            "set mask_file to an HDF5 file"
+            f"mask {paths[0]!r} cannot be read from the CBF file {fname!r}; "
+            "set mask_file (or --mask) to an HDF5 file"
         )
     try:
         with h5py.File(fname, "r") as f:
-            node = f.get(spec.mask_path)
-            if not isinstance(node, h5py.Dataset):
-                warnings.warn(
-                    f"mask dataset {spec.mask_path!r} not in {fname!r}; skipping mask"
-                )
-                return None
-            raw = _read_static_mask_slab(node, geometry)
+            path = next((p for p in paths if isinstance(f.get(p), h5py.Dataset)), None)
+            if path is None:
+                tried = ", ".join(repr(p) for p in paths)
+                return skip(f"no mask dataset ({tried}) in {fname!r}")
+            raw = _read_static_mask_slab(f[path], geometry)
     except OSError:
-        warnings.warn(f"could not open mask file {fname!r}; skipping mask")
-        return None
+        return skip(f"could not open mask file {fname!r}")
 
-    good = _apply_mask_bits(raw, spec.mask_good, spec.mask_bad)
+    mask_good = spec.mask_good if spec is not None else 0
+    mask_bad = spec.mask_bad if spec is not None else 0
+    if path != named:
+        if named is not None:
+            warnings.warn(f"mask dataset {named!r} not in {fname!r}; using {path!r}")
+        if not (mask_good or mask_bad):  # NeXus flags: 0 is good, any bit bad
+            mask_bad = 0xFFFFFFFF
+    good = _apply_mask_bits(raw, mask_good, mask_bad)
     fshape = (int(frame_shape[0]), int(frame_shape[1]))
     if good.shape == fshape:
         return good
@@ -187,8 +214,7 @@ def read_mask(
             return assembled
         except (IndexError, ValueError):
             pass
-    warnings.warn(f"mask shape {good.shape} != frame {fshape}; skipping mask")
-    return None
+    return skip(f"mask shape {good.shape} != frame {fshape}")
 
 
 def _physical_bases(geometry: Geometry) -> Optional[list[tuple]]:

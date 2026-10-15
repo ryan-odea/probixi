@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+import time
 import urllib.request
 from pathlib import Path
 
@@ -33,6 +34,17 @@ def test_offline_falls_back_to_default_silently(monkeypatch, capsys):
     assert out == driver._CITATION.strip() + "\n"
     assert "@software{odea_probixi" in out
     assert capsys.readouterr().out == out  # printed, no warning
+
+
+def test_stalled_fetch_waits_at_most_the_timeout(monkeypatch, capsys):
+    # a firewalled node that drops packets: urlopen hangs past its own timeout
+    monkeypatch.setattr(urllib.request, "urlopen", lambda *a, **k: time.sleep(30))
+    t0 = time.monotonic()
+    out = driver.citation(timeout=0.2)
+
+    assert time.monotonic() - t0 < 5.0
+    assert out == driver._CITATION.strip() + "\n"
+    assert capsys.readouterr().out == out
 
 
 def test_online_fetch_is_used_when_available(monkeypatch, capsys):

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import math
 import random
+import threading
 import warnings
 from collections.abc import Sized
 from dataclasses import dataclass, field
@@ -131,16 +132,23 @@ def auto_device() -> torch.device:
 
 
 def citation(timeout: float = 3.0) -> str:
-    text = _CITATION
-    try:
-        from urllib.request import urlopen
+    # urlopen's timeout is per address tried, so on a node that drops outbound
+    # packets the fetch runs in a daemon thread and waits at most `timeout`
+    fetched: list[str] = []
 
-        with urlopen(_CITATION_URL, timeout=timeout) as resp:
-            fetched = resp.read().decode("utf-8")
-        if fetched.strip():
-            text = fetched
-    except Exception:
-        pass
+    def pull() -> None:
+        try:
+            from urllib.request import urlopen
+
+            with urlopen(_CITATION_URL, timeout=timeout) as resp:
+                fetched.append(resp.read().decode("utf-8"))
+        except Exception:
+            pass
+
+    worker = threading.Thread(target=pull, daemon=True)
+    worker.start()
+    worker.join(timeout)
+    text = fetched[0] if fetched and fetched[0].strip() else _CITATION
     entry = text.strip() + "\n"
     print(entry, end="")
     return entry
@@ -190,6 +198,13 @@ class Probixi:
     list_file, geometry_file, cell_file : path-like
         CrystFEL ``.lst`` list, ``.geom`` geometry and ``.cell`` unit-cell inputs.
         ``cell_file`` may be omitted for peak-only use
+    mask_file : path-like, optional
+        HDF5 file holding the bad-pixel mask (e.g. the Eiger master file when the
+        list names its data files), overriding the geometry's ``mask_file`` and
+        the data file it falls back to. The dataset is the geometry's ``mask``
+        path if the file has it, else the NeXus ``pixel_mask`` under
+        ``/entry/instrument/detector`` (or its ``detectorSpecific`` group). A mask
+        that cannot be read from it is an error rather than skipped.
     noise_mode : {"online", "per_frame"}, default "online"
         Whether the running noise model keeps updating per frame ("online",
         tracking slow drift) or resets each frame.
@@ -234,6 +249,7 @@ class Probixi:
     list_file: PathLike
     geometry_file: PathLike
     cell_file: Optional[PathLike] = None
+    mask_file: Optional[PathLike] = None
 
     noise_mode: Literal["per_frame", "online"] = "online"
     warmup_frames: int = 16
@@ -652,10 +668,11 @@ class Probixi:
         self._h5_mask_loaded = True
         geom = self.loader.metadata.geometry
         files = self.loader.metadata.files
-        if geom is None or geom.mask_spec is None or not files:
+        if geom is None or not files:
             return None
         data_file = next(iter(files.values())).filename
-        good = read_mask(geom, data_file, frame_size)
+        override = str(self.mask_file) if self.mask_file is not None else None
+        good = read_mask(geom, data_file, frame_size, mask_file=override)
         if good is not None and tuple(good.shape) == tuple(frame_size):
             self._h5_mask = torch.as_tensor(good, dtype=torch.bool)
         return self._h5_mask
