@@ -582,6 +582,8 @@ class PeakFinder:
         def _gen() -> Iterator[PeakResult]:
             offset = 0
             for item in frames:
+                item, ok = self.noise.clean(item)
+                valid = self.noise.valid_mask
                 if item.ndim == 3:
                     scores_batch = self.score_batch(item)
                     for b in range(item.shape[0]):
@@ -589,7 +591,7 @@ class PeakFinder:
                         yield self._extract(
                             {k: v[b] for k, v in scores_batch.items()},
                             frame_index=idx,
-                            mask=self.noise.valid_mask,
+                            mask=valid if ok is None else valid & ok[b],
                         )
                         offset += 1
                 else:
@@ -597,7 +599,7 @@ class PeakFinder:
                     yield self._extract(
                         self.score(item),
                         frame_index=idx,
-                        mask=self.noise.valid_mask,
+                        mask=valid if ok is None else valid & ok,
                     )
                     offset += 1
 

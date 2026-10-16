@@ -446,11 +446,18 @@ def _crystals(n_cryst=12, per=10, seed=0):
 
 
 def _ring_data(
-    psf, centres, shape=(320, 320), noise=4.0, seed=0, background=0.0, extra=None
+    psf,
+    centres,
+    shape=(320, 320),
+    noise=4.0,
+    seed=0,
+    background=0.0,
+    extra=None,
+    amplitude=2000.0,
 ):
-    # spots of per-centre width psf (scalar or (N,)) on Gaussian noise over a
-    # background (a per-spot local offset the annulus must remove); |q| is the
-    # distance from the frame centre
+    # spots of per-centre width psf and amplitude (scalar or (N,)) on Gaussian
+    # noise over a background (a per-spot local offset the annulus must remove);
+    # |q| is the distance from the frame centre
     g = torch.Generator().manual_seed(seed)
     yy, xx = torch.meshgrid(
         torch.arange(shape[0]).float(), torch.arange(shape[1]).float(), indexing="ij"
@@ -459,8 +466,9 @@ def _ring_data(
     if extra is not None:
         excess += extra
     psf = torch.as_tensor(psf).float().expand(len(centres))
-    for (r, c), s in zip(centres, psf):
-        excess += 2000.0 * torch.exp(-(((yy - r) ** 2 + (xx - c) ** 2) / (2 * s * s)))
+    amplitude = torch.as_tensor(amplitude).float().expand(len(centres))
+    for (r, c), s, a in zip(centres, psf, amplitude):
+        excess += a * torch.exp(-(((yy - r) ** 2 + (xx - c) ** 2) / (2 * s * s)))
     sums, counts, sq = ring_sums(excess, centres.float(), squares=True)
     q = ((centres.float() - shape[0] / 2) ** 2).sum(-1).sqrt()
     return sums, sq, counts, q, nearest_neighbour_distance(centres.float())
@@ -522,6 +530,20 @@ def test_auto_aperture_falls_back_to_flux_when_crystals_broaden_differently():
     choice, diag = _decide(0.9 + eta * u, centres, frame)
     assert choice == "flux", diag
     assert diag["crystal_spread"] >= 0.02 and diag["spread_z"] >= 3
+    assert diag["noise_ratio"] < 1
+
+
+def test_auto_aperture_keeps_snr_when_the_flux_disk_noise_costs_more():
+    # crystal-specific broadening again, but narrow spots fading into the noise
+    # at high |q|: the flux disk's extra background outweighs the bias
+    centres, frame, u = _crystals(n_cryst=20, per=20, seed=2)
+    eta = frame.float() / frame.max()
+    amp = 3000.0 * torch.exp(-4 * u * u)
+    choice, diag = _decide(
+        0.8 + 0.8 * eta * u, centres, frame, noise=25.0, amplitude=amp
+    )
+    assert choice == "snr", diag
+    assert diag["spread_z"] >= 3 and diag["noise_ratio"] > 1
 
 
 def test_auto_aperture_ignores_a_diffuse_halo_common_to_all_crystals():

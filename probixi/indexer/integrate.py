@@ -246,6 +246,15 @@ def choose_aperture(
     if nn_dist is not None:
         strong &= nn_dist.to(strong.device) >= 2 * r_flux + 1
     diag["n"] = int(strong.sum())
+    usable = (n_ann >= MIN_ANNULUS_PIXELS) & (i_s > 0) & (i_f > 0) & (v_f > 0)
+    if nn_dist is not None:
+        usable &= nn_dist.to(usable.device) >= 2 * r_flux + 1
+    q2 = q.float().to(usable.device) ** 2
+    outer = usable & (q2 >= q2[usable].median()) if usable.any() else usable
+    isig = i_f / v_f.clamp_min(1e-12).sqrt()
+    if outer.any():
+        outer &= isig <= isig[outer].median()
+    rel_f, rel_s = (v_f / i_f**2)[outer], (v_s / i_s**2)[outer]
     if diag["n"] < min_peaks:
         return "snr", dict(diag, reason="too few strong peaks")
     i_s, i_f, v_s, v_f, cov = (t[strong] for t in (i_s, i_f, v_s, v_f, cov))
@@ -308,8 +317,16 @@ def choose_aperture(
         plain_chi2_red=float(dev.sum()) / dof,
     )
     if diag["crystal_spread"] >= tolerance and diag["spread_z"] >= 3.0:
-        return "flux", dict(
-            diag, reason="captured fraction's resolution trend differs between crystals"
+        # flux only if its noise stays below the snr disk's noise plus that spread
+        ratio = rel_f / (rel_s + diag["crystal_spread"] ** 2)
+        diag["noise_ratio"] = float(ratio.median()) if len(ratio) else 0.0
+        if diag["noise_ratio"] < 1.0:
+            return "flux", dict(
+                diag,
+                reason="captured fraction's resolution trend differs between crystals",
+            )
+        return "snr", dict(
+            diag, reason="flux disk's background noise outweighs the crystal spread"
         )
     return "snr", dict(
         diag, reason="captured fraction's resolution trend is common to all crystals"

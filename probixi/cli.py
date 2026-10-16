@@ -314,8 +314,9 @@ def _run_multi_gpu(device_list: list, opts: dict, refine, integrate) -> None:
     show_default=True,
     help="Size the learned integration disk for background-limited "
     "signal-to-noise (smaller on narrow spots) or for total flux (2% profile "
-    "radius); auto keeps snr only if it captures a constant fraction of every "
-    "spot's flux on the calibration peaks, else flux.",
+    "radius); auto keeps snr if it captures a constant fraction of every "
+    "spot's flux on the calibration peaks, or if the flux disk's extra "
+    "background noise costs more than that spread, else flux.",
 )
 @click.option(
     "--cell-calibrate/--no-cell-calibrate",
@@ -480,6 +481,8 @@ def main(
                     msg += " trend={:.1%} spread={:.1%} z={:.1f}".format(
                         d["residual_trend"], d["crystal_spread"], d["spread_z"]
                     )
+                if "noise_ratio" in d:
+                    msg += f" noise={d['noise_ratio']:.2f}"
                 msg += ")"
             msg += f": {d['reason']}"
         click.echo(msg)

@@ -175,3 +175,22 @@ def test_unparseable_bad_region_warns(tmp_path):
     with pytest.warns(UserWarning, match="badpartial"):
         geom = read_geometry(path)
     assert geom.bad_regions == []
+
+
+@pytest.mark.parametrize(
+    "line, expected",
+    [
+        ("photon_energy = 12000.0 eV", EV_ANGSTROM / 12000.0),
+        ("photon_energy = 12 keV", EV_ANGSTROM / 12000.0),
+        ("wavelength = 1.2 A", 1.2),
+        ("wavelength = 1.5e-10 m", 1.5),
+    ],
+)
+def test_energy_keys_take_crystfel_units(tmp_path, line, expected):
+    path = tmp_path / "u.geom"
+    path.write_text(
+        f"{line}\nres = 13333.3\nclen = 0.1\n"
+        "0/min_fs = 0\n0/max_fs = 9\n0/min_ss = 0\n0/max_ss = 9\n"
+        "0/corner_x = -5\n0/corner_y = -5\n"
+    )
+    assert read_geometry(path).wavelength == pytest.approx(expected)

@@ -56,6 +56,7 @@ from .peakfinding.noise import (
     fit_eigen_background,
     fit_photon_transfer,
 )
+from .peakfinding.noise.model import value_ok
 
 PathLike = Union[str, Path]
 
@@ -339,7 +340,9 @@ class Probixi:
         ``None`` unless :meth:`calibrate` measured the choice. The diagnostics
         hold the strong-peak count ``n``, the captured fraction ``f_mean``, its
         ``common_trend`` over |q|, the per-crystal ``residual_trend`` and
-        ``crystal_spread`` (with ``spread_z``), both radii and the ``reason``.
+        ``crystal_spread`` (with ``spread_z``), when that spread is significant
+        the ``noise_ratio`` of flux to snr per-observation variance (flux only
+        below 1), both radii and the ``reason``.
         Early exits (too few peaks or crystals) carry only the keys measured
         so far.
         """
@@ -607,6 +610,7 @@ class Probixi:
             radial_radius=radius,
             panels=panels,
             valid_mask=valid,
+            value_flags=self._value_flags(),
             device=self.device,
             dtype=self.dtype,
         )
@@ -633,19 +637,7 @@ class Probixi:
         max_adu = geom.parameters.get("max_adu") if geom else None
         if isinstance(max_adu, (int, float)):
             mask &= frame < float(max_adu)
-        keep = {
-            "flag_lessthan": torch.ge,
-            "flag_morethan": torch.le,
-            "flag_equal": torch.ne,
-        }
-        for name, flags in (geom.panel_flags or {}).items() if geom else []:
-            panel = geom.panels.get(name)
-            if panel is None:
-                continue
-            rows = slice(max(0, int(panel["min_ss"])), int(panel["max_ss"]) + 1)
-            cols = slice(max(0, int(panel["min_fs"])), int(panel["max_fs"]) + 1)
-            for key, value in flags:
-                mask[rows, cols] &= keep[key](frame[rows, cols], value)
+        mask &= value_ok(frame, self._value_flags())
         if geom is not None:
             _mask_panel_edges(mask, geom)
         for br in geom.bad_regions if geom else []:
@@ -661,6 +653,19 @@ class Probixi:
         if h5_mask is not None:
             mask &= h5_mask.to(device=mask.device)
         return mask.to(self.device)
+
+    def _value_flags(self) -> list[tuple]:
+        # geometry value flags as (rows, cols, key, value), re-tested on every frame
+        geom = self.loader.metadata.geometry
+        flags = []
+        for name, entries in (geom.panel_flags or {}).items() if geom else []:
+            panel = geom.panels.get(name)
+            if panel is None:
+                continue
+            rows = slice(max(0, int(panel["min_ss"])), int(panel["max_ss"]) + 1)
+            cols = slice(max(0, int(panel["min_fs"])), int(panel["max_fs"]) + 1)
+            flags += [(rows, cols, key, value) for key, value in entries]
+        return flags
 
     def _hdf5_valid_mask(self, frame_size: tuple[int, int]) -> Optional[Tensor]:
         if self._h5_mask_loaded:
@@ -1147,7 +1152,8 @@ class Probixi:
                 if update_noise and not blank:
                     self._update_noise(item)
                 if estimate_scale and self._scale_ref is not None:
-                    subs = item if item.ndim == 3 else item.unsqueeze(0)
+                    subs = self.noise.clean(item)[0]
+                    subs = subs if subs.ndim == 3 else subs.unsqueeze(0)
                     pred = (
                         self.finder._pred()
                         if self._scale_ref.noise_model is self.noise

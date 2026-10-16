@@ -276,3 +276,20 @@ def test_calibration_streams_a_sized_source_identically_to_a_list():
     tc_src = calibrate_threshold(nm_src, src, rng_seed=0)
     assert tc_src == tc_list
     assert src.passes == 3
+
+
+def test_value_flagged_pixels_stay_out_of_the_stats_and_the_peak_mask():
+    from probixi.peakfinding import PeakFinder
+
+    shape = (48, 48)
+    flags = [(slice(0, 48), slice(0, 48), "flag_lessthan", -30000)]
+    nm = NoiseModel(shape, mode="online", warmup_frames=4, value_flags=flags)
+    nm.fit(_frames(shape, 8))
+    mean = nm.pixel.mean_.clone()
+    frame = _frames(shape, 1, seed=9)[0]
+    frame[9:12, 9:12] += 400.0  # one spot, so the frame yields a mask
+    frame[20, 30] = -32768.0  # an intermittent error pixel
+    nm.update(frame)
+    assert abs(float(nm.pixel.mean_[20, 30] - mean[20, 30])) < 1e-3
+    (res,) = list(PeakFinder(nm).peak_stream([frame]))
+    assert not bool(res.valid_mask[20, 30]) and bool(res.valid_mask[20, 31])

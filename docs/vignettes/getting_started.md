@@ -36,7 +36,7 @@ The device defaults to `auto`, which picks CUDA, then Apple MPS, then CPU.
 | --- | --- | --- |
 | `--enrich-gate` | off | Drop lattices whose predicted spots land on signal no more often than chance. Recommended on strong data and still being tested as a possible default. See [Strong diffraction](good_diffraction.md). |
 | `--enrich-alpha` | 0.001 | Largest chance probability a lattice may have under `--enrich-gate`. |
-| `--aperture` | `auto` | Integration disk. `snr` maximises background-limited signal-to-noise, `flux` captures the whole spot, and `auto` keeps `snr` unless it would bias intensities differently between crystals. |
+| `--aperture` | `auto` | Integration disk. `snr` maximises background-limited signal-to-noise, `flux` captures the whole spot, and `auto` keeps `snr` unless it would bias intensities differently between crystals by more than the `flux` disk's extra background noise costs. |
 | `--max-lattices` | 1 | Lattices to search per frame. Indexed peaks are removed between passes. |
 | `--cell-calibrate` / `--no-cell-calibrate` | on | Re-centre the target cell on the median refined cell, at most twice. |
 | `--cell-calibrate-after` | 200 | Accepted lattices pooled before each re-centring. |
