@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "probixi"
-version = "0.8.1"
+version = "0.8.2"
 description = "Self-Calibrating Probabilistic Peak Finding for Serial X-Ray Crystallographic Data"
 readme = "README.md"
 license = { text = "MIT" }
@@ -26,7 +26,6 @@ classifiers = [
 
 authors = [
     {name = "Ryan O'Dea", email = "ryan.odea@psi.ch"},
-    {name = "Peter Seidel", email = "hans.seidel@psi.ch"},
     {name = "Michal Kepa", email = "michal.kepa@epfl.ch"},
     {name = "Tobias Weinert", email = "tobias.weinert@psi.ch"}
 ]
