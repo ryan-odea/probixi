@@ -551,10 +551,10 @@ def main(
         geometry_file=geometry_file,
         files=meta.files,
         panel=panel,
+        integration=probixi.integration_recipe,
     )
     if is_duckdb_path(output):
         offloader = DuckDBOffloader
-        offload_kwargs["integration"] = probixi.integration_recipe
         offload_kwargs["frame_range"] = (
             start or 0,
             stop if stop is not None else meta.n_frames,
