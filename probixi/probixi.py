@@ -88,7 +88,7 @@ _APERTURE_MIN_PEAKS = 4000  # "auto" needs strong, isolated peaks: sample more
 # --- BEGIN GENERATED CITATION ---
 _CITATION = r"""
 @software{odea_probixi,
-  author  = {O'Dea, Ryan and Weinert, Tobias},
+  author  = {O'Dea, Ryan and Kepa, Michal and Weinert, Tobias},
   title   = {{probixi}: Self-Calibrating Probabilistic Peak Finding for Serial X-Ray Crystallographic Data},
   version = {0.8.2},
   year    = {2026},
