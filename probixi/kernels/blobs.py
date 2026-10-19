@@ -342,7 +342,7 @@ def extract(finder, binary, scores, frame_index, mask):
 
     if K == 0:
         return empty()
-    if K > KCAP or not 0 < finder.max_peaks <= BCAP or finder.size_min < 1:
+    if K > KCAP or finder.size_min < 1:
         return None
     nodes = 256 if K <= 256 else 1024 if K <= 1024 else 4096
     lanes = min(nodes, BCAP)
@@ -410,10 +410,10 @@ def extract(finder, binary, scores, frame_index, mask):
         enable_fp_fusion=False,
     )
     n_blobs, n_keep, oversize = meta.tolist()
-    if oversize:
-        return None
-    if n_blobs > finder.max_peaks:
+    if 0 < finder.max_peaks < n_blobs:
         return empty()
+    if oversize or n_blobs > lanes:
+        return None
     result = PeakResult(
         frame_index=frame_index,
         scores=scores,

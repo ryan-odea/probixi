@@ -6,6 +6,7 @@ from probixi.io.metadata import H5Info
 from probixi.io.writer import (
     DataOffloader,
     _build_frame_ranges,
+    _crystfel_geometry,
     _panel_bounds,
     _resolution_line,
 )
@@ -98,3 +99,14 @@ def test_write_before_entering_context_raises(geometry_dict, tmp_path):
     off = _writer(geometry_dict, tmp_path)
     with pytest.raises(RuntimeError, match="context manager"):
         off.write(object())
+
+
+def test_bare_wavelength_becomes_the_only_energy_directive():
+    text = "photon_energy = 12000.0 eV\nwavelength = 1.03321\nclen = 0.108"
+    assert _crystfel_geometry(text).split("\n") == [
+        ";photon_energy = 12000.0 eV",
+        "wavelength = 1.03321 A",
+        "clen = 0.108",
+    ]
+    valid = "photon_energy = 12000.0 eV\nclen = 0.108"
+    assert _crystfel_geometry(valid) == valid

@@ -453,3 +453,43 @@ def test_db_reflections_without_prediction_leave_model_columns_null(
         assert rows and all(r == (None, None) for r in rows)
     finally:
         conn.close()
+
+
+def test_db_keeps_flagged_and_unmeasured_reflections(geometry_dict, cell, tmp_path):
+    out = tmp_path / "out.duckdb"
+    result = _make_index_result(cell)
+    result.predicted_hkl = torch.tensor(
+        [[1, 0, 0], [0, 1, -1], [2, 0, 0]], dtype=torch.long
+    )
+    result.predicted_positions = torch.tensor(
+        [[40.0, 55.0], [70.0, 30.0], [10.0, 10.0]]
+    )
+    result.predicted_intensities = torch.tensor([1200.0, 800.0, 0.0])
+    # the third disk had no usable pixel: sigma 0, fully masked
+    result.predicted_sigmas = torch.tensor([35.0, 28.0, 0.0])
+    result.predicted_peak = torch.tensor([300.0, 200.0, 0.0])
+    result.predicted_background = torch.tensor([2.5, 2.25, 0.0])
+    result.predicted_n_pixels = torch.tensor([9.0, 8.0, 0.0])
+    result.predicted_bg_model = torch.tensor([22.5, 18.0, 0.0])
+    result.predicted_bg_model_var = torch.tensor([0.81, 0.64, 0.0])
+    result.predicted_n_pixels_total = torch.tensor([9, 9, 9])
+    result.predicted_n_masked = torch.tensor([0, 1, 9])
+    result.predicted_n_overlap = torch.tensor([0, 3, 0])
+    result.peak_n_masked = torch.tensor([0.0, 2.0, 0.0, 0.0])
+    with DuckDBOffloader(out, geometry=geometry_dict, cell=cell) as off:
+        off.write(result)
+    conn = duckdb.connect(str(out), read_only=True)
+    try:
+        rows = conn.execute(
+            "SELECT h, sigma, n_pixels, n_pixels_total, n_masked, n_overlap "
+            "FROM reflections ORDER BY h"
+        ).fetchall()
+        assert rows == [
+            (0, 28.0, 8, 9, 1, 3),
+            (1, 35.0, 9, 9, 0, 0),
+            (2, 0.0, 0, 9, 9, 0),
+        ]
+        assert conn.execute("SELECT num_reflections FROM crystals").fetchone()[0] == 3
+        assert conn.execute("SELECT MAX(n_masked) FROM peaks").fetchone()[0] == 2
+    finally:
+        conn.close()

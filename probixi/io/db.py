@@ -15,7 +15,7 @@ from .writer import (
     A_INV_TO_NM_INV,
     _panel_bounds,
     _profile_radius,
-    _reflection_extras,
+    _reflection_flags,
     _StreamWriter,
 )
 
@@ -94,6 +94,9 @@ _REFLECTION_COLUMNS = (
     "n_pixels",
     "background_model",
     "background_model_var",
+    "n_pixels_total",
+    "n_masked",
+    "n_overlap",
 )
 
 _PANEL_COLUMNS = ("name", "min_fs", "max_fs", "min_ss", "max_ss")
@@ -108,6 +111,7 @@ _PEAK_COLUMNS = (
     "n_pixels",
     "photons",
     "background_photons",
+    "n_masked",
 )
 
 _SCHEMA = """
@@ -214,7 +218,10 @@ CREATE TABLE reflections (
     resolution_nm_inv DOUBLE,
     n_pixels          INTEGER,
     background_model  DOUBLE,
-    background_model_var DOUBLE
+    background_model_var DOUBLE,
+    n_pixels_total    INTEGER,
+    n_masked          INTEGER,
+    n_overlap         INTEGER
 );
 
 CREATE TABLE peaks (
@@ -226,7 +233,8 @@ CREATE TABLE peaks (
     panel              VARCHAR,
     n_pixels           DOUBLE,
     photons            DOUBLE,
-    background_photons DOUBLE
+    background_photons DOUBLE,
+    n_masked           INTEGER
 );
 """
 
@@ -317,9 +325,9 @@ class DuckDBOffloader(_StreamWriter):
             files=files,
             indexer_name=indexer_name,
             panel=panel,
-            integration=integration,
         )
         self.cell = cell
+        self.integration = integration
         self._crystal_rows: list[tuple] = []
         self._frame_range = frame_range
         self._conn = None
@@ -422,6 +430,7 @@ class DuckDBOffloader(_StreamWriter):
                 ]
             )
         )
+        peaks = np.vstack([peaks, _nan_array(stats.n_masked, peaks.shape[1])])
         gain = self._gain()
         frame = self._frame_row(
             fid,
@@ -528,6 +537,7 @@ class DuckDBOffloader(_StreamWriter):
                 _to_array(result.intensities),
                 _to_array(result.peak_background_sum, n),
                 _to_array(result.peak_n_pixels, n),
+                _nan_array(result.peak_n_masked, n),
             ]
         )
 
@@ -556,6 +566,9 @@ class DuckDBOffloader(_StreamWriter):
             )
             extras = _reflection_extras(result)
             extras = np.array(extras) if extras else np.full((3, pos.shape[1]), np.nan)
+            flags = _reflection_flags(result)
+            flags = np.array(flags) if flags else np.full((3, pos.shape[1]), np.nan)
+            extras = np.vstack([extras, flags])
         else:
             indexed = _to_array(result.indexed_mask, dtype=bool)
             pos = _to_array(result.positions)[indexed].T
@@ -569,8 +582,11 @@ class DuckDBOffloader(_StreamWriter):
                     zero,
                 ]
             )
-            extras = np.full((3, pos.shape[1]), np.nan)
-        keep = np.isfinite(vals[1]) & (vals[1] > 0.0)
+            extras = np.full((6, pos.shape[1]), np.nan)
+        # an integrated disk with no usable pixel (sigma 0) is kept, flagged
+        keep = np.isfinite(vals[1])
+        if result.predicted_hkl is None:
+            keep &= vals[1] > 0.0
         return pos[:, keep], hkl[:, keep], vals[:, keep], extras[:, keep]
 
     def _frame_row(
@@ -708,7 +724,7 @@ class DuckDBOffloader(_StreamWriter):
             return {}, np.zeros(0)
         fid, gain, chunks = zip(*self._peak_chunks)
         n = [c.shape[1] for c in chunks]
-        row, col, intensity, bg, npix = np.concatenate(chunks, axis=1)
+        row, col, intensity, bg, npix, nmask = np.concatenate(chunks, axis=1)
         recip = np.array(self._resolution_nm_inv_many(zip(row, col)))
         has = np.array(n) > 0
         starts = (np.cumsum(n) - n)[has]
@@ -727,6 +743,7 @@ class DuckDBOffloader(_StreamWriter):
             npix,
             photons,
             bg_photons,
+            _int_column(nmask),
         )
         return dict(zip(_PEAK_COLUMNS, columns)), recips
 
@@ -736,7 +753,9 @@ class DuckDBOffloader(_StreamWriter):
         cid, fid, pos, hkl, vals, extras = zip(*self._refl_chunks)
         n = [p.shape[1] for p in pos]
         row, col = np.concatenate(pos, axis=1)
-        n_pix, bg_model, bg_var = np.concatenate(extras, axis=1)
+        n_pix, bg_model, bg_var, n_total, n_masked, n_overlap = np.concatenate(
+            extras, axis=1
+        )
         recorded = ~np.isnan(n_pix)
         columns = (
             np.repeat(cid, n),
@@ -750,6 +769,9 @@ class DuckDBOffloader(_StreamWriter):
             (np.where(recorded, n_pix, 0).astype(np.int64), recorded),
             (bg_model, np.isfinite(bg_model)),
             (bg_var, np.isfinite(bg_var)),
+            _int_column(n_total),
+            _int_column(n_masked),
+            _int_column(n_overlap),
         )
         return dict(zip(_REFLECTION_COLUMNS, columns))
 
@@ -805,6 +827,28 @@ def _to_array(t, n: int = 0, dtype=np.float64) -> np.ndarray:
     if t is None:
         return np.zeros(n, dtype=dtype)
     return t.detach().cpu().numpy().astype(dtype)
+
+
+def _reflection_extras(result) -> tuple:
+    # (n_pixels, background_model, background_model_var) lists; () if not integrated
+    cols = (
+        result.predicted_n_pixels,
+        result.predicted_bg_model,
+        result.predicted_bg_model_var,
+    )
+    if any(c is None for c in cols):
+        return ()
+    return tuple(c.detach().cpu().tolist() for c in cols)
+
+
+def _nan_array(t, n: int) -> np.ndarray:
+    return np.full(n, np.nan) if t is None else _to_array(t)
+
+
+def _int_column(values: np.ndarray) -> tuple:
+    # float array with NaN for NULL -> (int64 values, valid) for _insert
+    ok = np.isfinite(values)
+    return np.where(ok, values, 0).astype(np.int64), ok
 
 
 def _columns(names: tuple, rows: list) -> dict:

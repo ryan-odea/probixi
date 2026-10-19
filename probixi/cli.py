@@ -119,6 +119,17 @@ def _run_multi_gpu(device_list: list, opts: dict, refine, integrate) -> None:
     help="CrystFEL unit-cell file (.cell). Required unless --peaks-only.",
 )
 @click.option(
+    "--mask",
+    "mask_file",
+    default=None,
+    type=click.Path(exists=True, dir_okay=False),
+    help="HDF5 file holding the bad-pixel mask (e.g. the Eiger master file), "
+    "overriding the geometry's mask_file or the data file. The dataset is the "
+    "geometry's 'mask' path if the file has it, else the NeXus "
+    "/entry/instrument/detector/[detectorSpecific/]pixel_mask. A mask that "
+    "cannot be read from this file is an error, not skipped.",
+)
+@click.option(
     "-o",
     "--output",
     "output",
@@ -282,7 +293,8 @@ def _run_multi_gpu(device_list: list, opts: dict, refine, integrate) -> None:
     "-q",
     "--quiet",
     is_flag=True,
-    help="Suppress progress: the periodic frames/hits/indexed rate line",
+    help="Suppress progress: the periodic frames/hits/indexed rate line and the "
+    "citation printed at the start",
 )
 @click.option(
     "--force-all",
@@ -302,8 +314,9 @@ def _run_multi_gpu(device_list: list, opts: dict, refine, integrate) -> None:
     show_default=True,
     help="Size the learned integration disk for background-limited "
     "signal-to-noise (smaller on narrow spots) or for total flux (2% profile "
-    "radius); auto keeps snr only if it captures a constant fraction of every "
-    "spot's flux on the calibration peaks, else flux.",
+    "radius); auto keeps snr if it captures a constant fraction of every "
+    "spot's flux on the calibration peaks, or if the flux disk's extra "
+    "background noise costs more than that spread, else flux.",
 )
 @click.option(
     "--cell-calibrate/--no-cell-calibrate",
@@ -324,6 +337,7 @@ def main(
     list_file: str,
     geometry_file: str,
     cell_file: Optional[str],
+    mask_file: Optional[str],
     output: str,
     peaks_only: bool,
     gif: Optional[str],
@@ -377,7 +391,12 @@ def main(
         PeakOffloader,
         is_duckdb_path,
     )
-    from probixi.probixi import Probixi
+    from probixi.probixi import Probixi, citation
+
+    if not quiet:
+        click.echo("If you use probixi, please cite:")
+        citation()  # the current entry from GitHub, else the bundled one
+        click.echo()
 
     device_list = _resolve_cli_devices(device, devices, gpus)
     refine_cfg = RefineConfig(cell=not no_refine_cell)
@@ -391,6 +410,7 @@ def main(
         list_file=list_file,
         geometry_file=geometry_file,
         cell_file=cell_file,
+        mask_file=mask_file,
         noise_mode=cast("Literal['online', 'per_frame']", noise_mode),
         warmup_frames=warmup_frames,
         flux_variance=flux_variance,
@@ -461,6 +481,8 @@ def main(
                     msg += " trend={:.1%} spread={:.1%} z={:.1f}".format(
                         d["residual_trend"], d["crystal_spread"], d["spread_z"]
                     )
+                if "noise_ratio" in d:
+                    msg += f" noise={d['noise_ratio']:.2f}"
                 msg += ")"
             msg += f": {d['reason']}"
         click.echo(msg)

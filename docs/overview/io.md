@@ -8,7 +8,9 @@
 2. A CrystFEL cell file. It only has to be approximate, because `probixi` re-centres it on the data.
 3. A list file of the HDF5 or CXI files to process.
 
-Any pixel mask stored with the data is read and combined with the masks `probixi` learns.
+Any pixel mask stored with the data is read and combined with the masks `probixi` learns. The geometry's `mask` and `mask_file` say where the mask is stored. Without `mask_file`, the mask is read from the first data file.
+
+`--mask FILE` (or `Probixi(mask_file=...)`) reads the mask from `FILE` instead. Use it when the mask lives in an HDF5 master file but the list names the data files, or when `mask_file` has moved. `probixi` reads the geometry's `mask` dataset if `FILE` has it. Otherwise it reads the NeXus `/entry/instrument/detector/pixel_mask`, or the same mask under `detectorSpecific/`. For the NeXus mask, a pixel is bad if any flag bit is set, unless the geometry sets `mask_good` or `mask_bad`. If the mask cannot be read from an explicit `--mask`, the run stops. An unreadable geometry mask only gives a warning, and the run continues without it.
 
 ## Reading frames
 
@@ -16,7 +18,7 @@ Frames are read lazily. A background thread reads slices into a bounded queue a 
 
 ## Outputs
 
-**CrystFEL stream (`.stream`).** The per-frame, per-reflection text format, readable by `partialator` and `process_hkl`. Three extra reflection columns (`n_pix`, `bg_model`, `bg_model_var`) carry the noise model's background under each disk for merging programs that model the background explicitly. CrystFEL ignores them.
+**CrystFEL stream (`.stream`).** The per-frame, per-reflection text format, readable by `partialator` and `process_hkl`. It carries only what CrystFEL reads; probixi's own quantities (the integration recipe, the model background under each disk, pixel counts, per-crystal diagnostics) are in the database. A reflection whose signal disk touches the detector mask, the frame edge or another predicted disk is left out of the stream, as is a peak bordering the mask; the database keeps them, flagged by pixel counts.
 
 **DuckDB (`.db` or `.duckdb`).** Run metadata goes into small `geometry`, `panels`, and `cell` tables ([schema](../vignettes/getting_started.md#database)). Every file-event becomes a row in `frames`, indexed or not, and lattices, integrated reflections, and searched peaks are linked to it by `frame_id`. The key is deterministic, the first 16 hex digits of the SHA-1 of `filename//event`, so a peaks-only pass, an indexed pass, and separate multi-GPU shards agree on which row is which frame. Under `--start`/`--stop` or multi-GPU runs, each writer fills only the frame range it owns.
 

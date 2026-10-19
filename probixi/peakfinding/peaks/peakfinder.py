@@ -16,6 +16,7 @@ from .blobs import (
     empty_stats,
     filter_blobs,
     label_connected_components,
+    mask_touch_counts,
     select_blobs,
 )
 from .neighborhood import (
@@ -243,8 +244,9 @@ class PeakFinder:
         Replace the frozen variance with a per-frame photon-transfer noise floor.
     flux_var_floor : float, default 0.15
         Sub-photon hard floor as a fraction of the running variance.
-    max_peaks : int, default 1000
-        Blow-up guard; frames with more candidate blobs yield no peaks.
+    max_peaks : int, optional
+        Blow-up guard; frames with more candidate blobs yield no peaks. Defaults
+        to one per 1000 frame pixels, and at least 1000.
     compile : bool, default False
         ``torch.compile`` the batched scorer when available.
     """
@@ -274,7 +276,7 @@ class PeakFinder:
         local_outer_radius: int = 9,
         flux_variance: bool = False,
         flux_var_floor: float = 0.15,
-        max_peaks: int = 1000,
+        max_peaks: Optional[int] = None,
         compile: bool = False,
     ):
         if kappa <= 1.0:
@@ -318,7 +320,11 @@ class PeakFinder:
         self.local_outer_radius = int(local_outer_radius)
         self.flux_variance = bool(flux_variance)
         self.flux_var_floor = float(flux_var_floor)
-        self.max_peaks = int(max_peaks)
+        self.max_peaks = (
+            int(max_peaks)
+            if max_peaks is not None
+            else max(1000, noise_model.valid_mask.numel() // 1000)
+        )
 
         self._kernel: Tensor = gaussian_kernel_2d(
             self.kernel_size,
@@ -576,6 +582,8 @@ class PeakFinder:
         def _gen() -> Iterator[PeakResult]:
             offset = 0
             for item in frames:
+                item, ok = self.noise.clean(item)
+                valid = self.noise.valid_mask
                 if item.ndim == 3:
                     scores_batch = self.score_batch(item)
                     for b in range(item.shape[0]):
@@ -583,7 +591,7 @@ class PeakFinder:
                         yield self._extract(
                             {k: v[b] for k, v in scores_batch.items()},
                             frame_index=idx,
-                            mask=self.noise.valid_mask,
+                            mask=valid if ok is None else valid & ok[b],
                         )
                         offset += 1
                 else:
@@ -591,7 +599,7 @@ class PeakFinder:
                     yield self._extract(
                         self.score(item),
                         frame_index=idx,
-                        mask=self.noise.valid_mask,
+                        mask=valid if ok is None else valid & ok,
                     )
                     offset += 1
 
@@ -635,6 +643,9 @@ class PeakFinder:
         if kernel is not None:
             result = kernel.extract(self, binary, scores, frame_index, mask)
             if result is not None:
+                touch = mask_touch_counts(result.labels, len(result.stats), mask)
+                result.stats.n_masked = touch
+                result.kept_stats.n_masked = touch[result.keep]
                 return result
         labels, n_blobs = label_connected_components(
             binary, connectivity=self.connectivity
@@ -662,6 +673,7 @@ class PeakFinder:
             mean=mean_eff,
             response=scores.get("mf_max") if self.matched_filter else None,
         )
+        stats.n_masked = mask_touch_counts(labels, n_blobs, mask)
         # with the matched filter, the size cap follows each blob's brightness
         footprint = self.matched_filter and "mf_max" in scores
         keep = filter_blobs(

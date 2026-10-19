@@ -367,14 +367,29 @@ def _panel_overrides(
     return layouts, masks
 
 
+def _with_unit(value, units: dict[str, float]) -> Optional[float]:
+    # CrystFEL "<number> <unit>" values; a bare number is in the first unit
+    if isinstance(value, (int, float)):
+        return float(value)
+    number, _, unit = str(value).partition(" ")
+    try:
+        return float(number) * units[unit.strip()]
+    except (KeyError, ValueError):
+        return None
+
+
 def _wavelength(parameters: dict) -> Optional[float]:
-    w = parameters.get("wavelength")
-    if isinstance(w, (int, float)):
-        return float(w)
-    e = parameters.get("photon_energy")
-    if isinstance(e, (int, float)) and e > 0:
-        return EV_ANGSTROM / float(e)
+    w = _with_unit(parameters.get("wavelength"), {"A": 1.0, "m": 1e10})
+    if w is not None:
+        return w
+    e = _photon_energy(parameters)
+    if e is not None and e > 0:
+        return EV_ANGSTROM / e
     return None
+
+
+def _photon_energy(parameters: dict) -> Optional[float]:
+    return _with_unit(parameters.get("photon_energy"), {"eV": 1.0, "keV": 1e3})
 
 
 def _pixel_size(parameters: dict) -> Optional[float]:
@@ -389,14 +404,9 @@ def _adu_per_photon(parameters: dict) -> Optional[float]:
     if isinstance(g, (int, float)) and g > 0:
         return float(g)
     per_ev = parameters.get("adu_per_eV")
-    e = parameters.get("photon_energy")
-    if (
-        isinstance(per_ev, (int, float))
-        and isinstance(e, (int, float))
-        and per_ev > 0
-        and e > 0
-    ):
-        return float(per_ev) * float(e)
+    e = _photon_energy(parameters)
+    if isinstance(per_ev, (int, float)) and e is not None and per_ev > 0 and e > 0:
+        return float(per_ev) * e
     return None
 
 

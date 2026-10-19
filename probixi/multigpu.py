@@ -167,6 +167,7 @@ class BlockConfig:
     cell_file: Optional[str]
     start: int
     stop: int
+    mask_file: Optional[str] = None
     batch_size: int = 8
     seed: Optional[SeedConfig] = None
     integrate: Optional[IntegrateConfig] = None
@@ -221,6 +222,7 @@ def run_block(
         list_file=cfg.list_file,
         geometry_file=cfg.geometry_file,
         cell_file=cfg.cell_file,
+        mask_file=cfg.mask_file,
         noise_mode=cfg.noise_mode,  # type: ignore[arg-type]
         warmup_frames=cfg.warmup_frames,
         flux_variance=cfg.flux_variance,
@@ -324,6 +326,7 @@ def run_data_parallel(
     output: PathLike,
     *,
     devices: Optional[Union[int, Sequence[Union[str, torch.device]]]] = None,
+    mask_file: Optional[PathLike] = None,
     start: Optional[int] = None,
     stop: Optional[int] = None,
     batch_size: int = 8,
@@ -371,6 +374,7 @@ def run_data_parallel(
         cell_file=str(cell_file),
         start=lo,
         stop=hi,
+        mask_file=str(mask_file) if mask_file is not None else None,
         batch_size=batch_size,
         seed=seed,
         integrate=integrate,

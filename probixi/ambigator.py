@@ -16,6 +16,8 @@ Differences from the CrystFEL program:
   groups, not when four are shared in the last group alone.
 * The correlation matrix, f/g graph and assignment files are not written; the
   per-pass means are returned in :attr:`AmbigatorResult.history` instead.
+* Reflections the database flags as masked or overlapping are left out, as
+  they are left out of the stream.
 """
 
 from __future__ import annotations
@@ -380,7 +382,8 @@ class Ambigator:
 
     def _load(self):
         # Merge each crystal's reflections into sorted CSR runs of ASU slots.
-        clauses = ["intensity IS NOT NULL", "isfinite(intensity)"]
+        clauses = ["intensity IS NOT NULL", "isfinite(intensity)", "sigma > 0"]
+        clauses += ["COALESCE(n_masked, 0) = 0", "COALESCE(n_overlap, 0) = 0"]
         if self._rmin > 0.0:
             clauses.append(f"resolution_nm_inv >= {self._rmin}")
         if math.isfinite(self._rmax):

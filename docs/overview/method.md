@@ -179,7 +179,7 @@ $$
 \text{MF}_k(p) = \frac{\sum_q u_k(q-p)\,m(q)\,z(q)}{\sqrt{\sum_q u_k(q-p)^2\,m(q)}}, \qquad T(p) = \max_k \text{MF}_k(p) .
 $$
 
-A pixel is a detection when $T(p) > \tau$ with the learned $\tau$ of §2.6. Detections are grouped into 8-connected blobs (`label_connected_components`); a frame with more than 1000 blobs is treated as empty.
+A pixel is a detection when $T(p) > \tau$ with the learned $\tau$ of §2.6. Detections are grouped into 8-connected blobs (`label_connected_components`); a frame with more blobs than one per 1000 frame pixels, and at least 1000 (`max_peaks`), is treated as empty.
 
 ### 3.5 Blob statistics and filters
 
@@ -249,7 +249,7 @@ a quarter of the shortest reciprocal axis of the target cell, so it scales with 
 
 The cell is known; only $\mathbf U$ is sought (`sphere_seed_candidates`, `indexer/seed.py`). Peaks are capped to the 80 brightest (`max_seed_peaks`) for seeding. With $\hat{\mathbf a}$ the direct $a$-axis of the target cell and $L_a = |\mathbf a|$:
 
-1. **Directions.** $2n_d$ directions $\pm\hat{\mathbf d}_i$ from a Fibonacci hemisphere, $n_d = 6000$ (`n_directions`).
+1. **Directions.** $2n_d$ directions $\pm\hat{\mathbf d}_i$ from a Fibonacci hemisphere, $n_d = \max\big(6000,\; 6000\,(L_a / 55\,\text{Å})^2\big)$ by default (`n_directions`), so the grid spacing tracks the fitness peak width $\sim 1/(L_a q)$.
 2. **Integer-projection fitness.** Placing $\mathbf a$ along $\hat{\mathbf d}$, every peak's projection $L_a\,\hat{\mathbf d}\cdot\mathbf q_i$ must be near an integer if the direction is right:
    $$F(\hat{\mathbf d}) = \frac{\sum_i w_i \cos\!\big(2\pi L_a\,\hat{\mathbf d}\cdot\mathbf q_i\big)}{\sum_i w_i},$$
    with $w_i$ the peaks' posterior means (§3.3). The 64 best directions are kept (`2 * top_directions`).
@@ -297,7 +297,7 @@ The prior is a unit-variance Tikhonov term of width one third of the cell-match 
 
 ### 5.5 Several lattices per frame
 
-With `max_lattices` $> 1$ the peaks explained by an accepted lattice, $|\mathbf A\mathbf h_i - \mathbf q_i| < 0.006\ \text{Å}^{-1}$ (`peel_radius`), are removed and the residue re-seeded while at least 6 remain; a new $\mathbf A$ within 2 % (Frobenius, up to sign) of an existing one is a duplicate and is skipped.
+With `max_lattices` $> 1$ the peaks explained by an accepted lattice, $|\mathbf A\mathbf h_i - \mathbf q_i| < q_{\text{tol}}$ of §4.3 (`peel_radius`), are removed and the residue re-seeded while at least 6 remain. With `--enrich-gate` each lattice is gated on enrichment (§7.4) as it is found; one that fails is not kept but its peaks are still removed, and every pass counts toward `max_lattices`; a new $\mathbf A$ within 2 % (Frobenius, up to sign) of an existing one is a duplicate and is skipped.
 
 ## 6. Predicting the full reflection set
 
@@ -344,7 +344,7 @@ $$
 
 with $r_{\text{in}}, r_{\text{out}}$ left at the flux-rule values so the annulus still clears the 2 % radius. On 1 px spots this gives a $3\times3$ disk ($r_{\text{sig}} = 1.5$) where the flux rule gave 5 px; on broad spots both rules agree. If too few peaks are found the indexer falls back to $(3.0, 4.0, 7.36)$ px (`FALLBACK_RADII`).
 
-**Auto rule** (default, `--aperture auto`; `choose_aperture`). The SNR disk captures a fraction $f$ of each spot's flux. Not every loss survives merging: a per-crystal constant is absorbed by that crystal's scale factor, and a resolution trend common to all crystals by an overall $B$. What no scale model removes is a resolution dependence of $f$ that *differs between crystals*, as it does when their mosaicity differs, and that is what the rule measures. On strong ($I/\sigma \ge 10$ in the flux disk, both disks corrected by the peak's own annulus as in 7.2), isolated (no neighbour within $2 r_{\text{sig}}^{\text{flux}} + 1$ px) calibration peaks with their frame ids, the trend common to all crystals is estimated first (weighted means of $\log f$ in $|q|^2$ bins, interpolated) and removed, since a curved common trend would otherwise read as crystal-specific slopes wherever crystals sample different $|q|$ ranges. Each crystal's residual $\log f$ is then regressed on $|q|^2$; the slope errors are calibrated on the pooled within-crystal residuals, so per-reflection scatter (sub-pixel centring, spot shape) does not count as a crystal difference. The spread of the slopes beyond their errors, times the $|q|^2$ span from the median to the 90th percentile, is the intensity error the SNR disk would leave at the resolution edge. It is estimated with a winsorised $\chi^2$ (each crystal's standardised deviation capped at 9, against the null mean 0.995 and variance 1.90 of a capped $\chi^2_1$), so a few wild crystals cannot decide. If it reaches 2 % (`aperture_tolerance`) at $\ge 3\sigma$, the flux disk is taken, otherwise the SNR disk stays. Fewer than 50 usable peaks or 10 crystals keep the SNR disk. The choice, its reason, the common trend, the crystal spread and its significance are printed after calibration; the stream header records the rule actually applied.
+**Auto rule** (default, `--aperture auto`; `choose_aperture`). The SNR disk captures a fraction $f$ of each spot's flux. Not every loss survives merging: a per-crystal constant is absorbed by that crystal's scale factor, and a resolution trend common to all crystals by an overall $B$. What no scale model removes is a resolution dependence of $f$ that *differs between crystals*, as it does when their mosaicity differs, and that is what the rule measures. On strong ($I/\sigma \ge 10$ in the flux disk, both disks corrected by the peak's own annulus as in 7.2), isolated (no neighbour within $2 r_{\text{sig}}^{\text{flux}} + 1$ px) calibration peaks with their frame ids, the trend common to all crystals is estimated first (weighted means of $\log f$ in $|q|^2$ bins, interpolated) and removed, since a curved common trend would otherwise read as crystal-specific slopes wherever crystals sample different $|q|$ ranges. Each crystal's residual $\log f$ is then regressed on $|q|^2$; the slope errors are calibrated on the pooled within-crystal residuals, so per-reflection scatter (sub-pixel centring, spot shape) does not count as a crystal difference. The spread of the slopes beyond their errors, times the $|q|^2$ span from the median to the 90th percentile, is the intensity error the SNR disk would leave at the resolution edge. It is estimated with a winsorised $\chi^2$ (each crystal's standardised deviation capped at 9, against the null mean 0.995 and variance 1.90 of a capped $\chi^2_1$), so a few wild crystals cannot decide. If it reaches 2 % (`aperture_tolerance`) at $\ge 3\sigma$, the flux disk is taken unless its extra background costs more: on the weaker half in $I/\sigma$ of the outer half in $|q|$ of all usable calibration peaks (the edge reflections that limit a merge are weaker still than detected spots), the median of $(\sigma_f^2/I_f^2)/(\sigma_s^2/I_s^2 + \delta^2)$, with $\delta$ that spread, must stay below 1 (`noise_ratio`). Otherwise the SNR disk stays. Fewer than 50 usable peaks or 10 crystals keep the SNR disk. The choice, its reason, the common trend, the crystal spread and its significance are printed after calibration; the stream header records the rule actually applied.
 
 ### 7.2 Ring integration of a predicted reflection
 
@@ -395,7 +395,7 @@ The crystal's diffraction limit is the more generous of two estimates. The first
 
 ## 8. What is written
 
-Per frame: the peak list (fs, ss, $10|\mathbf q|$ in nm$^{-1}$, $I_B$), `hit = [n_{\text{peaks}} \ge 5]`. Per crystal: the cell recovered from $\mathbf A$ (nm, degrees), $\mathbf a^*, \mathbf b^*, \mathbf c^*$ as the columns of $10\,\mathbf A$ (nm$^{-1}$), `profile_radius`, `probixi/rmsd` (Å$^{-1}$), `probixi/mosaicity` (degrees), `probixi/scale` $= s \pm \sigma_s$ (§2.9), `probixi/enrichment`, `probixi/enrich_p`, the diffraction limit, and the reflection table:
+Per frame: the peak list (fs, ss, $10|\mathbf q|$ in nm$^{-1}$, $I_B$), `hit = [n_{\text{peaks}} \ge 5]`. Per crystal: the cell recovered from $\mathbf A$ (nm, degrees), $\mathbf a^*, \mathbf b^*, \mathbf c^*$ as the columns of $10\,\mathbf A$ (nm$^{-1}$), `profile_radius`, the diffraction limit, and the reflection table:
 
 | column | quantity | units |
 |---|---|---|
@@ -405,20 +405,19 @@ Per frame: the peak list (fs, ss, $10|\mathbf q|$ in nm$^{-1}$, $I_B$), `hit = [
 | `peak` | $\max_{\mathcal U_i}(R_p - B_i)$ | ADU |
 | `background` | $B_i$ | ADU/px |
 | `fs ss panel` | snapped position and panel | px |
-| `n_pix` | $n_i$ | px |
-| `bg_model` | $\sum_{\mathcal U_i}\mu_{\text{eff}}$ | ADU |
-| `bg_model_var` | $\tfrac{n_i}{n_{\text{bg}}}\sum_{\mathcal U_i}V_p$ | ADU$^2$ |
 
-The header records the recipe the run actually used: `probixi/int_radius` $= (r_{\text{sig}}, r_{\text{in}}, r_{\text{out}})$, `probixi/adu_per_photon` $= g$ (the measured gain when the flux model is on, else the geometry's), `probixi/bg_annulus_pixels` $= n_{\text{bg}}$, `probixi/aperture` and `probixi/reflection_columns`. The three trailing columns are ignored by CrystFEL's readers. The DuckDB output holds the same quantities in the `integration`, `frames`, `crystals`, `reflections` and `peaks` tables, the last with `photons` $= (I_B + \text{bg})/g$ and `background_photons` $= \text{bg}/g$ for every searched peak.
+A disk touching the mask, the frame edge or another predicted disk is not written; it stays in the database with `n_pixels_total`, `n_masked` and `n_overlap`.
+
+The stream carries nothing CrystFEL does not read. The DuckDB output holds the recipe the run actually used in `integration` ($r_{\text{sig}}, r_{\text{in}}, r_{\text{out}}$; $g$, the measured gain when the flux model is on, else the geometry's; $n_{\text{bg}}$; the aperture rule), the per-crystal diagnostics (`rmsd`, `mosaicity_deg`, `enrichment`, `enrich_p` on `crystals`, `scale` $= s \pm \sigma_s$ of §2.9 on `frames`), and per reflection `n_pixels` $= n_i$, `background_model` $= \sum_{\mathcal U_i}\mu_{\text{eff}}$ (ADU) and `background_model_var` $= \tfrac{n_i}{n_{\text{bg}}}\sum_{\mathcal U_i}V_p$ (ADU$^2$); `peaks` carries `photons` $= (I_B + \text{bg})/g$ and `background_photons` $= \text{bg}/g$ for every searched peak.
 
 ## 9. Handing over to merging
 
-A merging program that models detection as $n \sim \text{Poisson}(S + b)$ needs the raw disk count and an estimate of $b$ with its uncertainty. From the columns above, in photons,
+A merging program that models detection as $n \sim \text{Poisson}(S + b)$ needs the raw disk count and an estimate of $b$ with its uncertainty. From the database columns, in photons,
 
 $$
 n_i = \frac{I_i + B_i\,n_i^{\text{px}}}{g}, \qquad
 b_i^{\text{ring}} = \frac{B_i\,n_i^{\text{px}}}{g}\ \text{with}\ \operatorname{Var} = \frac{n_i^{\text{px}}}{n_{b,i}}\,b_i^{\text{ring}}, \qquad
-b_i^{\text{model}} = \frac{\text{bg\_model}_i}{g}\ \text{with}\ \operatorname{Var} = \frac{\text{bg\_model\_var}_i}{g^2} .
+b_i^{\text{model}} = \frac{\text{background\_model}_i}{g}\ \text{with}\ \operatorname{Var} = \frac{\text{background\_model\_var}_i}{g^2} .
 $$
 
 The ring pair is the CrystFEL convention (torchsx `--background annulus`); the model pair replaces the annulus count by the noise model's expectation, whose variance is measured rather than assumed Poisson (`--background model`).

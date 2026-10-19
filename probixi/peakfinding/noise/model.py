@@ -8,6 +8,19 @@ from torch import Tensor, nn
 from ...kernels import select
 from ._drift import DriftDiagnostics
 
+FLAG_TESTS = {
+    "flag_lessthan": torch.ge,
+    "flag_morethan": torch.le,
+    "flag_equal": torch.ne,
+}
+
+
+def value_ok(frame: Tensor, flags: Iterable[tuple]) -> Tensor:
+    ok = torch.ones_like(frame, dtype=torch.bool)
+    for rows, cols, key, value in flags:
+        ok[..., rows, cols] &= FLAG_TESTS[key](frame[..., rows, cols], value)
+    return ok
+
 
 # NOISE STATES MOTHER ===================================================
 class NoiseStats(nn.Module):
@@ -148,6 +161,9 @@ class NoiseModel(nn.Module):
         Frames before robust clipping engages.
     valid_mask : Tensor, optional
         Static a-priori bad-pixel mask, applied from the first frame.
+    value_flags : iterable of tuple, optional
+        Per-frame ``(rows, cols, key, value)`` geometry value flags; pixels
+        failing them in a frame read as their running mean (see ``clean``).
     device, dtype
         Tensor placement and precision.
 
@@ -182,6 +198,7 @@ class NoiseModel(nn.Module):
         robust_k: float = 5.0,
         robust_min_frames: int = 4,
         valid_mask: Optional[Tensor] = None,
+        value_flags: Iterable[tuple] = (),
         device: Optional[torch.device] = None,
         dtype: torch.dtype = torch.float32,
     ):
@@ -203,6 +220,7 @@ class NoiseModel(nn.Module):
         self.robust_update = bool(robust_update)
         self.robust_k = float(robust_k)
         self.robust_min_frames = int(robust_min_frames)
+        self.value_flags = list(value_flags)
 
         self.pixel = PixelNoise(
             frame_size=frame_size, mode=mode, decay=decay, device=device, dtype=dtype
@@ -292,7 +310,16 @@ class NoiseModel(nn.Module):
         )
 
     @torch.no_grad()
+    def clean(self, frame: Tensor) -> tuple[Tensor, Optional[Tensor]]:
+        if not self.value_flags:
+            return frame, None
+        frame = frame.to(self.pixel.mean_)
+        ok = value_ok(frame, self.value_flags)
+        return torch.where(ok, frame, self.pixel.mean_), ok
+
+    @torch.no_grad()
     def update(self, frame: Tensor) -> None:
+        frame = self.clean(frame)[0]
         if self.mode == "per_frame":
             self._soft_reset()
         kernel = select("noise", self._fused_pixel(frame))

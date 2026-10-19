@@ -292,8 +292,9 @@ def test_integrate_reports_disk_pixels_and_model_background():
         n_bg=200.0,
         radii=(2.0, 4.0, 6.0),
     )
-    assert len(out) == 9
-    n_pix, bg_model, bg_model_var = out[6:]
+    assert len(out) == 11
+    n_pix, bg_model, bg_model_var, n_total, n_masked = out[6:]
+    assert int(n_total[0]) == 13 and int(n_masked[0]) == 0
     # a radius-2 disk holds the 13 integer offsets with dr^2 + dc^2 <= 4
     assert int(n_pix[0]) == 13
     # the model background is the mean image summed over exactly those pixels
@@ -323,6 +324,8 @@ def test_integrate_reports_disk_pixels_and_model_background():
         radii=(2.0, 4.0, 6.0),
     )
     assert int(out1[6][0]) == 12
+    # ... and are counted against the nominal disk
+    assert int(out1[9][0]) == 13 and int(out1[10][0]) == 1
     assert float(out1[7][0]) == pytest.approx(12 * background)
 
 

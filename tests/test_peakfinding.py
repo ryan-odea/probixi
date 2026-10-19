@@ -15,6 +15,7 @@ from probixi.peakfinding.peaks.blobs import (
     filter_blobs,
     footprint_cap,
     label_connected_components,
+    mask_touch_counts,
 )
 from probixi.peakfinding.peaks.neighborhood import gaussian_kernel_2d
 from probixi.peakfinding.peaks.peakfinder import PeakFinder
@@ -616,3 +617,13 @@ def test_footprint_cap_formula():
     assert torch.allclose(cap, want)
     # responses below threshold never produce a negative cap
     assert float(footprint_cap(torch.tensor([0.1]), 2.0, 1.0, 1.0)[0]) == 0.0
+
+
+def test_mask_touch_counts_flags_pixels_next_to_the_mask_or_edge():
+    labels = torch.zeros(6, 6, dtype=torch.long)
+    labels[0, 0:2] = 1  # on the frame edge: both pixels touch
+    labels[3, 3:5] = 2  # interior, clean
+    labels[3, 1] = 3  # next to a masked pixel
+    valid = torch.ones(6, 6, dtype=torch.bool)
+    valid[4, 1] = False
+    assert mask_touch_counts(labels, 3, valid).tolist() == [2, 0, 1]

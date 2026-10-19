@@ -24,7 +24,7 @@ A blind search over all rotations is too expensive. Following TORO, `probixi` fa
 
 ### Directions
 
-Trial directions $\hat{\mathbf d}$ are laid out on a Fibonacci sphere, 6000 points with both signs. Each is scored with the trial vector $\mathbf t = |\mathbf a|\,\hat{\mathbf d}$ by
+Trial directions $\hat{\mathbf d}$ are laid out on a Fibonacci sphere with both signs, $\max(6000,\;6000\,(|\mathbf a|/55\,\text{Å})^2)$ points by default so the spacing follows the fitness peak width $\sim 1/(|\mathbf a| q)$. Each is scored with the trial vector $\mathbf t = |\mathbf a|\,\hat{\mathbf d}$ by
 
 $$F(\hat{\mathbf d}) = \frac{\sum_i c_i \cos\!\left(2\pi\,\mathbf t\cdot\mathbf q_i\right)}{\sum_i c_i}.$$
 
@@ -66,7 +66,7 @@ and a reflection is predicted when $|\varepsilon| < 1.5\,\lambda\,\rho$. The mos
 
 ### The aperture
 
-After calibration, `probixi` stacks the radial profiles of peaks from a further random sample of frames and fits a Gaussian to the core. The full-flux radius is where that Gaussian falls to 2% of its centre. The background annulus begins one pixel beyond it and holds 120 pixels. The signal disk defaults to the smaller radius that maximises the background-limited signal-to-noise ratio of the profile. A smaller disk captures a smaller fraction of each spot. A constant fraction is absorbed by each crystal's scale factor in merging, and a trend with resolution common to all crystals by an overall $B$ factor. What scaling cannot remove is a resolution trend that differs between crystals, so `probixi` tests for that on the calibration peaks and reverts to the full-flux radius when it is significant (`--aperture auto`).
+After calibration, `probixi` stacks the radial profiles of peaks from a further random sample of frames and fits a Gaussian to the core. The full-flux radius is where that Gaussian falls to 2% of its centre. The background annulus begins one pixel beyond it and holds 120 pixels. The signal disk defaults to the smaller radius that maximises the background-limited signal-to-noise ratio of the profile. A smaller disk captures a smaller fraction of each spot. A constant fraction is absorbed by each crystal's scale factor in merging, and a trend with resolution common to all crystals by an overall $B$ factor. What scaling cannot remove is a resolution trend that differs between crystals, so `probixi` tests for that on the calibration peaks and reverts to the full-flux radius when it is significant and larger than the extra background noise of the bigger disk (`--aperture auto`).
 
 ### Integrating a reflection
 
@@ -86,4 +86,4 @@ An orientation can fit a sparse peak list without being the true lattice. Once t
 
 $$\text{enrichment} = \frac{n_{\text{bright}}/M}{p}, \qquad \texttt{enrich\_p} = P(X \ge n_{\text{bright}}),\quad X \sim \mathrm{Poisson}(Mp).$$
 
-An enrichment near 1 means the predictions land on signal as often as chance. With `--enrich-gate`, a lattice is kept only when `enrich_p` is at most `--enrich-alpha` (default $10^{-3}$). The gate runs before the overlap exclusion, so a rejected lattice cannot remove reflections from one that is kept. The gate is off by default and is still being tested to determine whether it becomes the default.
+An enrichment near 1 means the predictions land on signal as often as chance. With `--enrich-gate`, a lattice is kept only when `enrich_p` is at most `--enrich-alpha` (default $10^{-3}$). The gate runs on each lattice as it is found, before the next is searched and before the overlap exclusion, so a rejected lattice cannot remove reflections from one that is kept. Its peaks are still removed before the next search. The gate is off by default and is still being tested to determine whether it becomes the default.

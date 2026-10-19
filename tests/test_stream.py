@@ -127,6 +127,18 @@ def test_header_embeds_geometry_when_file_passed(
     assert embedded in text
 
 
+def test_header_records_integration_radii(tmp_path, geometry_dict, cell):
+    out = tmp_path / "indexed.stream"
+    recipe = dict(radii=(1.5, 4.0, 7.361873833614299))
+    with DataOffloader(
+        out, geometry=geometry_dict, cell=cell, integration=recipe
+    ) as off:
+        off.write(_make_index_result(cell))
+
+    header = out.read_text().split("----- Begin chunk -----")[0].splitlines()
+    assert "indexamajig --integration=rings-cen --int-radius=1.5,4,7.36187" in header
+
+
 def test_header_omits_geometry_when_no_file(tmp_path, geometry_dict, cell):
     out = tmp_path / "indexed.stream"
     with DataOffloader(out, geometry=geometry_dict, cell=cell) as off:
@@ -364,41 +376,21 @@ def _with_prediction(result):
     return result
 
 
-def test_header_records_integration_recipe_and_extra_columns(
-    tmp_path, geometry_dict, cell
-):
+def test_stream_carries_only_crystfel_content(tmp_path, geometry_dict, cell):
     out = tmp_path / "indexed.stream"
-    recipe = dict(
-        radii=(1.5, 6.0, 8.6), adu_per_photon=9.9, bg_annulus_pixels=280, aperture="snr"
-    )
-    with DataOffloader(
-        out, geometry=geometry_dict, cell=cell, integration=recipe
-    ) as off:
+    with DataOffloader(out, geometry=geometry_dict, cell=cell) as off:
         off.write(_with_prediction(_make_index_result(cell)))
-
     lines = out.read_text().splitlines()
-    first_chunk = lines.index("----- Begin chunk -----")
-    header = lines[:first_chunk]
-    assert "probixi/int_radius = 1.50,6.00,8.60" in header
-    assert "probixi/adu_per_photon = 9.9" in header
-    assert "probixi/bg_annulus_pixels = 280" in header
-    assert "probixi/aperture = snr" in header
-    assert "probixi/reflection_columns = n_pix bg_model bg_model_var" in header
-
+    # no probixi-only header or crystal lines, no zero detector shift
+    assert not any(ln.startswith(("probixi/", "predict_refine/")) for ln in lines)
     crystal = _section(lines, "--- Begin crystal", "--- End crystal")
     header_i = next(
         i for i, line in enumerate(crystal) if line.startswith("   h    k    l")
     )
-    assert crystal[header_i].split()[-3:] == ["n_pix", "bg_model", "bg_model_var"]
     rows = crystal[header_i + 1 : crystal.index("End of reflections")]
-    assert len(rows) == 2
-    first = rows[0].split()
-    # the ten CrystFEL columns stay in place; the extras follow the panel name
-    assert len(first) == 13
-    assert first[9] == "0"
-    assert int(first[10]) == 9
-    assert float(first[11]) == pytest.approx(22.5)
-    assert float(first[12]) == pytest.approx(0.81)
+    # the ten CrystFEL columns and nothing after the panel name
+    assert crystal[header_i].split()[-1] == "panel"
+    assert len(rows) == 2 and all(len(r.split()) == 10 for r in rows)
 
 
 def test_reflection_rows_have_ten_columns_without_prediction(
@@ -408,7 +400,6 @@ def test_reflection_rows_have_ten_columns_without_prediction(
     with DataOffloader(out, geometry=geometry_dict, cell=cell) as off:
         off.write(_make_index_result(cell))
     lines = out.read_text().splitlines()
-    assert not any(line.startswith("probixi/int_radius") for line in lines)
     crystal = _section(lines, "--- Begin crystal", "--- End crystal")
     header_i = next(
         i for i, line in enumerate(crystal) if line.startswith("   h    k    l")
@@ -418,20 +409,39 @@ def test_reflection_rows_have_ten_columns_without_prediction(
     assert all(len(row.split()) == 10 for row in rows)
 
 
-def test_crystal_records_the_falloff_limit_beside_the_stream_limit(
+def test_crystal_writes_the_stream_limit_without_the_falloff_diagnostic(
     tmp_path, geometry_dict, cell
 ):
     out = tmp_path / "indexed.stream"
     result = _with_prediction(_make_index_result(cell))
     result.diffraction_limit = 3.2  # highest indexed peak, nm^-1
-    result.falloff_limit = 2.5  # I/sigma crossing, kept as a diagnostic
+    result.falloff_limit = 2.5  # I/sigma crossing: database only
     with DataOffloader(out, geometry=geometry_dict, cell=cell) as off:
         off.write(result)
     crystal = _section(
         out.read_text().splitlines(), "--- Begin crystal", "--- End crystal"
     )
-    assert any(
-        l.startswith("diffraction_resolution_limit = 3.2")
-        for l in crystal  # Noqa: E741
-    )
-    assert "probixi/falloff_limit = 2.500000 nm^-1" in crystal
+    assert any(ln.startswith("diffraction_resolution_limit = 3.2") for ln in crystal)
+    assert not any("falloff" in ln for ln in crystal)
+
+
+def test_masked_and_overlapping_spots_stay_out_of_the_stream(
+    tmp_path, geometry_dict, cell
+):
+    out = tmp_path / "indexed.stream"
+    result = _with_prediction(_make_index_result(cell))
+    result.predicted_n_pixels_total = torch.tensor([9, 9])
+    result.predicted_n_masked = torch.tensor([0, 2])
+    result.predicted_n_overlap = torch.tensor([0, 0])
+    result.peak_n_masked = torch.tensor([1.0, 0.0, 0.0, 0.0])
+    with DataOffloader(out, geometry=geometry_dict, cell=cell) as off:
+        off.write(result)
+    lines = out.read_text().splitlines()
+    peaks = lines[
+        lines.index("Peaks from peak search") + 2 : lines.index("End of peak list")
+    ]
+    assert len(peaks) == 3 and "num_peaks = 3" in lines
+    crystal = _section(lines, "--- Begin crystal", "--- End crystal")
+    assert "num_reflections = 1" in crystal
+    row = crystal[crystal.index("End of reflections") - 1]
+    assert row.split()[:3] == ["1", "0", "0"]

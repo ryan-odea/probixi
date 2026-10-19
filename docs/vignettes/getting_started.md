@@ -12,6 +12,7 @@ probixi -i files.lst -g my_geometry.geom -p my_unit.cell -o output.db
 - `-g` is a CrystFEL geometry file.
 - `-p` is a CrystFEL cell file. It only has to be approximate, because `probixi` re-centres it on the refined cells of the first lattices.
 - `-o` sets the output, and its extension sets the format. `.stream` writes a CrystFEL stream, and `.db` or `.duckdb` writes a DuckDB database.
+- `--mask` is optional. It names the HDF5 file that holds the bad-pixel mask and overrides the geometry's `mask_file`. Use it when the list names the `_data_*.h5` files of an Eiger run and the mask is in the master file, or when the geometry's mask path no longer resolves. See [Inputs and outputs](../overview/io.md).
 
 The device defaults to `auto`, which picks CUDA, then Apple MPS, then CPU.
 
@@ -35,7 +36,7 @@ The device defaults to `auto`, which picks CUDA, then Apple MPS, then CPU.
 | --- | --- | --- |
 | `--enrich-gate` | off | Drop lattices whose predicted spots land on signal no more often than chance. Recommended on strong data and still being tested as a possible default. See [Strong diffraction](good_diffraction.md). |
 | `--enrich-alpha` | 0.001 | Largest chance probability a lattice may have under `--enrich-gate`. |
-| `--aperture` | `auto` | Integration disk. `snr` maximises background-limited signal-to-noise, `flux` captures the whole spot, and `auto` keeps `snr` unless it would bias intensities differently between crystals. |
+| `--aperture` | `auto` | Integration disk. `snr` maximises background-limited signal-to-noise, `flux` captures the whole spot, and `auto` keeps `snr` unless it would bias intensities differently between crystals by more than the `flux` disk's extra background noise costs. |
 | `--max-lattices` | 1 | Lattices to search per frame. Indexed peaks are removed between passes. |
 | `--cell-calibrate` / `--no-cell-calibrate` | on | Re-centre the target cell on the median refined cell, at most twice. |
 | `--cell-calibrate-after` | 200 | Accepted lattices pooled before each re-centring. |
@@ -85,8 +86,8 @@ Four **result** tables are linked by `frame_id`, the first 16 hex digits of the 
 | --- | --- | --- |
 | `frames` | one per file-event | Provenance (`frame_index`, `filename`, `event`, `serial`), an `indexed` flag, the peak search (`n_peaks`, `peak_resolution_nm_inv`), the per-frame fluence scale (`scale`, `scale_sigma`), and `num_reflections` over every lattice on the frame. |
 | `crystals` | one per accepted lattice | Keyed by `crystal_id` and joined to its frame by `frame_id`. `lattice_index` orders the lattices on one frame. Counts (`n_indexed`, `num_reflections`), fit quality (`rmsd`, `mosaicity_deg`, `profile_radius_nm_inv`), enrichment (`enrichment`, `n_bright`, `enrich_p`), resolution (`diffraction_limit_nm_inv`), the refined cell (`cell_*`), and the reciprocal basis (`astar_*`, `bstar_*`, `cstar_*`, in nm⁻¹). |
-| `reflections` | one per integrated reflection | Keyed by `crystal_id` and `frame_id`. Miller indices `h`/`k`/`l`, `intensity`, `sigma`, `peak`, `background`, position (`fs`, `ss`, `panel`), and `resolution_nm_inv`. |
-| `peaks` | one per searched peak | Keyed by `frame_id`. Position (`fs`, `ss`, `panel`), `intensity`, and `resolution_nm_inv`. |
+| `reflections` | one per integrated reflection | Keyed by `crystal_id` and `frame_id`. Miller indices `h`/`k`/`l`, `intensity`, `sigma`, `peak`, `background`, position (`fs`, `ss`, `panel`), `resolution_nm_inv`, and the disk bookkeeping: `n_pixels` summed, `n_pixels_total` in the nominal disk, of which `n_masked` were lost to the mask or frame edge and `n_overlap` are shared with another predicted disk. A disk with any masked or shared pixel, or no usable pixel at all, is kept here but left out of the stream. |
+| `peaks` | one per searched peak | Keyed by `frame_id`. Position (`fs`, `ss`, `panel`), `intensity`, `resolution_nm_inv`, `n_pixels`, and `n_masked`, the blob pixels bordering the mask or frame edge; a peak with any is left out of the stream's peak list. |
 
 - Frames that never indexed still get a `frames` row with `indexed = FALSE`, so the indexing rate is `SELECT AVG(indexed::INT) FROM frames`. Under `--start`/`--stop` or multi-GPU runs, each writer fills only the frame range it owns.
 - A frame keeps one `frames` row however many lattices it yields. Count lattices with `SELECT COUNT(*) FROM crystals` and frames with `SELECT COUNT(*) FROM frames WHERE indexed`. Per-lattice statistics live on `crystals`.
