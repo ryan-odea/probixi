@@ -461,7 +461,9 @@ def test_db_keeps_flagged_and_unmeasured_reflections(geometry_dict, cell, tmp_pa
     result.predicted_hkl = torch.tensor(
         [[1, 0, 0], [0, 1, -1], [2, 0, 0]], dtype=torch.long
     )
-    result.predicted_positions = torch.tensor([[40.0, 55.0], [70.0, 30.0], [10.0, 10.0]])
+    result.predicted_positions = torch.tensor(
+        [[40.0, 55.0], [70.0, 30.0], [10.0, 10.0]]
+    )
     result.predicted_intensities = torch.tensor([1200.0, 800.0, 0.0])
     # the third disk had no usable pixel: sigma 0, fully masked
     result.predicted_sigmas = torch.tensor([35.0, 28.0, 0.0])
@@ -482,7 +484,11 @@ def test_db_keeps_flagged_and_unmeasured_reflections(geometry_dict, cell, tmp_pa
             "SELECT h, sigma, n_pixels, n_pixels_total, n_masked, n_overlap "
             "FROM reflections ORDER BY h"
         ).fetchall()
-        assert rows == [(0, 28.0, 8, 9, 1, 3), (1, 35.0, 9, 9, 0, 0), (2, 0.0, 0, 9, 9, 0)]
+        assert rows == [
+            (0, 28.0, 8, 9, 1, 3),
+            (1, 35.0, 9, 9, 0, 0),
+            (2, 0.0, 0, 9, 9, 0),
+        ]
         assert conn.execute("SELECT num_reflections FROM crystals").fetchone()[0] == 3
         assert conn.execute("SELECT MAX(n_masked) FROM peaks").fetchone()[0] == 2
     finally:

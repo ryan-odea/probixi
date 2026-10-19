@@ -33,7 +33,9 @@ def test_lattice_dtype_defaults_to_float32(geometry_dict, cell):
 
 def test_n_directions_scales_with_the_a_axis(geometry_dict, cell):
     # bR a=62.23 A -> 6000 * (62.23/55)^2; never below 6000; an explicit count is kept
-    assert Indexer(geometry_dict, cell).n_directions == round(6000 * (cell.a / 55.0) ** 2)
+    assert Indexer(geometry_dict, cell).n_directions == round(
+        6000 * (cell.a / 55.0) ** 2
+    )
     short = CellParams(10.0, 10.0, 10.0, *(math.pi / 2,) * 3)
     assert Indexer(geometry_dict, short).n_directions == 6000
     assert _make_indexer(geometry_dict, cell).n_directions == 1500

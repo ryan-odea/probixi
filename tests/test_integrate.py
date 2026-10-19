@@ -10,8 +10,8 @@ from probixi.indexer import IndexResult, RefineConfig, SeedConfig
 from probixi.indexer.indexer import Indexer
 from probixi.indexer.integrate import (
     choose_aperture,
-    integrate_rings,
     disk_overlap_counts,
+    integrate_rings,
     nearest_neighbour_distance,
     radial_profile,
     radii_from_profile,

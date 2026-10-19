@@ -130,7 +130,9 @@ def test_header_embeds_geometry_when_file_passed(
 def test_header_records_integration_radii(tmp_path, geometry_dict, cell):
     out = tmp_path / "indexed.stream"
     recipe = dict(radii=(1.5, 4.0, 7.361873833614299))
-    with DataOffloader(out, geometry=geometry_dict, cell=cell, integration=recipe) as off:
+    with DataOffloader(
+        out, geometry=geometry_dict, cell=cell, integration=recipe
+    ) as off:
         off.write(_make_index_result(cell))
 
     header = out.read_text().split("----- Begin chunk -----")[0].splitlines()

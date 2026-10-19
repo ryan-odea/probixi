@@ -34,9 +34,11 @@ def _crystfel_geometry(text: str) -> str:
     if not any(_BARE_WAVELENGTH.match(line) for line in lines):
         return text
     return "\n".join(
-        _BARE_WAVELENGTH.sub(r"\1\2 A\3", line)
-        if _BARE_WAVELENGTH.match(line)
-        else ";" + line if _ENERGY_LINE.match(line) else line
+        (
+            _BARE_WAVELENGTH.sub(r"\1\2 A\3", line)
+            if _BARE_WAVELENGTH.match(line)
+            else ";" + line if _ENERGY_LINE.match(line) else line
+        )
         for line in lines
     )
 
@@ -223,7 +225,7 @@ class DataOffloader(_StreamWriter):
     touches the detector mask, the frame edge or another predicted disk, and a
     peak bordering the mask, are left out of it; probixi's own quantities (the
     model background under each disk, pixel counts and per-crystal diagnostics)
-    are in :class:`~probixi.io.db.DuckDBOffloader`. 
+    are in :class:`~probixi.io.db.DuckDBOffloader`.
     Integration radii go in the header as an indexamajig-form ``--int-radius`` line.
     This will likely change in the future.
 

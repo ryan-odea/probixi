@@ -1455,19 +1455,17 @@ class Indexer:
             bg_var,
             n_total,
             n_masked,
-        ) = (
-            integrate_rings(
-                diagnostic_positions,  # already snapped to the observed peaks
-                excess,
-                var,
-                result.positions[:0].to(excess.dtype),
-                snap_radius=self.integrate.snap_radius,
-                mean=mean.to(excess.dtype) if mean is not None else None,
-                pixel_valid=valid_mask,
-                adu_per_photon=self._adu_per_photon(),
-                n_bg=self._bg_annulus_pixels,
-                radii=self._radii(),
-            )
+        ) = integrate_rings(
+            diagnostic_positions,  # already snapped to the observed peaks
+            excess,
+            var,
+            result.positions[:0].to(excess.dtype),
+            snap_radius=self.integrate.snap_radius,
+            mean=mean.to(excess.dtype) if mean is not None else None,
+            pixel_valid=valid_mask,
+            adu_per_photon=self._adu_per_photon(),
+            n_bg=self._bg_annulus_pixels,
+            radii=self._radii(),
         )
         peak_res_nm = None
         if result.positions.numel() > 0:
