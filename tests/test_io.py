@@ -229,6 +229,66 @@ def test_event_list_preserves_order_and_physical_identity(tmp_path, geometry_dic
     ]
 
 
+def test_per_event_data_path_reads_groups_and_named_events(tmp_path, geometry_dict):
+    from types import SimpleNamespace
+
+    import duckdb
+    import h5py
+
+    from probixi.io.db import DuckDBOffloader
+    from probixi.io.geometry import EV_ANGSTROM
+    from probixi.io.writer import DataOffloader
+    from probixi.probixi import Probixi
+
+    data = _frames(3, 8, 6)
+    h5_path = tmp_path / "run.h5"
+    with h5py.File(h5_path, "w") as f:
+        f.create_group("metadata")
+        for name, frame, ev in zip(
+            ("tag-10", "tag-9", "tag-100"), data, (9e3, 9.01e3, 9.02e3)
+        ):
+            f[f"{name}/data"] = frame
+            f[f"{name}/photon_energy_ev"] = ev
+    geom = tmp_path / "sacla.geom"
+    geom.write_text(
+        "clen = 0.05\nres = 20000\ndata = /%/data\n"
+        "photon_energy = /%/photon_energy_ev\n"
+        "p0/min_fs = 0\np0/max_fs = 5\np0/min_ss = 0\np0/max_ss = 7\n"
+        "p0/corner_x = -3\np0/corner_y = -4\n"
+    )
+    lst = tmp_path / "run.lst"
+    lst.write_text(f"{h5_path}\n")
+    loader = DataLoader(lst, geom)
+    assert loader.files[str(h5_path)].events == ["tag-9", "tag-10", "tag-100"]
+    frames = torch.stack(list(iter_frames(loader))).numpy()
+    np.testing.assert_array_equal(frames, data[[1, 0, 2]])
+    assert loader.metadata.geometry.wavelength == pytest.approx(EV_ANGSTROM / 9.01e3)
+
+    lst.write_text(f"{h5_path} tag-100//\n{h5_path} tag-9//\n{h5_path} tag-10//\n")
+    loader = DataLoader(lst, geom)
+    frames = torch.stack(list(iter_frames(loader))).numpy()
+    np.testing.assert_array_equal(frames, data[[2, 1, 0]])
+    writer = DataOffloader(tmp_path / "x.stream", geometry_dict, files=loader.files)
+    assert [
+        line
+        for i in range(3)
+        for line in writer._peak_search_lines(i, [], [], 0, "x")
+        if line.startswith("Event:")
+    ] == ["Event: tag-100//", "Event: tag-9//", "Event: tag-10//"]
+    with DuckDBOffloader(tmp_path / "x.duckdb", geometry_dict, files=loader.files):
+        pass
+    assert duckdb.connect(str(tmp_path / "x.duckdb")).execute(
+        "SELECT event, event_name, photon_energy_eV FROM frames ORDER BY frame_index"
+    ).fetchall() == [(2, "tag-100", 9.02e3), (0, "tag-9", 9.01e3), (1, "tag-10", 9e3)]
+    probe = SimpleNamespace(metadata=loader.metadata)
+    assert Probixi._resolve_frame_index(probe, f"{h5_path} tag-9//") == 1
+    assert Probixi._resolve_frame_index(probe, f"{h5_path}//2") == 0
+
+    lst.write_text(f"{h5_path} tag-1//\n")
+    with pytest.raises(ValueError, match="tag-1//"):
+        DataLoader(lst, geom)
+
+
 def test_event_list_cxi_uses_original_event_axis(tmp_path):
     from types import SimpleNamespace
 

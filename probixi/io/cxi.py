@@ -54,10 +54,13 @@ class PeakOffloader:
         geometry_file: Optional[PathLike] = None,
         files: Optional[dict] = None,
     ):
-        if any(isinstance(info, CbfInfo) for info in (files or {}).values()):
+        if any(
+            isinstance(info, CbfInfo) or getattr(info, "events", None)
+            for info in (files or {}).values()
+        ):
             raise ValueError(
                 "the CXI peak export links the HDF5 image stack and cannot "
-                "reference CBF input; write a .duckdb output instead"
+                "reference CBF or per-event input; write a .duckdb output instead"
             )
         self.out_dir = Path(path)
         self._geometry_file = Path(geometry_file) if geometry_file else None

@@ -10,7 +10,7 @@ import hdf5plugin  # noqa: F401  (registers bitshuffle)
 from .assemble import PanelPlacement, assembled_frame_shape, build_placements
 from .cbf import read_cbf_header
 from .cell import CellParams
-from .geometry import Geometry
+from .geometry import Geometry, match_events
 
 PathLike = Union[str, Path]
 
@@ -38,6 +38,10 @@ class H5Info:
     placements : list[PanelPlacement], optional
         Panel placement records for the assembly path; ``None`` selects the fast
         contiguous-slice path for a plain ``(N, ss, fs)`` stack.
+    events : list[str], optional
+        Names ``%`` stands for in a per-event data path (``/%/data``), one frame each.
+    photon_energy_eV : list[float], optional
+        Per-event energies from a ``photon_energy = /%/...`` geometry path.
     """
 
     filename: str
@@ -48,6 +52,8 @@ class H5Info:
     placements: Optional[list[PanelPlacement]] = None
     event_start: int = 0
     source_n_frames: Optional[int] = None
+    events: Optional[list[str]] = None
+    photon_energy_eV: Optional[list[float]] = None
 
 
 @dataclass
@@ -145,9 +151,7 @@ def scan_h5(path: PathLike, geometry: Optional[Geometry] = None) -> H5Info:
 
     assert geometry is not None  # layout is non-None, so geometry was too
     if "%" in str(layout.data_path):
-        raise ValueError(
-            f"per-event data paths ('%' in {layout.data_path!r}) are not supported"
-        )
+        return _scan_events(path, str(layout.data_path), geometry)
     with h5py.File(path, "r") as f:
         node = f.get(layout.data_path)
         if not isinstance(node, h5py.Dataset):
@@ -193,6 +197,29 @@ def scan_h5(path: PathLike, geometry: Optional[Geometry] = None) -> H5Info:
         frame_shape=frame_shape,
         raw_shape=raw_shape,
         placements=placements,
+    )
+
+
+def _scan_events(path: Path, pattern: str, geometry: Geometry) -> H5Info:
+    energy = geometry.parameters.get("photon_energy")
+    energies = None
+    with h5py.File(path, "r") as f:
+        events = match_events(f, pattern)
+        if not events:
+            raise ValueError(f"no datasets match {pattern!r} in {path}")
+        shape = tuple(int(s) for s in f[pattern.replace("%", events[0])].shape)
+        if isinstance(energy, str) and "%" in energy:
+            energies = [float(f[energy.replace("%", n)][()]) for n in events]
+    if len(shape) != 2:
+        raise ValueError(f"per-event dataset {pattern!r} is {len(shape)}D, not 2D")
+    return H5Info(
+        filename=str(path),
+        dataset=pattern,
+        n_frames=len(events),
+        frame_shape=shape,
+        raw_shape=shape,
+        events=events,
+        photon_energy_eV=energies,
     )
 
 

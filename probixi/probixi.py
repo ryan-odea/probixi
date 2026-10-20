@@ -395,6 +395,8 @@ class Probixi:
                 ev = index - offset + int(getattr(info, "event_start", 0))
                 if getattr(info, "eventless", False):
                     return f"{info.filename} //"
+                if getattr(info, "events", None) is not None:
+                    return f"{info.filename} {info.events[ev]}//"
                 return f"{info.filename} //{ev}"
             offset += n
         return f"frame {index}"
@@ -498,17 +500,21 @@ class Probixi:
         if isinstance(frame, str):
             name, _, ev = frame.partition("//")
             filename, event = name.strip(), ev
+            if " " in filename and not event:  # CrystFEL's named "file tag-N//"
+                filename, event = filename.rsplit(" ", 1)
         else:
             filename, event = frame
         # CrystFEL event strings carry a "//" prefix (e.g. "//136")
-        event = int(str(event).strip().lstrip("/") or 0)
+        event = str(event).strip().lstrip("/") or "0"
+        number = int(event) if event.isdigit() else -1
         base = Path(filename).name
         offset = 0
         for info in self.metadata.files.values():
-            if (
-                str(info.filename) == filename or Path(info.filename).name == base
-            ) and info.event_start <= event < info.event_start + info.n_frames:
-                return offset + event - info.event_start
+            if str(info.filename) == filename or Path(info.filename).name == base:
+                names = getattr(info, "events", None) or []
+                ev = names.index(event) if event in names else number
+                if info.event_start <= ev < info.event_start + info.n_frames:
+                    return offset + ev - info.event_start
             offset += int(info.n_frames)
         raise KeyError(f"frame source not found: {filename}")
 
@@ -527,13 +533,13 @@ class Probixi:
         Resolves ``frame`` to an absolute index, reads it off disk, runs peak
         finding (and indexing, when a target cell is configured) on that single
         frame, and writes an overlay image. Call :meth:`calibrate` first for
-        production-quality detection.
+        production-quality detection. Tiled detectors are drawn assembled.
 
         Parameters
         ----------
         frame : int or str or tuple
             Absolute frame index, an ``"image_filename//event"`` string, or a
-            ``(filename, event)`` pair.
+            ``(filename, event)`` pair; per-event files also take ``"file tag-N//"``.
         path : str or Path
             Output image path.
         peaks : bool, default True
@@ -575,6 +581,14 @@ class Probixi:
                 pk = torch.stack([ks.row_centroid, ks.col_centroid], dim=-1)
                 break
         mask = self._noise.valid_mask if self._noise is not None else None
+        asm = build_physical_assembler(self.loader.metadata.geometry)
+        if asm is not None:
+            assemble, _, _, place = asm
+            if mask is not None:
+                image = image.masked_fill(~mask.to(image.device), float("nan"))
+            image, mask = assemble(image.detach().cpu().numpy()), None
+            pk = None if pk is None else place(pk.detach().cpu().numpy())
+            refl = None if refl is None else place(refl.detach().cpu().numpy())
         render_kwargs.setdefault("title", f"frame {idx}")
         return render_frame(
             image, path=path, peaks=pk, reflections=refl, mask=mask, **render_kwargs
@@ -946,7 +960,7 @@ class Probixi:
         # geometries return None and keep the raw image.
         asm = build_physical_assembler(self.loader.metadata.geometry)
         if asm is not None:
-            assemble_fn, beam_yx, _ = asm
+            assemble_fn, beam_yx, *_ = asm
             kwargs.setdefault("assemble", assemble_fn)
             kwargs.setdefault("assembled_beam", beam_yx)
         return self.noise.diagnostics(

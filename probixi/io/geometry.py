@@ -457,14 +457,33 @@ def resolve_dynamic_fields(geometry: Geometry, data_file: PathLike) -> Geometry:
     return geometry
 
 
+def match_events(f: h5py.File, pattern: str) -> list[str]:
+    parent, _, rest = pattern.partition("%")
+    if "%" in rest:
+        raise ValueError(f"more than one '%' in {pattern!r} is not supported")
+    group = f.get(parent or "/")
+    if not isinstance(group, h5py.Group):
+        return []
+    names = [n for n in group if isinstance(group.get(n + rest), h5py.Dataset)]
+    return sorted(
+        names,
+        key=lambda n: [int(t) if t.isdigit() else t for t in re.split(r"(\d+)", n)],
+    )
+
+
 def _dataset_mean(f: h5py.File, path: str) -> Optional[float]:
-    node = f.get(path)
-    if not isinstance(node, h5py.Dataset):
+    paths = [path]
+    if "%" in path:
+        paths = [path.replace("%", n) for n in match_events(f, path)]
+    nodes = [f.get(p) for p in paths]
+    if not nodes or not all(isinstance(node, h5py.Dataset) for node in nodes):
         warnings.warn(
             f"geometry path {path!r} is not a dataset in {f.filename!r}; leaving unset"
         )
         return None
-    values = np.asarray(node[()], dtype=np.float32).ravel()
+    values = np.concatenate(
+        [np.asarray(node[()], dtype=np.float32).ravel() for node in nodes]
+    )
     finite = values[np.isfinite(values)]
     if finite.size == 0:
         warnings.warn(

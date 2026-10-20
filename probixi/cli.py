@@ -100,7 +100,7 @@ def _run_multi_gpu(device_list: list, opts: dict, refine, integrate) -> None:
     required=True,
     type=click.Path(exists=True, dir_okay=False),
     help="CrystFEL list file (.lst) of HDF5 or CBF (.cbf, .cbf.gz, .cbf.bz2) "
-    "inputs, optionally as 'path //event'.",
+    "inputs, optionally as 'path //event' or 'path tag-N//'.",
 )
 @click.option(
     "-g",
@@ -280,7 +280,8 @@ def _run_multi_gpu(device_list: list, opts: dict, refine, integrate) -> None:
     multiple=True,
     metavar="FRAME",
     help="Recall a frame and write a peaks/index overlay image. An absolute "
-    "index or 'image_filename//event'. Repeatable; renders before any run.",
+    "index, 'image_filename//event' or 'image_filename tag-N//'. Repeatable; "
+    "renders before any run.",
 )
 @click.option(
     "--render-out",
