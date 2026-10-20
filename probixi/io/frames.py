@@ -514,8 +514,6 @@ def iter_frames(
     if has_cbf:
         cbf_kernel = select("cbf", cuda)
         kernel = None
-    elif any(entries[name].events for name in chosen):
-        kernel = None  # nvCOMP inflates one deflate stream per frame slower than h5py
     else:
         kernel = select("decode", cuda)
     if kernel is not None:

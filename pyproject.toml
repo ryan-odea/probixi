@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "probixi"
-version = "0.8.2"
+version = "0.8.3"
 description = "Self-Calibrating Probabilistic Peak Finding for Serial X-Ray Crystallographic Data"
 readme = "README.md"
 license = { text = "MIT" }
@@ -42,6 +42,8 @@ dependencies = [
     "matplotlib",
     "pillow",
     "duckdb",
+    "deflate",
+    "pylzf",
 ]
 
 [project.scripts]

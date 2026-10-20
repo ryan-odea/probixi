@@ -289,6 +289,33 @@ def test_per_event_data_path_reads_groups_and_named_events(tmp_path, geometry_di
         DataLoader(lst, geom)
 
 
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs CUDA")
+@pytest.mark.parametrize(
+    "compression, data",
+    [
+        ("gzip", (_frames(11, 8, 6) * 10).astype(np.int16)),
+        ("lzf", np.tile(np.arange(6, dtype=np.int16), (11, 8, 1))),
+        ("lzf", _frames(11, 8, 6)),  # incompressible: stored raw, filters skipped
+    ],
+)
+def test_cpu_decoded_stack_reads_identically_on_gpu(tmp_path, compression, data):
+    import h5py
+
+    path = tmp_path / "gz.h5"
+    with h5py.File(path, "w") as f:
+        f.create_dataset(
+            "entry/data/data",
+            data=data,
+            chunks=(1, 8, 6),
+            compression=compression,
+            shuffle=True,
+        )
+    lst = tmp_path / "gz.lst"
+    lst.write_text(f"{path}\n")
+    frames = torch.cat(list(iter_frames(DataLoader(lst), device="cuda", batch_size=4)))
+    np.testing.assert_array_equal(frames.cpu().numpy(), data)
+
+
 def test_event_list_cxi_uses_original_event_axis(tmp_path):
     from types import SimpleNamespace
 
