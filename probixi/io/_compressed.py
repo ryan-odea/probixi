@@ -13,7 +13,6 @@ import h5py
 import numpy as np
 import torch
 from deflate import zlib_decompress
-from pylzf import decompress_into
 
 from .assemble import assemble_batch
 
@@ -288,6 +287,8 @@ def _cpu_chunks(sources, layouts, fds):
         if name not in fds:
             fds[name] = os.open(name, os.O_RDONLY)
         codec = None if raw else layout.codec
+        if codec == "LZF":
+            raise Unsupported("LZF-compressed chunks are read by h5py")
         chunks.append(
             (fds[name], info.byte_offset, info.size, codec, (0, 0 if raw else shuffled))
         )
@@ -297,8 +298,6 @@ def _cpu_chunks(sources, layouts, fds):
 def _load(fd, offset, size, codec, out):
     if codec is None:
         n = os.preadv(fd, [out], offset)
-    elif codec == "LZF":
-        n = decompress_into(os.pread(fd, size, offset), out)
     else:
         out[:] = np.frombuffer(
             zlib_decompress(os.pread(fd, size, offset), len(out)), np.uint8

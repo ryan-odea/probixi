@@ -14,7 +14,7 @@ Any pixel mask stored with the data is read and combined with the masks `probixi
 
 ## Reading frames
 
-Frames are read lazily. A background thread reads slices into a bounded queue a few batches ahead, which overlaps disk reads with GPU compute. For bitshuffle-LZ4 datasets chunked one frame per chunk, `probixi` reads the raw compressed chunks and decompresses them on the GPU, and uncompressed frames never pass through host memory. Deflate (gzip) and LZF chunks are read and decompressed by CPU threads and unshuffled on the GPU. Each frame or batch is moved to the chosen device and data type as it is handed out.
+Frames are read lazily. A background thread reads slices into a bounded queue a few batches ahead, which overlaps disk reads with GPU compute. For bitshuffle-LZ4 datasets chunked one frame per chunk, `probixi` reads the raw compressed chunks and decompresses them on the GPU, and uncompressed frames never pass through host memory. Deflate (gzip) chunks, and LZF chunks HDF5 stored uncompressed, are read and decompressed by CPU threads and unshuffled on the GPU. Each frame or batch is moved to the chosen device and data type as it is handed out.
 
 ## Outputs
 

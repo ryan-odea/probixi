@@ -43,7 +43,6 @@ dependencies = [
     "pillow",
     "duckdb",
     "deflate",
-    "pylzf",
 ]
 
 [project.scripts]
