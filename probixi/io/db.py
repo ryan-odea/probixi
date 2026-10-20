@@ -46,6 +46,8 @@ _FRAME_COLUMNS = (
     "scale_sigma",
     "num_reflections",
     "adu_per_photon",
+    "event_name",
+    "photon_energy_eV",
 )
 _CRYSTAL_COLUMNS = (
     "crystal_id",
@@ -169,7 +171,9 @@ CREATE TABLE frames (
     scale                    DOUBLE,
     scale_sigma              DOUBLE,
     num_reflections          INTEGER,
-    adu_per_photon           DOUBLE
+    adu_per_photon           DOUBLE,
+    event_name               VARCHAR,
+    photon_energy_eV         DOUBLE
 );
 
 CREATE TABLE crystals (
@@ -337,6 +341,11 @@ class DuckDBOffloader(_StreamWriter):
         self._n_refl = 0
         self._n_peak = 0
         self._seen: set[int] = set()
+        self._energies = {
+            str(info.filename): info.photon_energy_eV
+            for info in (files or {}).values()
+            if getattr(info, "photon_energy_eV", None) is not None
+        }
 
     def __enter__(self) -> "DuckDBOffloader":
         if self.path.exists():
@@ -616,6 +625,14 @@ class DuckDBOffloader(_StreamWriter):
             _as_float(scale_sigma),
             None if num_reflections is None else int(num_reflections),
             _as_float(gain),
+            *self._event_meta(filename, event),
+        )
+
+    def _event_meta(self, filename: str, event: int) -> tuple:
+        names, energies = self._event_names.get(filename), self._energies.get(filename)
+        return (
+            None if names is None else names[event],
+            None if energies is None else _as_float(energies[event]),
         )
 
     def _crystal_row(
@@ -681,6 +698,7 @@ class DuckDBOffloader(_StreamWriter):
                         idx,
                         filename,
                         physical_event,
+                        *self._event_meta(filename, physical_event),
                     )
                 )
                 if len(self._frame_rows) >= _FLUSH_ROWS:
@@ -869,12 +887,16 @@ def _as_float(value) -> Optional[float]:
     return v if math.isfinite(v) else None
 
 
-def _unindexed_frame_row(fid: str, idx: int, fname: str, event: int) -> tuple:
+def _unindexed_frame_row(
+    fid: str, idx: int, fname: str, event: int, name=None, energy=None
+) -> tuple:
     return (
         fid,
         int(idx),
         fname,
         int(event),
         False,
-        *([None] * (len(_FRAME_COLUMNS) - 5)),
+        *([None] * (len(_FRAME_COLUMNS) - 7)),
+        name,
+        energy,
     )

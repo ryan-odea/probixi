@@ -43,3 +43,23 @@ def test_xy_swaps_row_col_and_handles_empty():
     assert xy.tolist() == [[9, 5]]
     assert _xy(None) is None
     assert _xy(np.empty((0, 2))) is None
+
+
+def test_physical_place_matches_assemble(tmp_path):
+    from probixi.io import build_physical_assembler, read_geometry
+
+    geom = tmp_path / "tiled.geom"
+    geom.write_text(
+        "clen = 0.05\nres = 20000\nphoton_energy = 10000\n"
+        "a/min_fs = 0\na/max_fs = 7\na/min_ss = 0\na/max_ss = 15\n"
+        "a/fs = -1.0y\na/ss = +1.0x\na/corner_x = 2\na/corner_y = 10\n"
+        "b/min_fs = 0\nb/max_fs = 7\nb/min_ss = 16\nb/max_ss = 31\n"
+        "b/fs = +1.0y\nb/ss = -1.0x\nb/corner_x = -3\nb/corner_y = -9\n"
+    )
+    assemble, _, _, place = build_physical_assembler(read_geometry(geom))
+    raw = np.zeros((32, 8))
+    points = np.array([[1, 2], [5, 7], [20, 0], [31, 6]])
+    raw[points[:, 0], points[:, 1]] = np.arange(1, 5)
+    y, x = np.rint(place(points)).astype(int).T
+    np.testing.assert_array_equal(assemble(raw)[y, x], np.arange(1, 5))
+    assert np.isnan(place([[40.0, 0.0]])).all()

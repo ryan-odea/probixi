@@ -102,6 +102,11 @@ class _StreamWriter:
             for info in (files or {}).values()
             if getattr(info, "eventless", False)
         }
+        self._event_names = {
+            str(info.filename): info.events
+            for info in (files or {}).values()
+            if getattr(info, "events", None) is not None
+        }
         self._fh = None
         self._serial = 0
 
@@ -146,6 +151,11 @@ class _StreamWriter:
         g = self.geometry
         photon_eV = EV_ANGSTROM / float(g["wavelength"])
         filename, event = self._locate(frame_index)
+        names = self._event_names.get(filename)
+        if names is not None:
+            event_line = f"Event: {names[event]}//"
+        else:
+            event_line = f"Event: //{'' if filename in self._eventless else event}"
 
         peak_rows: list[str] = []
         recips = self._resolution_nm_inv_many(positions)
@@ -160,7 +170,7 @@ class _StreamWriter:
         return [
             "----- Begin chunk -----",
             f"Image filename: {filename}",
-            f"Event: //{'' if filename in self._eventless else event}",
+            event_line,
             f"Image serial number: {self._serial}",
             # only frames worth writing are emitted, so every chunk is a hit
             "hit = 1",

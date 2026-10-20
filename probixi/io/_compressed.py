@@ -1,13 +1,18 @@
+import os
 import queue
 import struct
 import threading
+from collections import deque
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import ExitStack
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+from itertools import islice
 from pathlib import Path
 
 import h5py
 import numpy as np
 import torch
+from deflate import zlib_decompress
 
 from .assemble import assemble_batch
 
@@ -25,7 +30,7 @@ class Layout:
 
     @classmethod
     def read(cls, d):
-        if d.ndim != 3 or d.chunks != (1, *d.shape[1:]):
+        if d.ndim not in (2, 3) or d.chunks != (1,) * (d.ndim - 2) + d.shape[-2:]:
             raise Unsupported("requires one complete frame per chunk")
         dt = d.dtype
         if (
@@ -43,7 +48,7 @@ class Layout:
             raise Unsupported("uncompressed input uses the ordinary transfer path")
         if ids[0] == 2:
             ids = ids[1:]
-        if len(ids) != 1 or ids[0] not in (1, 32004, 32008, 32015):
+        if len(ids) != 1 or ids[0] not in (1, 32000, 32004, 32008, 32015):
             raise Unsupported("unsupported HDF5 filter pipeline")
         fid, cd = filters[-1]
         if fid == 32008:
@@ -55,11 +60,11 @@ class Layout:
             if codec == "unknown":
                 raise Unsupported("unsupported bitshuffle compressor")
         else:
-            codec = {1: "Deflate", 32004: "LZ4", 32015: "Zstd"}[fid]
-        size = int(np.prod(d.shape[1:])) * dt.itemsize
+            codec = {1: "Deflate", 32000: "LZF", 32004: "LZ4", 32015: "Zstd"}[fid]
+        size = int(np.prod(d.shape[-2:])) * dt.itemsize
         if size >= 2**31:
             raise Unsupported("chunk exceeds supported decoder size")
-        return cls(dt, tuple(d.shape[1:]), filters, codec)
+        return cls(dt, tuple(d.shape[-2:]), filters, codec)
 
     @property
     def frame_bytes(self):
@@ -263,10 +268,74 @@ def _stage(d, start, end):
     return staged
 
 
+def _cpu_chunks(sources, layouts, fds):
+    kinds = set(layouts.values())
+    codecs = {k.codec for k in kinds}
+    if "LZF" in codecs and len(kinds) > 1:
+        raise Unsupported("mixed LZF layouts")
+    if len(kinds) != 1 or not codecs <= {"Deflate", "LZF"}:
+        return None
+    layout = kinds.pop()
+    skipped, shuffled = (1 << len(layout.filters)) - 1, int(layout.filters[0][0] == 2)
+    chunks = []
+    for source, i in sources:
+        info = source.id.get_chunk_info_by_coord((i, 0, 0)[-source.ndim :])
+        raw = info.filter_mask == skipped and info.size == layout.frame_bytes
+        if info.size == 0 or (info.filter_mask and not raw):
+            raise Unsupported("unallocated or partially filtered chunk")
+        name = source.file.filename
+        if name not in fds:
+            fds[name] = os.open(name, os.O_RDONLY)
+        codec = None if raw else layout.codec
+        if codec == "LZF":
+            raise Unsupported("LZF-compressed chunks are read by h5py")
+        chunks.append(
+            (fds[name], info.byte_offset, info.size, codec, (0, 0 if raw else shuffled))
+        )
+    return replace(layout, codec=None), chunks
+
+
+def _load(fd, offset, size, codec, out):
+    if codec is None:
+        n = os.preadv(fd, [out], offset)
+    else:
+        out[:] = np.frombuffer(
+            zlib_decompress(os.pread(fd, size, offset), len(out)), np.uint8
+        )
+        n = len(out)
+    if n != len(out):
+        raise ValueError(f"chunk at byte {offset} holds {n} of {len(out)} bytes")
+
+
+def _load_batches(pool, chunks, size, stride, ahead=3):
+    def submit(batch):
+        host = torch.empty((len(batch), stride), dtype=torch.uint8, pin_memory=True)
+        out = host[:, :size].numpy()
+        return (
+            host,
+            batch,
+            [pool.submit(_load, *c[:4], out[k]) for k, c in enumerate(batch)],
+        )
+
+    batches = (chunks[i : i + 8] for i in range(0, len(chunks), 8))
+    pending = deque(submit(b) for b in islice(batches, ahead))
+    while pending:
+        host, batch, futures = pending.popleft()
+        for future in futures:
+            future.result()
+        pending.extend(submit(b) for b in islice(batches, 1))
+        n = len(batch)
+        copies = [(k * stride, k * stride, size) for k in range(n)]
+        empty = torch.empty((0, 4), dtype=torch.int64)
+        yield host.view(-1), empty, copies, [c[4] for c in batch], [None] * n
+
+
 def _read_batches(entries, chosen, lo, hi, strict, decoder_for):
     """CPU producer owns all HDF5 handles and pinned staging; it launches no kernels."""
     with ExitStack() as stack:
-        opened = {}
+        opened, fds = {}, {}
+        pool = stack.enter_context(ThreadPoolExecutor(len(os.sched_getaffinity(0))))
+        stack.callback(lambda: [os.close(fd) for fd in fds.values()])
 
         def open_dataset(filename, name):
             if filename not in opened:
@@ -282,22 +351,36 @@ def _read_batches(entries, chosen, lo, hi, strict, decoder_for):
             last += info.event_start
             if first >= last:
                 continue
+            events = info.events
             d = (
                 open_dataset(info.filename, info.dataset)
-                if info.placements is None
+                if info.placements is None and events is None
                 else None
             )
             try:
-                if d is None:
+                if events is not None:
+                    sources = [
+                        (open_dataset(info.filename, info.dataset.replace("%", n)), 0)
+                        for n in events[first:last]
+                    ]
+                elif d is None:
                     raise Unsupported("detector assembly")
-                sources = _frame_sources(d, first, last, open_dataset)
+                else:
+                    sources = _frame_sources(d, first, last, open_dataset)
                 layouts = {
                     s.name + "@" + s.file.filename: Layout.read(s) for s, _ in sources
                 }
+                cpu = _cpu_chunks(sources, layouts, fds)
             except Unsupported as exc:
                 if strict:
                     raise RuntimeError(str(exc)) from exc
-                sources = None
+                sources = cpu = None
+            if cpu is not None:
+                layout, chunks = cpu
+                stride = decoder_for(layout).stride
+                for payload in _load_batches(pool, chunks, layout.frame_bytes, stride):
+                    yield layout, payload
+                continue
             for start in range(first, last, 8):
                 end = min(start + 8, last)
                 if sources is not None:
@@ -312,12 +395,10 @@ def _read_batches(entries, chosen, lo, hi, strict, decoder_for):
                         raws, parsed = [], []
                         try:
                             for source, i in selected:
-                                if (
-                                    source.id.get_chunk_info_by_coord((i, 0, 0)).size
-                                    == 0
-                                ):
+                                coord = (i, 0, 0)[-source.ndim :]
+                                if source.id.get_chunk_info_by_coord(coord).size == 0:
                                     raise Unsupported("unallocated fill chunk")
-                                raw = source.id.read_direct_chunk((i, 0, 0))
+                                raw = source.id.read_direct_chunk(coord)
                                 parsed.append(layout.blocks(raw[1], raw[0]))
                                 raws.append(raw)
                         except Unsupported as exc:
@@ -336,6 +417,11 @@ def _read_batches(entries, chosen, lo, hi, strict, decoder_for):
                         raise RuntimeError("mixed compression inside a decoding batch")
                 if d is not None:
                     yield None, _stage(d, start, end)
+                elif events is not None:
+                    paths = [info.dataset.replace("%", n) for n in events[start:end]]
+                    yield None, np.stack(
+                        [np.asarray(open_dataset(info.filename, p)) for p in paths]
+                    )
                 else:
                     f = opened.get(info.filename)
                     if f is None:

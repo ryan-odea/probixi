@@ -49,7 +49,7 @@ class DataLoader:
         batched IO. A CBF file (``.cbf``, ``.cbf.gz``, ``.cbf.bz2``) holds one
         image, so ``//0`` is its only event; unreadable files are skipped with a
         warning, but a CBF variant the reader does not decode raises
-        :class:`~probixi.io.cbf.UnsupportedCbf`.
+        :class:`~probixi.io.cbf.UnsupportedCbf`. Per-event paths take ``path tag-N//``.
     geometry_file : str or Path, optional
         CrystFEL ``.geom`` file to parse.
     cell_file : str or Path, optional
@@ -99,12 +99,11 @@ class DataLoader:
         total_frames = 0
         skipped = 0
         entries = self._read_list()
-        cache = _scan_cbf_files([entry.rsplit(" //", 1)[0] for entry in entries])
+        parsed = [_split_entry(entry) for entry in entries]
+        cache = _scan_cbf_files([path for path, _, _ in parsed])
+        positions: dict[str, dict[str, int]] = {}
         previous = None
-        for entry in entries:
-            parts = entry.rsplit(" //", 1)
-            path = parts[0]
-            event = int(parts[1]) if len(parts) == 2 and parts[1] else None
+        for entry, (path, name, event) in zip(entries, parsed):
             try:
                 if path not in cache:
                     cache[path] = scan_h5(path, geometry)
@@ -126,6 +125,14 @@ class DataLoader:
                 )
                 skipped += 1
                 continue
+            if name is not None:
+                if path not in positions:
+                    events = getattr(info, "events", None) or []
+                    positions[path] = {n: i for i, n in enumerate(events)}
+                if event is not None or name not in positions[path]:
+                    token = entry.rpartition(" ")[2]
+                    raise ValueError(f"event {token!r} not in {path}")
+                event = positions[path][name]
             if event is not None:
                 if not 0 <= event < info.n_frames:
                     raise ValueError(
@@ -183,6 +190,15 @@ class DataLoader:
         )
 
 
+def _split_entry(entry: str) -> tuple[str, Optional[str], Optional[int]]:
+    # "path", "path //N" or CrystFEL's named "path name//" -> (path, name, N)
+    path, _, event = entry.rpartition(" ")
+    if not path or "//" not in event:
+        return entry, None, None
+    name, _, index = event.partition("//")
+    return path.rstrip(), name or None, int(index) if index else None
+
+
 def _scan_cbf_files(paths: Sequence[str]) -> dict:
     # Header reads of thousands of files wait on the filesystem, so they overlap.
     # A failed scan is kept as the exception for the caller to report per entry.
@@ -234,7 +250,7 @@ def _iter_file_frames(info, f_lo, f_hi, pool, window, stop, fast_state):
     with h5py.File(info.filename, "r") as f:
         decoder = None
         dset = None
-        if info.placements is None:
+        if info.placements is None and info.events is None:
             node = f[info.dataset]
             if not isinstance(node, h5py.Dataset):
                 raise TypeError(
@@ -263,6 +279,9 @@ def _iter_file_frames(info, f_lo, f_hi, pool, window, stop, fast_state):
                 block = np.asarray(dset[i:end])
                 for k in range(block.shape[0]):
                     yield block[k]
+            elif info.events is not None:
+                for name in info.events[i:end]:
+                    yield np.asarray(f[info.dataset.replace("%", name)])
             else:
                 assert info.placements is not None
                 block = assemble_batch(f, i, end, info.placements, info.frame_shape)

@@ -261,11 +261,12 @@ def build_physical_assembler(geometry: Optional[Geometry]):
     Returns
     -------
     tuple or None
-        ``(assemble, beam_yx, out_shape)`` where ``assemble`` maps a raw
+        ``(assemble, beam_yx, out_shape, place)`` where ``assemble`` maps a raw
         ``(H, W)`` array to a physical ``(H', W')`` array (gaps ``NaN``) and
         ``beam_yx`` is the beam position in that output. ``None`` when the
         geometry is single-panel or lacks usable per-panel bases -- the raw image
         is already the physical image, so no assembly is needed.
+        ``place`` maps raw ``(row, col)`` points likewise, ``NaN`` off every panel.
     """
     if geometry is None:
         return None
@@ -300,4 +301,16 @@ def build_physical_assembler(geometry: Optional[Geometry]):
             out[Y, X] = img[min_ss : max_ss + 1, min_fs : max_fs + 1]
         return out
 
-    return assemble, beam_yx, (height, width)
+    def place(points: np.ndarray) -> np.ndarray:
+        rc = np.asarray(points, dtype=float).reshape(-1, 2)
+        out = np.full_like(rc, np.nan)
+        for min_ss, max_ss, min_fs, max_fs, cx, cy, fsx, fsy, ssx, ssy in bases:
+            ss_i, fs_j = rc[:, 0] - min_ss, rc[:, 1] - min_fs
+            on = (-0.5 <= ss_i) & (ss_i <= max_ss - min_ss + 0.5)
+            on &= (-0.5 <= fs_j) & (fs_j <= max_fs - min_fs + 0.5)
+            ss_i, fs_j = ss_i[on], fs_j[on]
+            out[on, 0] = y_max - (cy + fs_j * fsy + ss_i * ssy)
+            out[on, 1] = cx + fs_j * fsx + ss_i * ssx - x_min
+        return out
+
+    return assemble, beam_yx, (height, width), place
