@@ -106,7 +106,8 @@ The database holds run metadata as small tables (`geometry`, `panels`, `cell`) p
 - **`frames`**, keyed by `frame_id` (a hash of `filename//event`) with additional per-frame information
 - **`crystals`**, one row per accepted lattice, with its cell, orientation, and fit statistics
 - **`reflections`**, the integrated Miller indices (`h k l`, `I`, `sigma`, `peak`,
-  `background`, `fs/ss`, panel, resolution)
+  `background`, `fs/ss`, panel, resolution, the pixels integrated and the noise model's
+  background under them, and the predicted position before snapping)
 - **`peaks`**, the peak-search results per frame
 
 
