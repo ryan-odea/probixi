@@ -678,7 +678,7 @@ def _pass(cc, cc_r, valid, valid_r, partners, assignments):
 # CLI =====================================
 
 
-from .ambigator_cli import main  # noqa: E402
+from .cli.resolve import main  # noqa: E402
 
 if __name__ == "__main__":
     main()
