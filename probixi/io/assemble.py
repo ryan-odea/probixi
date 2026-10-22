@@ -136,11 +136,11 @@ def _read_static_mask_slab(dset: h5py.Dataset, geometry: Geometry) -> np.ndarray
     return np.asarray(dset[()])
 
 
-# NXdetector pixel_mask in an Eiger/JUNGFRAU master file, where --mask looks
-# when the geometry's own mask path is not in the file
+# fallback mask datasets: NeXus pixel_mask (Eiger/JUNGFRAU) and Cheetah's pixelmask
 NEXUS_MASK_PATHS = (
     "/entry/instrument/detector/pixel_mask",
     "/entry/instrument/detector/detectorSpecific/pixel_mask",
+    "/metadata/pixelmask",
 )
 
 
@@ -159,14 +159,14 @@ def read_mask(
     frame_shape: tuple[int, int],
     mask_file: Optional[str] = None,
 ) -> Optional[np.ndarray]:
-    # mask_file overrides the geometry's mask_file, e.g. with the master file
-    # when the list names its data files: the geometry's mask path is tried
-    # first, then the NeXus pixel_mask. Asked for explicitly, a mask it cannot
-    # supply raises instead of being skipped
+    # geometry's mask path, then the fallbacks; an explicit mask_file must be readable
     spec = geometry.mask_spec
     named = spec.mask_path if spec is not None else None
     paths = [named] if named is not None else []
-    if mask_file is not None:
+    bits_only = (
+        spec is not None and named is None and bool(spec.mask_good or spec.mask_bad)
+    )
+    if mask_file is not None or bits_only:
         paths += [p for p in NEXUS_MASK_PATHS if p != named]
     if not paths:
         return None

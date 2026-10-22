@@ -48,6 +48,15 @@ _FRAME_COLUMNS = (
     "adu_per_photon",
     "event_name",
     "photon_energy_eV",
+    "bg_low",
+    "bg_mid",
+    "bg_ring",
+    "bg_high",
+    "bg_edge",
+    "ice_score",
+    "peak_falloff",
+    "peak_size_px",
+    "peak_ecc",
 )
 _CRYSTAL_COLUMNS = (
     "crystal_id",
@@ -77,6 +86,8 @@ _CRYSTAL_COLUMNS = (
     "cstar_x",
     "cstar_y",
     "cstar_z",
+    "matched_frac",
+    "matched_posterior",
 )
 
 _REFLECTION_COLUMNS = (
@@ -99,6 +110,11 @@ _REFLECTION_COLUMNS = (
     "n_pixels_total",
     "n_masked",
     "n_overlap",
+    "pred_fs",
+    "pred_ss",
+    "peak_posterior",
+    "edge_px",
+    "peak_max",
 )
 
 _PANEL_COLUMNS = ("name", "min_fs", "max_fs", "min_ss", "max_ss")
@@ -114,6 +130,9 @@ _PEAK_COLUMNS = (
     "photons",
     "background_photons",
     "n_masked",
+    "posterior",
+    "intensity_max",
+    "eccentricity",
 )
 
 _SCHEMA = """
@@ -173,7 +192,16 @@ CREATE TABLE frames (
     num_reflections          INTEGER,
     adu_per_photon           DOUBLE,
     event_name               VARCHAR,
-    photon_energy_eV         DOUBLE
+    photon_energy_eV         DOUBLE,
+    bg_low                   DOUBLE,
+    bg_mid                   DOUBLE,
+    bg_ring                  DOUBLE,
+    bg_high                  DOUBLE,
+    bg_edge                  DOUBLE,
+    ice_score                DOUBLE,
+    peak_falloff             DOUBLE,
+    peak_size_px             DOUBLE,
+    peak_ecc                 DOUBLE
 );
 
 CREATE TABLE crystals (
@@ -203,7 +231,9 @@ CREATE TABLE crystals (
     bstar_z                  DOUBLE,
     cstar_x                  DOUBLE,
     cstar_y                  DOUBLE,
-    cstar_z                  DOUBLE
+    cstar_z                  DOUBLE,
+    matched_frac             DOUBLE,
+    matched_posterior        DOUBLE
 );
 
 CREATE TABLE reflections (
@@ -225,7 +255,12 @@ CREATE TABLE reflections (
     background_model_var DOUBLE,
     n_pixels_total    INTEGER,
     n_masked          INTEGER,
-    n_overlap         INTEGER
+    n_overlap         INTEGER,
+    pred_fs           DOUBLE,
+    pred_ss           DOUBLE,
+    peak_posterior    DOUBLE,
+    edge_px           DOUBLE,
+    peak_max          DOUBLE
 );
 
 CREATE TABLE peaks (
@@ -238,7 +273,10 @@ CREATE TABLE peaks (
     n_pixels           DOUBLE,
     photons            DOUBLE,
     background_photons DOUBLE,
-    n_masked           INTEGER
+    n_masked           INTEGER,
+    posterior          DOUBLE,
+    intensity_max      DOUBLE,
+    eccentricity       DOUBLE
 );
 """
 
@@ -341,11 +379,7 @@ class DuckDBOffloader(_StreamWriter):
         self._n_refl = 0
         self._n_peak = 0
         self._seen: set[int] = set()
-        self._energies = {
-            str(info.filename): info.photon_energy_eV
-            for info in (files or {}).values()
-            if getattr(info, "photon_energy_eV", None) is not None
-        }
+        self._recip_scale: dict[str, float] = {}  # lambda0 / frame lambda, by frame id
 
     def __enter__(self) -> "DuckDBOffloader":
         if self.path.exists():
@@ -381,6 +415,7 @@ class DuckDBOffloader(_StreamWriter):
         self._serial += 1
         filename, event = self._locate(result.frame_index)
         fid = frame_id(filename, event)
+        self._note_wavelength(fid, filename, event)
         peaks = self._peaks(result)
         total = 0
         refl_chunks, crystal_rows = [], []
@@ -402,6 +437,7 @@ class DuckDBOffloader(_StreamWriter):
             scale=crystals[0].scale if crystals else None,
             scale_sigma=crystals[0].scale_sigma if crystals else None,
             gain=self._gain(crystals[0] if crystals else None),
+            frame_stats=getattr(result, "frame_stats", None),
         )
         self._peak_chunks.append((fid, self._gain(result), peaks))
         self._refl_chunks += refl_chunks
@@ -426,6 +462,7 @@ class DuckDBOffloader(_StreamWriter):
         self._serial += 1
         filename, event = self._locate(result.frame_index)
         fid = frame_id(filename, event)
+        self._note_wavelength(fid, filename, event)
 
         stats = result.kept_stats
         peaks = _to_array(
@@ -440,6 +477,9 @@ class DuckDBOffloader(_StreamWriter):
             )
         )
         peaks = np.vstack([peaks, _nan_array(stats.n_masked, peaks.shape[1])])
+        peaks = np.vstack([peaks, _nan_array(stats.posterior_mean, peaks.shape[1])])
+        peaks = np.vstack([peaks, _nan_array(stats.intensity_max, peaks.shape[1])])
+        peaks = np.vstack([peaks, _nan_array(stats.eccentricity, peaks.shape[1])])
         gain = self._gain()
         frame = self._frame_row(
             fid,
@@ -456,6 +496,15 @@ class DuckDBOffloader(_StreamWriter):
         if result.frame_index is not None:
             self._seen.add(int(result.frame_index))
         self._maybe_flush()
+
+    def _note_wavelength(self, fid: str, filename: str, event: int) -> None:
+        wl = self._frame_geometry(filename, event)["wavelength"]
+        if wl != self.geometry["wavelength"]:
+            self._recip_scale[fid] = float(self.geometry["wavelength"]) / float(wl)
+
+    def _recips(self, fid, n, row, col) -> np.ndarray:
+        scale = np.repeat([self._recip_scale.get(f, 1.0) for f in fid], n)
+        return np.array(self._resolution_nm_inv_many(zip(row, col))) * scale
 
     def _maybe_flush(self) -> None:
         if (
@@ -477,7 +526,7 @@ class DuckDBOffloader(_StreamWriter):
         )
         geom_text = None
         if self._geometry_file and self._geometry_file.is_file():
-            geom_text = self._geometry_file.read_text()
+            geom_text = self._geometry_text()
         panels = _panel_bounds(g.get("panels"))
         self._conn.execute(
             "INSERT INTO geometry VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
@@ -547,6 +596,8 @@ class DuckDBOffloader(_StreamWriter):
                 _to_array(result.peak_background_sum, n),
                 _to_array(result.peak_n_pixels, n),
                 _nan_array(result.peak_n_masked, n),
+                _nan_array(result.peak_posterior, n),
+                *_aux_rows(getattr(result, "peak_aux", None), n),
             ]
         )
 
@@ -578,6 +629,20 @@ class DuckDBOffloader(_StreamWriter):
             flags = _reflection_flags(result)
             flags = np.array(flags) if flags else np.full((3, pos.shape[1]), np.nan)
             extras = np.vstack([extras, flags])
+            # unsnapped prediction, NaN if not recorded
+            raw = result.predicted_raw_positions
+            raw = (
+                _nan_array(None, 2 * pos.shape[1]).reshape(2, -1)
+                if raw is None
+                else _to_array(raw).T
+            )
+            extras = np.vstack([extras, raw])
+            extras = np.vstack(
+                [extras, _nan_array(result.predicted_peak_posterior, pos.shape[1])]
+            )
+            extras = np.vstack(
+                [extras, _nan_array(result.predicted_peak_max, pos.shape[1])]
+            )
         else:
             indexed = _to_array(result.indexed_mask, dtype=bool)
             pos = _to_array(result.positions)[indexed].T
@@ -591,7 +656,7 @@ class DuckDBOffloader(_StreamWriter):
                     zero,
                 ]
             )
-            extras = np.full((6, pos.shape[1]), np.nan)
+            extras = np.full((10, pos.shape[1]), np.nan)
         # an integrated disk with no usable pixel (sigma 0) is kept, flagged
         keep = np.isfinite(vals[1])
         if result.predicted_hkl is None:
@@ -611,6 +676,7 @@ class DuckDBOffloader(_StreamWriter):
         scale: Optional[float] = None,
         scale_sigma: Optional[float] = None,
         gain: Optional[float] = None,
+        frame_stats=None,
     ) -> tuple:
         return (
             fid,
@@ -626,6 +692,10 @@ class DuckDBOffloader(_StreamWriter):
             None if num_reflections is None else int(num_reflections),
             _as_float(gain),
             *self._event_meta(filename, event),
+            *_frame_stat_values(frame_stats),
+            None,  # peak_falloff, peak_size_px, peak_ecc: set on flush
+            None,
+            None,
         )
 
     def _event_meta(self, filename: str, event: int) -> tuple:
@@ -679,6 +749,7 @@ class DuckDBOffloader(_StreamWriter):
             cstar[0],
             cstar[1],
             cstar[2],
+            *_matched_values(result.predicted_peak_posterior),
         )
 
     def _emit_unindexed(self) -> None:
@@ -716,11 +787,14 @@ class DuckDBOffloader(_StreamWriter):
 
     def _flush_rows(self) -> None:
         assert self._conn is not None
-        peaks, recips = self._peak_table()
+        peaks, recips, summary = self._peak_table()
         i = _FRAME_COLUMNS.index("peak_resolution_nm_inv")
+        j = _FRAME_COLUMNS.index("peak_falloff")
         frames = [
-            (*row[:i], recip, *row[i + 1 :])
-            for row, recip in zip(self._frame_rows, recips.tolist())
+            (*row[:i], recip, *row[i + 1 : j], *map(_as_float, s), *row[j + 3 :])
+            for row, recip, s in zip(
+                self._frame_rows, recips.tolist(), summary.tolist()
+            )
         ]
         frames += self._frame_rows[len(recips) :]
         for table, columns in (
@@ -735,19 +809,27 @@ class DuckDBOffloader(_StreamWriter):
         self._crystal_rows.clear()
         self._refl_chunks.clear()
         self._peak_chunks.clear()
+        self._recip_scale.clear()
         self._n_refl = self._n_peak = 0
 
     def _peak_table(self) -> tuple[dict, np.ndarray]:
         if not self._peak_chunks:
-            return {}, np.zeros(0)
+            return {}, np.zeros(0), np.zeros((0, 3))
         fid, gain, chunks = zip(*self._peak_chunks)
         n = [c.shape[1] for c in chunks]
-        row, col, intensity, bg, npix, nmask = np.concatenate(chunks, axis=1)
-        recip = np.array(self._resolution_nm_inv_many(zip(row, col)))
+        row, col, intensity, bg, npix, nmask, post, imax, ecc = np.concatenate(
+            chunks, axis=1
+        )
+        recip = self._recips(fid, n, row, col)
         has = np.array(n) > 0
         starts = (np.cumsum(n) - n)[has]
         recips = np.zeros(len(n))
         recips[has] = np.fmax(0.0, np.fmax.reduceat(recip, starts))
+        summary = np.full((len(n), 3), np.nan)
+        if has.any():
+            summary[has] = _frame_peak_summary(
+                recip, intensity, npix, ecc, starts, np.array(n)[has]
+            )
         gain = np.repeat(gain, n)
         with np.errstate(all="ignore"):
             photons, bg_photons = (intensity + bg) / gain, bg / gain
@@ -762,8 +844,11 @@ class DuckDBOffloader(_StreamWriter):
             photons,
             bg_photons,
             _int_column(nmask),
+            (post, np.isfinite(post)),
+            (imax, np.isfinite(imax)),
+            (ecc, np.isfinite(ecc)),
         )
-        return dict(zip(_PEAK_COLUMNS, columns)), recips
+        return dict(zip(_PEAK_COLUMNS, columns)), recips, summary
 
     def _refl_table(self) -> dict:
         if not self._refl_chunks:
@@ -771,10 +856,20 @@ class DuckDBOffloader(_StreamWriter):
         cid, fid, pos, hkl, vals, extras = zip(*self._refl_chunks)
         n = [p.shape[1] for p in pos]
         row, col = np.concatenate(pos, axis=1)
-        n_pix, bg_model, bg_var, n_total, n_masked, n_overlap = np.concatenate(
-            extras, axis=1
-        )
+        (
+            n_pix,
+            bg_model,
+            bg_var,
+            n_total,
+            n_masked,
+            n_overlap,
+            raw_row,
+            raw_col,
+            post,
+            pmax,
+        ) = np.concatenate(extras, axis=1)
         recorded = ~np.isnan(n_pix)
+        edge = self._edge_px(col, row)
         columns = (
             np.repeat(cid, n),
             np.repeat(fid, n),
@@ -783,13 +878,18 @@ class DuckDBOffloader(_StreamWriter):
             col,
             row,
             self._panels_for(col, row),
-            np.array(self._resolution_nm_inv_many(zip(row, col))),
+            self._recips(fid, n, row, col),
             (np.where(recorded, n_pix, 0).astype(np.int64), recorded),
             (bg_model, np.isfinite(bg_model)),
             (bg_var, np.isfinite(bg_var)),
             _int_column(n_total),
             _int_column(n_masked),
             _int_column(n_overlap),
+            (raw_col, np.isfinite(raw_col)),
+            (raw_row, np.isfinite(raw_row)),
+            (post, np.isfinite(post)),
+            (edge, np.isfinite(edge)),
+            (pmax, np.isfinite(pmax)),
         )
         return dict(zip(_REFLECTION_COLUMNS, columns))
 
@@ -800,6 +900,19 @@ class DuckDBOffloader(_StreamWriter):
         fs, ss = fs[:, None], ss[:, None]
         inside = (min_fs <= fs) & (fs <= max_fs) & (min_ss <= ss) & (ss <= max_ss)
         return np.where(inside.any(axis=1), name[inside.argmax(axis=1)], self.panel)
+
+    def _edge_px(self, fs: np.ndarray, ss: np.ndarray) -> np.ndarray:
+        # distance to the spot's panel edge, NaN off-panel
+        if not self._panels:
+            return np.full(len(fs), np.nan)
+        _, min_fs, max_fs, min_ss, max_ss = map(np.array, zip(*self._panels))
+        fs, ss = fs[:, None], ss[:, None]
+        inside = (min_fs <= fs) & (fs <= max_fs) & (min_ss <= ss) & (ss <= max_ss)
+        dist = np.minimum(
+            np.minimum(fs - min_fs, max_fs - fs), np.minimum(ss - min_ss, max_ss - ss)
+        )
+        dist = np.where(inside, dist, np.inf).min(axis=1)
+        return np.where(np.isfinite(dist), dist, np.nan)
 
     def _insert(self, table: str, columns: dict) -> None:
         assert self._conn is not None
@@ -863,6 +976,53 @@ def _nan_array(t, n: int) -> np.ndarray:
     return np.full(n, np.nan) if t is None else _to_array(t)
 
 
+def _aux_rows(aux, n: int) -> tuple:
+    # (brightest pixel, eccentricity) per peak, NaN if absent
+    if aux is None:
+        return np.full(n, np.nan), np.full(n, np.nan)
+    a = _to_array(aux).reshape(n, -1)
+    return a[:, 0], a[:, 1]
+
+
+def _frame_stat_values(stats) -> list:
+    # the six frame background stats as floats, None if unavailable
+    if stats is None:
+        return [None] * 6
+    return [_as_float(v) for v in _to_array(stats).reshape(-1).tolist()]
+
+
+def _matched_values(post) -> tuple:
+    # snapped fraction of predictions and their mean posterior
+    if post is None or post.numel() == 0:
+        return None, None
+    hit = torch.isfinite(post)
+    mean = float(post[hit].mean()) if bool(hit.any()) else None
+    return float(hit.float().mean()), mean
+
+
+def _frame_peak_summary(recip, intensity, npix, ecc, starts, counts) -> np.ndarray:
+    # per frame: falloff -d ln I/d(1/d^2) (nm^2, NaN < 8 peaks), footprint, eccentricity
+    def sums(v):
+        return np.add.reduceat(v, starts)
+
+    pos = intensity > 0
+    with np.errstate(all="ignore"):
+        x = np.where(pos, recip * recip, 0.0)
+        y = np.where(pos, np.log(np.where(pos, intensity, 1.0)), 0.0)
+        n = np.fmax(sums(pos.astype(float)), 1.0)
+        sx, sy = sums(x), sums(y)
+        den = sums(x * x) - sx * sx / n
+        slope = (sums(x * y) - sx * sy / n) / den
+        falloff = np.where((sums(pos.astype(float)) >= 8) & (den > 0), -slope, np.nan)
+        fin = np.isfinite(ecc)
+        n_ecc = sums(fin.astype(float))
+        mean_ecc = np.where(
+            n_ecc > 0, sums(np.where(fin, ecc, 0.0)) / np.fmax(n_ecc, 1), np.nan
+        )
+        size = sums(npix) / counts
+    return np.column_stack([falloff, size, mean_ecc])
+
+
 def _int_column(values: np.ndarray) -> tuple:
     # float array with NaN for NULL -> (int64 values, valid) for _insert
     ok = np.isfinite(values)
@@ -890,13 +1050,94 @@ def _as_float(value) -> Optional[float]:
 def _unindexed_frame_row(
     fid: str, idx: int, fname: str, event: int, name=None, energy=None
 ) -> tuple:
-    return (
-        fid,
-        int(idx),
-        fname,
-        int(event),
-        False,
-        *([None] * (len(_FRAME_COLUMNS) - 7)),
-        name,
-        energy,
-    )
+    row: list = [None] * len(_FRAME_COLUMNS)
+    row[:5] = (fid, int(idx), fname, int(event), False)
+    row[_FRAME_COLUMNS.index("event_name")] = name
+    row[_FRAME_COLUMNS.index("photon_energy_eV")] = energy
+    return tuple(row)
+
+
+def attach_frame_values(path: PathLike, table: PathLike, sep: str = "\t") -> list[str]:
+    """Attach per-frame values from a text table to a database's ``frames`` rows.
+
+    The table has a header ``filename event <name> ...`` (events as ``//N`` or
+    plain integers); every further column becomes a DOUBLE column of
+    ``frames``, matched on filename and event (by basename when the recorded
+    paths differ). Frames the table does not name keep NULL, as do empty or
+    ``nan`` cells. Beam-synchronous diagnostics (pulse energy, spectral width)
+    attached this way reach a merging program as per-image quantities.
+
+    Parameters
+    ----------
+    path : str or Path
+        Database written by :class:`DuckDBOffloader`, updated in place.
+    table : str or Path
+        Text table with a header row, ``sep``-separated.
+    sep : str, default tab
+        Column separator.
+
+    Returns
+    -------
+    list of str
+        The column names attached.
+    """
+    import csv
+
+    with open(table, newline="") as fh:
+        rows = list(csv.DictReader(fh, delimiter=sep))
+    names = [
+        c for c in (rows[0].keys() if rows else []) if c not in ("filename", "event")
+    ]
+    if not names:
+        raise ValueError(f"{table}: no value columns beyond filename and event")
+    conn = duckdb.connect(str(path))
+    try:
+        have = {r[0] for r in conn.execute("DESCRIBE frames").fetchall()}
+        for name in names:
+            if name not in have:
+                conn.execute(f'ALTER TABLE frames ADD COLUMN "{name}" DOUBLE')
+        recorded = {
+            f
+            for (f,) in conn.execute("SELECT DISTINCT filename FROM frames").fetchall()
+        }
+        by_base = {Path(f).name: f for f in recorded}
+        filenames = [
+            (
+                r["filename"]
+                if r["filename"] in recorded
+                else by_base.get(Path(r["filename"]).name, r["filename"])
+            )
+            for r in rows
+        ]
+        data = {
+            "filename": np.array(filenames),
+            "event": np.array(
+                [int(str(r["event"]).strip().lstrip("/") or 0) for r in rows]
+            ),
+        }
+        for name in names:
+            data[name] = np.array(
+                [
+                    (
+                        float(r[name])
+                        if r[name] not in (None, "", "nan", "NaN")
+                        else np.nan
+                    )
+                    for r in rows
+                ]
+            )
+        conn.register("frame_values", data)
+        try:
+            sets = ", ".join(
+                f'"{n}" = CASE WHEN isnan(v."{n}") THEN NULL ELSE v."{n}" END'
+                for n in names
+            )
+            conn.execute(
+                f"UPDATE frames SET {sets} FROM frame_values v "
+                "WHERE frames.filename = v.filename AND frames.event = v.event"
+            )
+        finally:
+            conn.unregister("frame_values")
+    finally:
+        conn.close()
+    return names

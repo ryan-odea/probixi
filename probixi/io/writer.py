@@ -27,6 +27,7 @@ PROFILE_RADIUS_MIN_NM_INV = 0.0005
 PROFILE_RADIUS_MAX_NM_INV = 0.020
 _BARE_WAVELENGTH = re.compile(r"^(\s*wavelength\s*=\s*)([-+.\deE]+)(\s*(;.*)?)$")
 _ENERGY_LINE = re.compile(r"^\s*(photon_energy|electron_voltage)\s*=")
+_CLEN_LINE = re.compile(r"^(\s*clen\s*=\s*)([-+.\deE]+)", re.M)
 
 
 def _crystfel_geometry(text: str) -> str:
@@ -107,6 +108,11 @@ class _StreamWriter:
             for info in (files or {}).values()
             if getattr(info, "events", None) is not None
         }
+        self._energies = {
+            str(info.filename): info.photon_energy_eV
+            for info in (files or {}).values()
+            if getattr(info, "photon_energy_eV", None) is not None
+        }
         self._fh = None
         self._serial = 0
 
@@ -135,8 +141,7 @@ class _StreamWriter:
             lines.append(f"indexamajig --integration=rings-cen --int-radius={radii}")
         if self._geometry_file and self._geometry_file.is_file():
             lines.append("----- Begin geometry file -----")
-            text = self._geometry_file.read_text().rstrip("\n")
-            lines.append(_crystfel_geometry(text))
+            lines.append(_crystfel_geometry(self._geometry_text().rstrip("\n")))
             lines.append("----- End geometry file -----")
         self._fh.write("\n".join(lines) + "\n")
 
@@ -148,9 +153,9 @@ class _StreamWriter:
         num_peaks: int,
         indexed_by: str,
     ) -> list[str]:
-        g = self.geometry
-        photon_eV = EV_ANGSTROM / float(g["wavelength"])
         filename, event = self._locate(frame_index)
+        g = self._frame_geometry(filename, event)
+        photon_eV = EV_ANGSTROM / float(g["wavelength"])
         names = self._event_names.get(filename)
         if names is not None:
             event_line = f"Event: {names[event]}//"
@@ -158,7 +163,7 @@ class _StreamWriter:
             event_line = f"Event: //{'' if filename in self._eventless else event}"
 
         peak_rows: list[str] = []
-        recips = self._resolution_nm_inv_many(positions)
+        recips = self._resolution_nm_inv_many(positions, g)
         max_recip = max(recips, default=0.0)
         for (row, col), intensity, recip in zip(positions, intensities, recips):
             # fs = column (fast scan), ss = row (slow scan)
@@ -190,12 +195,30 @@ class _StreamWriter:
             "End of peak list",
         ]
 
-    def _resolution_nm_inv_many(self, positions) -> list[float]:
+    def _geometry_text(self) -> str:
+        # geometry file text, clen moved by the camera-length fit
+        text = self._geometry_file.read_text()
+        shift = self.geometry.get("clen_shift")
+        if not shift:
+            return text
+        return _CLEN_LINE.sub(
+            lambda m: f"{m.group(1)}{float(m.group(2)) + shift:.6f}", text, count=1
+        )
+
+    def _frame_geometry(self, filename: str, event: int) -> dict:
+        e = self._energies.get(filename)
+        if e is None or not 0 <= event < len(e) or not e[event] > 0:
+            return self.geometry
+        return {**self.geometry, "wavelength": EV_ANGSTROM / float(e[event])}
+
+    def _resolution_nm_inv_many(self, positions, geometry=None) -> list[float]:
         pos = [(float(row), float(col)) for row, col in positions]
         if not pos:
             return []
         q = detector_to_q(
-            torch.tensor(pos, dtype=torch.float32), self.geometry, dtype=torch.float32
+            torch.tensor(pos, dtype=torch.float32),
+            geometry or self.geometry,
+            dtype=torch.float32,
         )
         return (torch.linalg.vector_norm(q, dim=-1) * A_INV_TO_NM_INV).tolist()
 
@@ -393,7 +416,11 @@ class DataOffloader(_StreamWriter):
         refl = [r for r in refl if math.isfinite(r[3]) and r[3] > 0.0]
 
         max_recip = max(
-            self._resolution_nm_inv_many([rc for rc, *_ in refl]), default=0.0
+            self._resolution_nm_inv_many(
+                [rc for rc, *_ in refl],
+                self._frame_geometry(*self._locate(result.frame_index)),
+            ),
+            default=0.0,
         )
         limit = result.diffraction_limit
         drl_recip = limit if (limit is not None and math.isfinite(limit)) else max_recip
