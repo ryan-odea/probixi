@@ -7,7 +7,7 @@ import sim
 import torch
 
 from probixi.io.geometry import EV_ANGSTROM
-from probixi.multigpu import (
+from probixi.tools.multigpu import (
     BlockConfig,
     block_bounds,
     merge_streams,
@@ -163,7 +163,7 @@ def test_merge_streams_skips_zero_byte_first_part(tmp_path):
 
 
 def test_validate_cuda_devices_rejects_missing(monkeypatch):
-    from probixi import multigpu
+    from probixi.tools import multigpu
 
     # no CUDA -> requesting a cuda device fails fast (before any spawn)
     monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
@@ -174,7 +174,7 @@ def test_validate_cuda_devices_rejects_missing(monkeypatch):
 
 
 def test_env_int_rejects_non_integer(monkeypatch):
-    from probixi.multigpu import _env_int
+    from probixi.tools.multigpu import _env_int
 
     monkeypatch.setenv("RANK", "notanint")
     with pytest.raises(ValueError):

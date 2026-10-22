@@ -112,6 +112,21 @@ def test_read_mask_external_file_2d(tmp_path):
     assert bool(good[0, 0])
 
 
+def test_read_mask_bits_without_a_path_read_the_cheetah_pixelmask(tmp_path):
+    mask = np.zeros((8, 6), dtype=np.uint16)
+    mask[2, 3] = 1
+    data = sim.write_external_mask(
+        tmp_path / "run.h5", mask, mask_path="/metadata/pixelmask"
+    )
+    text = _single_panel_geom(tmp_path, mask_good="0x00", mask_bad="0xFF").read_text()
+    (tmp_path / "bits.geom").write_text(
+        "\n".join(x for x in text.splitlines() if not x.startswith("mask ="))
+    )
+    good = read_mask(read_geometry(tmp_path / "bits.geom"), str(data), (8, 6))
+    assert not bool(good[2, 3])
+    assert bool(good[0, 0])
+
+
 def test_read_mask_missing_file_warns_and_returns_none(tmp_path):
     geom = read_geometry(_single_panel_geom(tmp_path, mask_file="/no/such/file.h5"))
     with pytest.warns(UserWarning):

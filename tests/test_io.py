@@ -238,7 +238,7 @@ def test_per_event_data_path_reads_groups_and_named_events(tmp_path, geometry_di
     from probixi.io.db import DuckDBOffloader
     from probixi.io.geometry import EV_ANGSTROM
     from probixi.io.writer import DataOffloader
-    from probixi.probixi import Probixi
+    from probixi.probixi import Probixi, _frame_wavelengths
 
     data = _frames(3, 8, 6)
     h5_path = tmp_path / "run.h5"
@@ -275,6 +275,16 @@ def test_per_event_data_path_reads_groups_and_named_events(tmp_path, geometry_di
         for line in writer._peak_search_lines(i, [], [], 0, "x")
         if line.startswith("Event:")
     ] == ["Event: tag-100//", "Event: tag-9//", "Event: tag-10//"]
+    # chunks and lattice math use each event's own energy
+    assert [
+        line
+        for i in range(3)
+        for line in writer._peak_search_lines(i, [], [], 0, "x")
+        if line.startswith("photon_energy_eV")
+    ] == [f"photon_energy_eV = {e:.2f}" for e in (9.02e3, 9.01e3, 9e3)]
+    assert _frame_wavelengths(loader.metadata) == pytest.approx(
+        [EV_ANGSTROM / e for e in (9.02e3, 9.01e3, 9e3)]
+    )
     with DuckDBOffloader(tmp_path / "x.duckdb", geometry_dict, files=loader.files):
         pass
     assert duckdb.connect(str(tmp_path / "x.duckdb")).execute(

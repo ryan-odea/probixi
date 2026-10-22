@@ -119,7 +119,7 @@ def test_peak_photometry_survives_the_index_peak_cap(geometry_dict, cell):
     intensities = torch.arange(n).float()
     bg = intensities * 10.0  # tie each peak's photometry to its intensity
     npix = intensities + 100.0
-    pos, inten, _, _, out_bg, out_npix, _ = idxr._cap_peak_data(
+    pos, inten, _, _, out_bg, out_npix, _, _ = idxr._cap_peak_data(
         positions, intensities, None, None, bg, npix
     )
     assert len(pos) == 6 and len(out_bg) == 6 and len(out_npix) == 6

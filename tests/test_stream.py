@@ -445,3 +445,19 @@ def test_masked_and_overlapping_spots_stay_out_of_the_stream(
     assert "num_reflections = 1" in crystal
     row = crystal[crystal.index("End of reflections") - 1]
     assert row.split()[:3] == ["1", "0", "0"]
+
+
+def test_header_geometry_carries_a_refitted_camera_length(
+    tmp_path, geometry_dict, cell, geom_file
+):
+    out = tmp_path / "x.stream"
+    g = dict(geometry_dict, clen_shift=-0.001)
+    with DataOffloader(out, g, cell=cell, geometry_file=geom_file):
+        pass
+    old = next(
+        x for x in geom_file.read_text().splitlines() if x.strip().startswith("clen")
+    )
+    new = next(x for x in out.read_text().splitlines() if x.strip().startswith("clen"))
+    assert float(new.split("=")[1].split(";")[0]) == pytest.approx(
+        float(old.split("=")[1].split(";")[0]) - 0.001
+    )

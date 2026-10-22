@@ -10,6 +10,7 @@ import torch
 from probixi.io import read_geometry
 from probixi.peakfinding.noise._radial import RotationalNoise
 from probixi.peakfinding.noise.calibrate import (
+    background_fluctuation_ratio,
     calibrate_noise,
     calibrate_threshold,
     fit_photon_transfer,
@@ -144,6 +145,34 @@ def test_calibrate_threshold_meets_target_and_stays_in_grid():
     assert tc.n_quiet_frames >= 4
 
 
+def test_calibrate_threshold_counts_noise_on_the_mirrored_tail_of_hit_only_frames():
+    shape = (192, 192)
+    quiet = _frames(shape, 32, background=100.0, noise_sigma=10.0, seed=5)
+    nm = NoiseModel(shape, mode="online", dtype=DTYPE)
+    calibrate_noise(nm, quiet, rng_seed=0).apply(nm)
+    rng = np.random.default_rng(1)
+    yy, xx = np.mgrid[: shape[0], : shape[1]]
+    hits = []
+    for f in quiet:  # spots on every frame: none quiet
+        spots = np.zeros(shape, dtype=np.float32)
+        for r, c in rng.uniform(10, 182, size=(10, 2)):
+            spots += 300.0 * np.exp(-((yy - r) ** 2 + (xx - c) ** 2) / 2.0)
+        hits.append(f + torch.from_numpy(spots))
+    ref = calibrate_threshold(nm, quiet, target_noise_peaks=5.0, rng_seed=0)
+    tc = calibrate_threshold(nm, hits, target_noise_peaks=5.0, rng_seed=0)
+    assert ref.n_quiet_frames >= 4 and ref.threshold > 3.0
+    assert tc.n_quiet_frames == 0
+    assert abs(tc.threshold - ref.threshold) <= 0.5
+
+
+def test_decaying_noise_model_starts_as_a_running_average():
+    nm = NoiseModel((8, 8), mode="online", decay=0.01, dtype=DTYPE)
+    for k in range(5):
+        nm.update(torch.full((8, 8), 100.0 + k, dtype=DTYPE))
+    # an EWMA from zero would sit near 5 % of the level
+    assert float(nm.pixel.mean().mean()) == pytest.approx(102.0, abs=1e-3)
+
+
 def test_fit_photon_transfer_recovers_positive_gain():
     shape = (96, 96)
     # poisson-like data: mean varies across pixels and var ~ read_var + gain*mean.
@@ -167,6 +196,26 @@ def test_fit_photon_transfer_recovers_positive_gain():
     assert 0.5 * gain < fit_gain < 2.0 * gain
     assert nm.gain == fit_gain
     assert nm.read_var == read_var
+
+
+def test_background_fluctuation_ratio_flags_shot_to_shot_level_changes():
+    shape = (64, 64)
+    rng = np.random.Generator(np.random.PCG64(5))
+    level = np.linspace(100.0, 200.0, shape[1], dtype=np.float32)[None].repeat(64, 0)
+
+    def ratio(scales):
+        frames = [
+            torch.from_numpy(rng.poisson(level * s).astype(np.float32)).to(DTYPE)
+            for s in scales
+        ]
+        nm = NoiseModel(shape, mode="online", robust_update=False, dtype=DTYPE)
+        calibrate_noise(nm, frames, rng_seed=0).apply(nm)
+        return background_fluctuation_ratio(nm, frames, 2, 5)
+
+    # steady exposure
+    assert ratio(np.ones(32)) < 1.3
+    # +-30 % shot-to-shot level
+    assert ratio(rng.uniform(0.7, 1.3, 32)) > 1.5
 
 
 # --- radial annuli must follow the panel geometry, not the array index -------

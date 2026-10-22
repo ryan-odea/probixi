@@ -32,7 +32,7 @@ def test_help_renders_without_torch():
 
 def test_resolve_help_renders_without_torch():
     r = _run(
-        "from click.testing import CliRunner; from probixi.ambigator_cli import main; "
+        "from click.testing import CliRunner; from probixi.cli.resolve import main; "
         "res = CliRunner().invoke(main, ['--help']); "
         "assert res.exit_code == 0, res.output; print(res.output)"
     )

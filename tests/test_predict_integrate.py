@@ -360,3 +360,94 @@ def test_detector_q_max_uses_panel_corners_not_raw_array_corners(cell):
         .max()
     )
     assert both == pytest.approx(expect, rel=1e-6)
+
+
+def test_resolution_limit_ignores_one_stray_high_resolution_peak(cell):
+    from probixi.indexer.forward import detector_to_q
+    from probixi.indexer.indexer import Indexer, IndexResult
+
+    geom = _synthetic_geometry()
+    A = _A(cell)
+    pred = predict_reflections(
+        A, geom, q_max=detector_q_max(geom, SHAPE), frame_shape=SHAPE
+    )
+    order = torch.argsort(pred.resolution)
+    mid = len(order) // 2
+    pick = torch.cat(
+        [order[mid : mid + 6], order[-1:]]
+    )  # six mid-res peaks + one at the edge
+    zeros = torch.zeros(7)
+    result = IndexResult(
+        frame_index=0,
+        n_peaks=7,
+        n_indexed=7,
+        rmsd=0.0,
+        A=A,
+        U=_orientation(),
+        B=cell_to_B(cell, dtype=torch.float32),
+        cell=cell,
+        indexed_mask=torch.ones(7, dtype=torch.bool),
+        hkl=pred.hkl[pick],
+        positions=pred.positions[pick],
+        intensities=zeros,
+        sigmas=zeros,
+        loss_history=torch.zeros(1),
+    )
+    frame = torch.zeros(SHAPE)
+    Indexer(geom, cell)._integrate_result(
+        result, frame, torch.ones(SHAPE), torch.ones(SHAPE, dtype=torch.bool), frame
+    )
+    q = detector_to_q(pred.positions[pick], geom).norm(dim=-1) * 10.0
+    assert result.diffraction_limit == pytest.approx(
+        float(q.sort().values[-2]), rel=1e-4
+    )
+
+
+def test_enrich_p_rejects_a_lattice_that_only_explains_its_own_peaks(cell):
+    from probixi.indexer.indexer import Indexer, IndexResult
+
+    shape = (1024, 1024)
+    geom = sim.synthetic_geometry(h=1024, w=1024, clen=0.1, wavelength=WAVELENGTH)
+    A = _A(cell)
+    pred = predict_reflections(
+        A, geom, q_max=detector_q_max(geom, shape), frame_shape=shape
+    )
+    order = torch.argsort(pred.resolution)
+    pick = order[torch.linspace(0, len(order) - 1, 9).long()]
+    noise = torch.randn(shape, generator=torch.Generator().manual_seed(0))
+
+    def integrate(spots):
+        excess = noise.clone()
+        for r, c in pred.positions[spots].round().long().tolist():
+            excess[r - 1 : r + 2, c - 1 : c + 2] += 20.0
+        zeros = torch.zeros(len(pick))
+        result = IndexResult(
+            frame_index=0,
+            n_peaks=len(pick),
+            n_indexed=len(pick),
+            rmsd=0.0,
+            A=A,
+            U=_orientation(),
+            B=cell_to_B(cell, dtype=torch.float32),
+            cell=cell,
+            indexed_mask=torch.ones(len(pick), dtype=torch.bool),
+            hkl=pred.hkl[pick],
+            positions=pred.positions[pick],
+            intensities=zeros,
+            sigmas=zeros,
+            loss_history=torch.zeros(1),
+        )
+        Indexer(geom, cell)._integrate_result(
+            result,
+            excess,
+            torch.ones(shape),
+            torch.ones(shape, dtype=torch.bool),
+            torch.zeros(shape),
+            bright_threshold=5.0,
+        )
+        return result
+
+    # far above chance on the spots it was fitted to, nothing anywhere else
+    chance = integrate(pick)
+    assert chance.enrichment > 10 and chance.enrich_p > 1e-3
+    assert integrate(torch.arange(len(pred))).enrich_p < 1e-6

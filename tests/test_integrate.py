@@ -11,13 +11,16 @@ from probixi.indexer.indexer import Indexer
 from probixi.indexer.integrate import (
     choose_aperture,
     disk_overlap_counts,
+    falloff_resolution_limit,
     integrate_rings,
     nearest_neighbour_distance,
     radial_profile,
     radii_from_profile,
+    radius_by_shell,
     ring_sums,
     snap_positions,
     snr_disk_radius,
+    unexplained_signal_p,
 )
 
 SHAPE = (64, 64)
@@ -33,7 +36,7 @@ def _flat_frame(background: float, sigma: float = 0.0):
 def test_snap_positions_moves_prediction_onto_nearby_observed():
     predicted = torch.tensor([[10.0, 10.0]])
     observed = torch.tensor([[12.0, 10.0]])
-    positions, snapped = snap_positions(predicted, observed, radius=5.0)
+    positions, snapped, _ = snap_positions(predicted, observed, radius=5.0)
     assert bool(snapped.all())
     assert torch.allclose(positions, observed)
 
@@ -41,17 +44,19 @@ def test_snap_positions_moves_prediction_onto_nearby_observed():
 def test_snap_positions_leaves_prediction_beyond_radius():
     predicted = torch.tensor([[10.0, 10.0]])
     observed = torch.tensor([[30.0, 10.0]])
-    positions, snapped = snap_positions(predicted, observed, radius=5.0)
+    positions, snapped, _ = snap_positions(predicted, observed, radius=5.0)
     assert not bool(snapped.any())
     assert torch.allclose(positions, predicted)
 
 
 def test_snap_positions_handles_empty_inputs():
     empty = torch.zeros((0, 2))
-    positions, snapped = snap_positions(empty, torch.tensor([[1.0, 1.0]]), radius=5.0)
+    positions, snapped, _ = snap_positions(
+        empty, torch.tensor([[1.0, 1.0]]), radius=5.0
+    )
     assert positions.shape == (0, 2) and snapped.shape == (0,)
     predicted = torch.tensor([[10.0, 10.0]])
-    positions, snapped = snap_positions(predicted, empty, radius=5.0)
+    positions, snapped, _ = snap_positions(predicted, empty, radius=5.0)
     assert not bool(snapped.any())
 
 
@@ -125,6 +130,50 @@ def test_integrate_rings_recovers_intensity_above_flat_background():
     assert background.item() == pytest.approx(7.0, abs=1e-4)
     assert intensity.item() == pytest.approx(100.0, abs=1e-3)
     assert peak.item() == pytest.approx(100.0, abs=1e-3)
+
+
+def test_integrate_rings_takes_one_radius_per_reflection():
+    excess, var, mean = _flat_frame(7.0)
+    excess[20, 20] = 100.0
+    excess[44, 44 + 2] = 100.0  # two pixels off the second centre
+    radii = (
+        torch.tensor([1.5, 2.5]),
+        torch.tensor([3.0, 3.5]),
+        torch.tensor([6.0, 6.5]),
+    )
+    _, intensity, *_, n_total, _ = integrate_rings(
+        torch.tensor([[20.0, 20.0], [44.0, 44.0]]),
+        excess,
+        var,
+        torch.zeros((0, 2)),
+        mean=mean,
+        radii=radii,
+    )
+    assert intensity.tolist() == pytest.approx([100.0, 100.0], abs=1e-3)
+    assert n_total.tolist() == [9, 21]
+
+
+def test_disk_overlap_counts_uses_each_disk_radius():
+    centres = torch.tensor([[10.0, 10.0], [10.0, 15.0]])
+    assert disk_overlap_counts(centres, 1.5).tolist() == [0, 0]
+    assert disk_overlap_counts(centres, torch.tensor([1.5, 4.0])).tolist()[0] > 0
+
+
+def test_radius_by_shell_follows_the_stacked_profile():
+    n = torch.tensor([1.0, 8, 12, 16, 32, 28, 40, 40, 48])
+    sharp = torch.tensor([100.0, 10, 0, 0, 0, 0, 0, 0, 0])
+    broad = torch.tensor([30.0, 25, 15, 8, 0, 0, 0, 0, 0])
+    flat = torch.zeros(9)
+    dip = -broad  # noise can stack negative beyond the diffraction limit
+    profiles = torch.stack([sharp, broad, flat, dip])
+    counts = (n * 1e4).expand(4, 9)
+    sums = profiles * counts
+    squares = counts * 100.0 + sums * profiles
+    radii = radius_by_shell(sums, counts, squares, base=1.5)
+    # sharp spot keeps the base disk, a blurred one widens, an empty shell keeps it
+    assert radii[0] == 1.5
+    assert radii[1] > 2.0
+    assert radii[3] == radii[2] == radii[1]
 
 
 def test_integrate_rings_does_not_double_count_overlapping_disks():
@@ -573,3 +622,58 @@ def test_auto_aperture_needs_enough_strong_peaks_and_crystals():
         ]
         == "flux"
     )
+
+
+def test_falloff_limit_needs_a_shell_above_the_target():
+    q = torch.linspace(1.0, 6.0, 200)
+    assert falloff_resolution_limit(q, torch.full((200,), 0.2)) is None
+    isig = torch.where(q < 3.0, 2.0, 0.1)
+    assert 2.5 < falloff_resolution_limit(q, isig) < 3.5
+
+
+def test_same_lattice_sees_through_a_change_of_setting():
+    from probixi.indexer.indexer import _same_lattice
+
+    A = torch.tensor([[0.016, 0.001, 0.0], [0.0, 0.011, 0.002], [0.001, 0.0, 0.0066]])
+    flip = torch.diag(torch.tensor([1.0, -1.0, -1.0]))  # a 2-fold of mmm
+    swap = torch.tensor([[0.0, 1.0, 0.0], [1.0, 0.0, 0.0], [0.0, 0.0, -1.0]])
+    assert _same_lattice(A, -A)
+    assert _same_lattice(A, A @ flip)
+    assert _same_lattice(A, A @ swap)
+    assert not _same_lattice(A, A @ torch.diag(torch.tensor([2.0, 1.0, 1.0])))
+    rot = torch.linalg.matrix_exp(
+        torch.tensor([[0, -0.1, 0], [0.1, 0, 0], [0, 0, 0.0]])
+    )
+    assert not _same_lattice(A, rot @ A)
+
+
+def test_unexplained_signal_separates_chance_from_real_lattices():
+    g = torch.Generator().manual_seed(0)
+    sigma = torch.full((300,), 2.0)
+    use = torch.ones(300, dtype=torch.bool)
+    null = [
+        unexplained_signal_p(2.0 * torch.randn(300, generator=g), sigma, use)
+        for _ in range(500)
+    ]
+    assert sum(p < 1e-3 for p in null) <= 3  # calibrated: ~N(0, 1) under chance
+    weak = 2.0 * (0.4 + torch.randn(300, generator=g))  # <I/sigma> = 0.4
+    assert unexplained_signal_p(weak, sigma, use) < 1e-6
+    assert unexplained_signal_p(weak, sigma, torch.zeros_like(use)) == 0.0
+
+
+def test_frame_background_stats_bands_and_ice_score():
+    from probixi.indexer.integrate import frame_background_stats, resolution_bands
+
+    d = torch.tensor([7.0, 5.0, 3.5, 2.5, 2.0]).repeat(40, 8)  # (40, 40)
+    d[:20, :20] = 3.90  # an ice window
+    d[20:, :20] = 3.80  # its flank
+    band, ice = resolution_bands(d)
+    assert band[0, 20:25].tolist() == [0, 1, 2, 3, 4]
+    assert ice[0, 0] == 1 and ice[39, 0] == 2 and ice[0, 25] == 0
+    mean = band.float()  # background equal to the band index
+    excess = torch.where(ice == 1, 5.0, 1.0)
+    stats = frame_background_stats(mean, excess, torch.ones_like(mean), None, band, ice)
+    assert stats[:5].tolist() == pytest.approx([0.0, 1.0, 2.0, 3.0, 4.0])
+    assert stats[5].item() == pytest.approx(4.0)
+    masked = frame_background_stats(mean, None, None, band == 4, band, ice)
+    assert torch.isnan(masked[:4]).all() and masked[4] == 4.0 and torch.isnan(masked[5])

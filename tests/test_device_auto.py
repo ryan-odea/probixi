@@ -9,8 +9,8 @@ import torch
 
 import probixi.cli as cli
 import probixi.probixi as probixi_mod
-from probixi.multigpu import resolve_devices
 from probixi.probixi import auto_device
+from probixi.tools.multigpu import resolve_devices
 
 
 def _fake_mps(available: bool):
@@ -109,7 +109,7 @@ def test_mps_is_usable_reports_false_when_the_probe_raises(monkeypatch):
 def test_cli_multi_gpu_forwards_every_option(tmp_path, monkeypatch):
     from click.testing import CliRunner
 
-    import probixi.multigpu as mg
+    import probixi.tools.multigpu as mg
 
     sig = inspect.signature(mg.run_data_parallel)
     seen = {}

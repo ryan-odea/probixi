@@ -130,6 +130,12 @@ def _fake_pipeline(monkeypatch, cells_per_frame, **opts):
             self.target_cell = cell
             calls.append(cell)
 
+        def start_profile_stacking(self):
+            pass
+
+        def finish_profile_stacking(self):
+            return None
+
         def _cell_matches_target(self, cell, target=None):
             t = target or self.target_cell
             return all(
@@ -269,3 +275,41 @@ def test_calibration_prepass_recentres_before_the_first_frame(monkeypatch):
     p, calls = _fake_pipeline(monkeypatch, cells, after=100)  # needs >= 10: starved
     p._calibrate_cell([torch.zeros((1, 1)) for _ in range(5)])
     assert calls == [] and p.cell_calibrations == []
+
+
+def test_camera_length_error_separates_distance_from_cell_scale():
+    from probixi.probixi import camera_length_error
+
+    geom = dict(
+        beam_center=(1200.0, 1200.0), clen=0.1, pixel_size=75e-6, wavelength=1.0
+    )
+    L0 = geom["clen"] / geom["pixel_size"]
+    L_true = 1.01 * L0
+    idx = Indexer(geom, CellParams(40.0, 40.0, 40.0, *(math.pi / 2,) * 3, "cubic"))
+    g = torch.Generator().manual_seed(3)
+    r = torch.arange(-30, 31, dtype=torch.float64)
+    hkl = torch.cartesian_prod(r, r, r)
+    crystals = []
+    for _ in range(20):
+        U = torch.linalg.qr(torch.randn(3, 3, generator=g, dtype=torch.float64))[0]
+        A = U / 40.0
+        S = hkl @ A.T
+        S[:, 2] += 1.0
+        on = ((S.norm(dim=-1) - 1).abs() < 2e-3) & (S[:, 2] > 0.5)
+        xy = S[on, :2] * (L_true / S[on, 2:])
+        on_det = (xy.abs() < 1150).all(-1)
+        # the cell absorbs part of the distance error, as in refinement
+        eta = 1.0 + 0.01 * float(torch.rand(1, generator=g) - 0.5)
+        crystals.append(
+            SimpleNamespace(
+                frame_index=None,
+                A=(A * eta).float(),
+                hkl=hkl[on][on_det].long(),
+                indexed_mask=torch.ones(int(on_det.sum()), dtype=torch.bool),
+                positions=(xy[on_det].flip(-1) + 1200.0).float(),
+            )
+        )
+    eps, se, n = camera_length_error(idx, crystals)
+    assert n == 20
+    assert eps == pytest.approx(0.01, abs=1e-3)
+    assert se < 1e-3
