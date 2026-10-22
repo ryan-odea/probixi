@@ -74,12 +74,11 @@ class NoiseStats(nn.Module):
             self.mean_.add_(delta / self.n_)
             self.M2_.add_(delta * (x - self.mean_))
         else:
-            # EWMA with alpha = decay; M2 holds the variance estimate directly.
+            # EWMA with alpha = max(decay, 1/n); M2 holds the variance directly
+            a = (1.0 / self.n_.to(self.mean_.dtype)).clamp_min(self.decay)
             delta = x - self.mean_
-            self.mean_.add_(self.decay * delta)
-            self.M2_.mul_(1.0 - self.decay).add_(
-                (1.0 - self.decay) * self.decay * delta * delta
-            )
+            self.mean_.add_(a * delta)
+            self.M2_.mul_(1.0 - a).add_((1.0 - a) * a * delta * delta)
 
     def reset(self) -> None:
         self.mean_.zero_()

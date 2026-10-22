@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import math
+import warnings
 from collections.abc import Sized
 from dataclasses import dataclass
+from itertools import islice
 from typing import Iterable, Optional
 
 import torch
@@ -274,6 +276,61 @@ def fit_photon_transfer(
     return read_var, gain
 
 
+@torch.no_grad()
+def background_fluctuation_ratio(
+    noise_model,
+    frames: Iterable[Tensor],
+    local_inner_radius: int,
+    local_outer_radius: int,
+    *,
+    max_frames: int = 16,
+    level_quantile: float = 0.75,
+) -> float:
+    """Across-frame over within-frame variance of the brightest background.
+
+    ~1 for steady exposures, well above 1 where the level changes between shots.
+
+    Parameters
+    ----------
+    noise_model : NoiseModel
+        A calibrated model.
+    frames : iterable of torch.Tensor
+        Seed frames; the first ``max_frames`` are read.
+    local_inner_radius, local_outer_radius : int
+        Annulus of the local variance.
+    max_frames : int
+        Frames measured.
+    level_quantile : float
+        Background-level quantile above which pixels count.
+
+    Returns
+    -------
+    float
+        Median ratio, 1.0 if nothing could be measured.
+    """
+    pred = noise_model.predict(combination="calibrated")
+    mu, var, mask = pred["mean"], pred["var"].clamp_min(1e-12), pred["mask"]
+    level = mu[mask]
+    if level.numel() == 0:
+        return 1.0
+    cut = level.kthvalue(max(1, int(level_quantile * level.numel()))).values
+    bright = mask & (mu >= cut)
+    ratios = []
+    for f in islice(frames, max_frames):
+        f = f.to(dtype=mu.dtype, device=mu.device)
+        _, lv = local_mean_var(
+            f - mu,
+            mask,
+            local_inner_radius,
+            local_outer_radius,
+            clip_hi=LOCAL_BG_CLIP_K * var.sqrt(),
+        )
+        ok = bright & (lv > 0)
+        if ok.any():
+            ratios.append((var[ok] / lv[ok]).median())
+    return float(torch.stack(ratios).median()) if ratios else 1.0
+
+
 def flux_variance_floor(
     noise_model,
     level: Tensor,
@@ -395,10 +452,9 @@ def calibrate_threshold(
     target_noise_peaks : float
         Target median blobs per quiet frame above the chosen threshold.
     quiet_quantile : float
-        Fallback fraction of lowest-max(T) frames used as the quiet set when the
-        null-based absolute cut (mu0 + sigma0*sqrt(2 ln N)) yields too few (< 4)
-        quiet frames. The primary quiet/hit split is now that absolute cut, so the
-        quiet fraction adapts to the hit rate.
+        Last-resort fraction of lowest-max(T) frames used as the quiet set, when the
+        null-based cut (mu0 + sigma0*sqrt(2 ln N)) finds fewer than 4 quiet frames
+        and the mirrored tail ``-min_k MF(z)`` is too sparse to reach the target.
     mf_scales : tuple[float, ...]
         Matched-filter kernel scales (Bragg-spot core sigma range).
     local_inner_radius, local_outer_radius : int
@@ -465,7 +521,24 @@ def calibrate_threshold(
     t_max_per_frame: list[float] = []
     body_pieces: list[Tensor] = []
     counts: list[list[int]] = []
+    mirrored: list[list[int]] = []
     per_frame_cap = max(1, body_subsample // n_frames)
+
+    def blob_counts(T: Tensor) -> list[int]:
+        pooled = F.max_pool2d(T[None, None], kernel_size=3, stride=1, padding=1)
+        is_max = (T >= pooled[0, 0]) & mask
+        row: list[Tensor] = []
+        for thr in thr_list:
+            above = (T > thr) & mask
+            peaks = is_max & above
+            if size_min > 1:
+                local_size = 9.0 * F.avg_pool2d(
+                    above[None, None].to(dtype), kernel_size=3, stride=1, padding=1
+                )
+                peaks = peaks & (local_size[0, 0] >= float(size_min))
+            row.append(peaks.sum())
+        return torch.stack(row).tolist()
+
     gen = torch.Generator(device="cpu").manual_seed(rng_seed)
     for f in frames:
         f = f.to(dtype=dtype, device=device)
@@ -485,10 +558,12 @@ def calibrate_threshold(
             var_eff = torch.maximum(var, lv)
         z = torch.where(mask, (f - mean_eff) / var_eff.sqrt(), torch.zeros_like(f))
         T: Optional[Tensor] = None
+        T_min: Optional[Tensor] = None
         for k in kernels:
             t = matched_filter_z(z, k, mask)
             T = t if T is None else torch.maximum(T, t)
-        assert T is not None
+            T_min = t if T_min is None else torch.minimum(T_min, t)
+        assert T is not None and T_min is not None
         flat = T[mask]
         t_max_per_frame.append(float(flat.max()))
         if flat.numel() > per_frame_cap:
@@ -496,20 +571,8 @@ def calibrate_threshold(
             body_pieces.append(flat[idx.to(device)].cpu())
         else:
             body_pieces.append(flat.cpu())
-
-        pooled = F.max_pool2d(T[None, None], kernel_size=3, stride=1, padding=1)
-        is_max = (T >= pooled[0, 0]) & mask
-        row: list[Tensor] = []
-        for thr in thr_list:
-            above = (T > thr) & mask
-            peaks = is_max & above
-            if size_min > 1:
-                local_size = 9.0 * F.avg_pool2d(
-                    above[None, None].to(dtype), kernel_size=3, stride=1, padding=1
-                )
-                peaks = peaks & (local_size[0, 0] >= float(size_min))
-            row.append(peaks.sum())
-        counts.append(torch.stack(row).tolist())
+        counts.append(blob_counts(T))
+        mirrored.append(blob_counts(-T_min))
 
     t_body = torch.cat(body_pieces)
     mu0, sigma0 = _empirical_null_central_matching(t_body)
@@ -521,17 +584,28 @@ def calibrate_threshold(
     quiet_max_T = mu0 + sigma0 * z_extreme
     quiet_idx = [i for i, m in enumerate(t_max_per_frame) if m <= quiet_max_T]
     if len(quiet_idx) < 4:
-        order = torch.argsort(tmax_t).tolist()
-        quiet_idx = order[: max(4, int(round(quiet_quantile * n_frames)))]
-        quiet_max_T = float(tmax_t[quiet_idx[-1]])
-
-    counts_t = torch.tensor(counts, dtype=torch.float32)[quiet_idx].median(dim=0).values
+        # no quiet frames: count noise on the mirrored tail
+        counts_t = torch.tensor(mirrored, dtype=torch.float32).median(dim=0).values
+        quiet_idx = []
+        if float(counts_t[0]) <= float(target_noise_peaks):  # tail too sparse to use
+            order = torch.argsort(tmax_t).tolist()
+            quiet_idx = order[: max(4, int(round(quiet_quantile * n_frames)))]
+            quiet_max_T = float(tmax_t[quiet_idx[-1]])
+    if quiet_idx:
+        counts_t = (
+            torch.tensor(counts, dtype=torch.float32)[quiet_idx].median(dim=0).values
+        )
 
     ok = counts_t <= float(target_noise_peaks)
     if bool(ok.any()):
         idx = int(torch.nonzero(ok, as_tuple=False)[0])
     else:
         idx = n_steps - 1
+        warnings.warn(
+            f"detection threshold capped at {threshold_grid_max:g}: "
+            f"{float(counts_t[-1]):g} noise blobs per frame remain above it",
+            stacklevel=2,
+        )
 
     threshold = float(tgrid[idx])
     achieved = float(counts_t[idx])

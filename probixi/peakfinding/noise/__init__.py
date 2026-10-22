@@ -2,6 +2,7 @@ from ._eigen_background import fit_eigen_background
 from .calibrate import (
     CalibrationResult,
     ThresholdCalibration,
+    background_fluctuation_ratio,
     calibrate_noise,
     calibrate_threshold,
     fit_photon_transfer,
@@ -15,6 +16,7 @@ __all__ = [
     "ScaleReference",
     "CalibrationResult",
     "ThresholdCalibration",
+    "background_fluctuation_ratio",
     "calibrate_noise",
     "calibrate_threshold",
     "fit_photon_transfer",
