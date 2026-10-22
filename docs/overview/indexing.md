@@ -52,7 +52,7 @@ A candidate is accepted only when its refined cell matches the target, with sort
 
 ## Correcting the target cell
 
-The cell file need only be approximate. During calibration, and again after the first 200 accepted lattices, `probixi` replaces the target by the component-wise median of the refined cells when that median lies within the match window of the cell file, for at most two rounds. This also absorbs an inconsistency between the cell and the camera length, which are degenerate. `--no-cell-calibrate` disables it.
+The cell file need only be approximate. During calibration, and again after the first 200 accepted lattices, `probixi` replaces the target by the component-wise median of the refined cells when that median lies within the match window of the cell file, for at most two rounds. This also absorbs an inconsistency between the cell and the camera length, which are degenerate at low angle only. A camera-length error moves a spot radially in proportion to its radius $\rho$, a cell-scale error by $\rho/\cos 2\theta$, so `probixi` fits the camera length to that curvature in the radial residuals of the seed lattices' indexed peaks, with each crystal's scale profiled out. A shift larger than 0.1% and five standard errors is applied, and the seeds are indexed again at the new distance, up to three times. `--no-cell-calibrate` disables both.
 
 ## Prediction
 
@@ -68,6 +68,8 @@ and a reflection is predicted when $|\varepsilon| < 1.5\,\lambda\,\rho$. The mos
 
 After calibration, `probixi` stacks the radial profiles of peaks from a further random sample of frames and fits a Gaussian to the core. The full-flux radius is where that Gaussian falls to 2% of its centre. The background annulus begins one pixel beyond it and holds 120 pixels. The signal disk defaults to the smaller radius that maximises the background-limited signal-to-noise ratio of the profile. A smaller disk captures a smaller fraction of each spot. A constant fraction is absorbed by each crystal's scale factor in merging, and a trend with resolution common to all crystals by an overall $B$ factor. What scaling cannot remove is a resolution trend that differs between crystals, so `probixi` tests for that on the calibration peaks and reverts to the full-flux radius when it is significant and larger than the extra background noise of the bigger disk (`--aperture auto`).
 
+That profile is centred on each peak's own centroid. A reflection with no found peak nearby is integrated at its predicted position instead, which adds the prediction error to the spot. The error grows with resolution, largely along the radius, and at high resolution a disk sized for the spot alone captures only a fraction of the flux, a smaller one than for the same reflection when it is strong enough to be found. `probixi` therefore stacks the excess around the predicted positions of the indexed seed lattices in twelve resolution shells and gives these reflections, shell by shell, the smallest radius within 2% of the best signal-to-noise ratio of the stacked profile. The radius never falls below the signal disk or with resolution, and the background annulus moves out with it.
+
 ### Integrating a reflection
 
 Each predicted reflection is first moved onto an observed peak centroid within 5 pixels, if there is one. With $\bar b$ and $\sigma_b^2$ the mean and variance of the $n_b$ annulus pixels, and $n$ the disk pixels the reflection owns,
@@ -78,7 +80,7 @@ The variance follows from the independence of disk and annulus. The $n$ backgrou
 
 ### Resolution limit
 
-Every reflection is integrated to the detector edge. `probixi` reports a per-crystal resolution limit, the more generous of the highest-resolution indexed peak and the point where the shell-averaged $I/\sigma(I)$ falls to 0.5, but leaves the cutoff to the merge. A per-crystal cutoff would bias the merged intensities upward.
+Every reflection is integrated to the detector edge. `probixi` reports a per-crystal resolution limit, the more generous of the second-highest-resolution indexed peak (one peak that a dense high-resolution lattice indexes by chance cannot set it) and the point where the shell-averaged $I/\sigma(I)$ falls to 0.5, but leaves the cutoff to the merge. A per-crystal cutoff would bias the merged intensities upward.
 
 ## The enrichment gate
 
@@ -86,4 +88,4 @@ An orientation can fit a sparse peak list without being the true lattice. Once t
 
 $$\text{enrichment} = \frac{n_{\text{bright}}/M}{p}, \qquad \texttt{enrich\_p} = P(X \ge n_{\text{bright}}),\quad X \sim \mathrm{Poisson}(Mp).$$
 
-An enrichment near 1 means the predictions land on signal as often as chance. With `--enrich-gate`, a lattice is kept only when `enrich_p` is at most `--enrich-alpha` (default $10^{-3}$). The gate runs on each lattice as it is found, before the next is searched and before the overlap exclusion, so a rejected lattice cannot remove reflections from one that is kept. Its peaks are still removed before the next search. The gate is off by default and is still being tested to determine whether it becomes the default.
+An enrichment near 1 means the predictions land on signal as often as chance. The bright spots a lattice was fitted to cannot prove it real, so after integration it must also carry signal at the predictions no found peak explains: the summed $I/\sigma$ over the unsnapped predictions inside the crystal's resolution limit, $z = \sum I/\sigma/\sqrt n$, is $\sim\mathcal N(0,1)$ for a chance lattice, and `enrich_p` is the larger of the two chance probabilities. With `--enrich-gate`, a lattice is kept only when `enrich_p` is at most `--enrich-alpha` (default $10^{-3}$). The gate runs on each lattice as it is found, before the next is searched and before the overlap exclusion, so a rejected lattice cannot remove reflections from one that is kept. Its peaks are still removed before the next search. The gate is off by default and is still being tested to determine whether it becomes the default.

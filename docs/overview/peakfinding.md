@@ -79,6 +79,8 @@ $$T_{\text{quiet}} = \mu_0 + \sigma_0\sqrt{2\ln N},$$
 
 the leading-order maximum of $N$ independent normal values, with $N$ the number of valid pixels. A frame whose maximum exceeds this carries something the null does not explain. On the quiet frames `probixi` sweeps candidate thresholds from 3 to 8 and counts the local maxima above each. The median count does not increase with the threshold, so the smallest threshold whose median count is at or below the budget is the most sensitive one that meets it.
 
+Input that holds only hits, such as Cheetah's hit files, has no quiet frame, and counting on its quietest frames would count Bragg peaks as noise. `probixi` then counts the local maxima of the mirrored statistic $-\min_s T_s$ on every seed frame instead. Positive signal never reaches that tail, and near-Gaussian noise reaches it as often as the positive one.
+
 The budget, five noise detections per signal-free frame by default (`--target-noise-peaks`), is the one operating point left in the method. It is stated in units of noise detections per frame, which mean the same thing on every detector.
 
 ## Peaks
@@ -97,8 +99,8 @@ Frames that received no beam, with a median level below a tenth of the run's, ar
 
 ## Variable flux
 
-The running variance is measured at the run's typical fluence. With `--flux-variance` ([vignette](../vignettes/variable_flux.md)), `probixi` fits $\sigma^2 = \sigma^2_{\text{read}} + g\,\mu$ to the calibrated model and whitens each pixel against the variance predicted at that frame's own level, bounded below by 0.15 of the running variance.
+The running variance is measured at the run's typical fluence. With the flux model ([vignette](../vignettes/variable_flux.md)), chosen at calibration when the background level changes between shots beyond photon noise or forced with `--flux-variance`, `probixi` fits $\sigma^2 = \sigma^2_{\text{read}} + g\,\mu$ to the calibrated model and whitens each pixel against the variance predicted at that frame's own level, bounded below by 0.15 of the running variance.
 
 ## After calibration
 
-The blend, the scale, $\kappa$, $\pi$, and the threshold are frozen after calibration. The running statistics continue to update and follow slow drift within the run. `--recalibrate-every` instead rebuilds the calibration at fixed intervals and freezes the statistics in between, which suits a run that spans an abrupt change. Every run is whitened to the same unit-variance standard, so peak counts and indexing rates are comparable between conditions.
+The blend, the scale, $\kappa$, $\pi$, and the threshold are frozen after calibration. The running statistics continue to update and follow slow drift within the run. They average the whole run unless `--noise-decay d` is set, which makes them forget with a memory of about $1/d$ frames, for a sample or beam that changes within the run. `--recalibrate-every` instead rebuilds the calibration at fixed intervals and freezes the statistics in between, which suits a run that spans an abrupt change. Every run is whitened to the same unit-variance standard, so peak counts and indexing rates are comparable between conditions.
