@@ -52,10 +52,10 @@ from .peakfinding.noise import (
     NoiseModel,
     ScaleReference,
     ThresholdCalibration,
+    background_fluctuation_ratio,
     calibrate_noise,
     calibrate_threshold,
     fit_eigen_background,
-    background_fluctuation_ratio,
     fit_photon_transfer,
 )
 from .peakfinding.noise.model import value_ok
@@ -85,9 +85,9 @@ _RADII_MIN_FRAMES = 32
 _RADII_MAX_FRAMES = 512
 _RADII_MIN_PEAKS = 200
 _APERTURE_MIN_PEAKS = 4000  # "auto" needs strong, isolated peaks: sample more
-# across-frame / within-frame background variance above which flux variance is on
+# background fluctuation above which flux variance is on
 _FLUX_AUTO_RATIO = 1.5
-_CLEN_MIN_SHIFT = 1e-3  # camera-length re-fits smaller than this are left alone
+_CLEN_MIN_SHIFT = 1e-3  # smaller camera-length re-fits are ignored
 _CLEN_MIN_Z = 5.0
 _CLEN_MAX_RESIDUAL_PX = 6.0
 _CLEN_MAX_ROUNDS = 3
@@ -194,20 +194,18 @@ class CellCalibration:
 
 @dataclass
 class CameraLengthCalibration:
-    """Camera length fitted from the seed lattices (see ``camera_length_error``).
+    """Camera length fitted on the seed lattices.
 
     Attributes
     ----------
     n_lattices : int
-        Lattices whose indexed peaks entered the fit.
+        Lattices in the fit.
     previous, distance : float
-        Camera length (m) before and after; equal when not applied.
+        Camera length (m) before and after.
     eps, sigma : float
-        Total relative change ``distance / previous - 1`` and the standard
-        error of the last fit.
+        Relative change ``distance / previous - 1`` and the last fit's error.
     applied : bool
-        Whether the distance was changed (shifts that are small or not
-        significant are left alone).
+        Whether the distance was changed.
     """
 
     n_lattices: int
@@ -246,9 +244,8 @@ class Probixi:
     warmup_frames : int, default 16
         Frames observed before the dead-pixel mask is committed.
     noise_decay : float, default 1.0
-        Per-frame weight of the running background statistics. ``1`` keeps a
-        cumulative average; ``d < 1`` forgets with a memory of about ``1/d``
-        frames, so the model follows a sample or beam change within a run.
+        Per-frame weight of the running background statistics: ``1`` averages
+        the run, ``d < 1`` remembers about ``1/d`` frames.
     finder_kappa, posterior_threshold, candidate_threshold
         Pre-calibration detector defaults; ``calibrate`` overrides ``kappa`` and
         the peak prior with learned values.
@@ -268,9 +265,7 @@ class Probixi:
     flux_variance : bool or None, default None
         Replace the frozen variance floor with a learned photon-transfer curve
         so dim/low-flux shots are whitened against their own Poisson noise.
-        ``None`` decides at calibration: on when the background level changes
-        between seed frames beyond photon noise (``background_fluctuation`` above
-        1.5, as at XFELs), off for steady exposures.
+        ``None`` decides at calibration: on when the background fluctuates (XFELs).
     peak_size_max : int, default 30
         Maximum connected-component size accepted as a peak.
     random_seed : int, default 1988
@@ -1181,7 +1176,7 @@ class Probixi:
                 [c for r in results for c in r.crystals]
             ):
                 break
-            # re-index at the new distance, which also sharpens the next fit
+            # re-index at the new distance
             self.indexer.start_profile_stacking()
             results = index()
         cl = self.camera_length_calibration
@@ -1600,19 +1595,7 @@ class _FrameSource:
 def camera_length_error(
     indexer: Indexer, crystals: list
 ) -> Optional[tuple[float, float, int]]:
-    """Relative camera-length error from the radial residuals of indexed peaks.
-
-    A distance error ``eps`` moves a predicted spot radially by ``rho * eps`` while a
-    crystal's isotropic cell scale ``eta`` moves it by ``rho * eta / cos(2 theta)``;
-    the two are degenerate at low angle only, so ``eta`` is profiled out per crystal
-    and ``eps`` is fitted on the curvature (Huber-weighted least squares).
-
-    Returns
-    -------
-    tuple or None
-        ``(eps, standard error, lattices used)``, or ``None`` with fewer than 10
-        lattices. The corrected distance is ``clen * (1 + eps)``.
-    """
+    # clen error eps from radial residuals, per-crystal cell scale profiled out (Huber)
     g0 = indexer.geometry
     bases = _panel_bases(g0, None, torch.float64)
     xs, us, ys, ids = [], [], [], []
@@ -1638,7 +1621,7 @@ def camera_length_error(
     if len(x) < 10 * len(ids):
         return None
 
-    def per(v: Tensor) -> Tensor:  # per-crystal sums, broadcast back to the peaks
+    def per(v: Tensor) -> Tensor:  # per-crystal sums, per peak
         return torch.zeros(len(ids), dtype=v.dtype).index_add_(0, cid, v)[cid]
 
     w = torch.ones_like(y)
@@ -1655,7 +1638,7 @@ def camera_length_error(
 
 
 def _frame_wavelengths(meta: Metadata) -> Optional[list[float]]:
-    # per-frame wavelength (A) from per-event photon energies, else the geometry's
+    # per-frame wavelengths (A) from event photon energies, None without any
     infos = list(meta.files.values())
     if not any(getattr(i, "photon_energy_eV", None) for i in infos):
         return None
