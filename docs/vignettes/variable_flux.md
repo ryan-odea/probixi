@@ -11,11 +11,10 @@ probixi \
   -i b2ar.lst \
   -g jungfrau4m.geom \
   -p b2ar.cell \
-  -o b2ar.stream \
-  --flux-variance
+  -o b2ar.stream
 ```
 
-`--flux-variance` is the only change from a synchrotron run.
+The command is the same as for a synchrotron run. Calibration sees that the background level changes from shot to shot and switches the flux model on, and the calibration line reports `flux_variance=on` and, in this case, `(background fluctuation 7.94)`.
 
 ![image](../assets/br_fel.gif)
 
@@ -31,4 +30,16 @@ $$\sigma^2 = \sigma^2_{\text{read}} + g\,\mu ,$$
 
 where the intercept is the read variance and the slope $g$ is the detector gain in ADU per photon. At detection time each pixel is whitened against the variance the curve predicts at that frame's own background level. `--flux-var-floor` (default 0.15) bounds the predicted variance below by that fraction of the running variance. The fitted gain also sets the shot-noise term of each σ(I) in integration.
 
-The option is off by default, because on steady synchrotron exposures the running variance already describes the noise. It has so far been tested on one FEL dataset.
+## When it switches on
+
+The running variance is measured across frames, so it also holds every shot-to-shot change of the background level, which the per-frame local background then removes again. Calibration compares the two on the brightest quarter of the background in up to 16 seed frames: the median ratio of the running variance to the local variance of the same frame is about 1 for a steady exposure and $1 + \operatorname{var}(s)\,N_\gamma$ when the level scales by $s$ between shots on a background of $N_\gamma$ photons. Above 1.5 the flux model is used. `--flux-variance` and `--no-flux-variance` override the choice.
+
+| dataset | detector, source | ratio | flux model |
+|---|---|---|---|
+| β<sub>2</sub>AR | Jungfrau 4M, SwissFEL | 7.9 | on |
+| rhodopsin | MPCCD, SACLA | 4.2 | on |
+| run0037 | Jungfrau, SwissFEL Cristallina | 2.2 | on |
+| C1C2 | Eiger 4M, SLS | 0.95 | off |
+| bacteriorhodopsin | Eiger 4M, SLS | 0.86 | off |
+
+On steady synchrotron exposures the running variance already describes the noise, and the two models agree.

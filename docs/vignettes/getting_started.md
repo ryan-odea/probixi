@@ -25,7 +25,7 @@ The device defaults to `auto`, which picks CUDA, then Apple MPS, then CPU.
 | `--warmup-frames` | 16 | Frames seen before pixels with zero variance are masked as dead. |
 | `--recalibrate-every` | off | Rebuild the calibration every N input frames and freeze the statistics in between. Use it for a run that spans an abrupt change, such as a jet restart. A value of 0 freezes the initial estimate for the whole run. |
 | `--noise-mode` | `online` | `online` keeps updating the background after calibration. `per_frame` rebuilds it for each frame. |
-| `--flux-variance` | off | Scale the noise with each frame's own level. For free-electron laser data with shot-to-shot flux changes. See [Variable flux](variable_flux.md). |
+| `--flux-variance` | auto | Scale the noise with each frame's own level. Chosen at calibration: on when the background level changes between shots beyond photon noise (free-electron lasers), off for steady exposures. `--no-flux-variance` forces it off. See [Variable flux](variable_flux.md). |
 | `--flux-var-floor` | 0.15 | Lower bound on the flux-scaled variance, as a fraction of the running variance. |
 | `--force-all` | off | Disable the blank-shot screen and index every frame, however dark. |
 | `--random-seed` | 1988 | Seed for every random draw. A run is fully specified by its inputs, version, and this seed. |
