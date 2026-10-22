@@ -21,8 +21,9 @@ def below(frame, floor, stride):
     n = (frame.numel() + stride - 1) // stride
     out = torch.zeros(2, dtype=torch.int32, device=frame.device)
     floor32 = float(np.float32(floor))
+    # if float32 rounds floor down, v == floor32 still lies below floor
     count_below[(triton.cdiv(n, 1024),)](
         frame, frame.numel(), stride, floor32, out, INCLUSIVE=floor32 < floor, B=1024
     )
-    count, nans = out.tolist()
+    count, nans = out.tolist()  # any NaN fails the test
     return nans == 0 and count >= (n + 1) // 2

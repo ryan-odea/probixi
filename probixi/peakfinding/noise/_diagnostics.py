@@ -170,7 +170,6 @@ def animate_noise_diagnostics(
     ax_rad = fig.add_subplot(gs[0, 2])
     ax_drift = fig.add_subplot(gs[1, :])
 
-    # Left: per-pixel standard error of the mean
     ax_se.set_title("Background Standard Error")
     im_se = ax_se.imshow(snaps[0].se, origin="upper", cmap=viridis, norm=se_norm)
     ax_se.set_xticks([])
@@ -178,14 +177,12 @@ def animate_noise_diagnostics(
     cb_se = fig.colorbar(im_se, ax=ax_se, location="left", fraction=0.046, pad=0.12)
     cb_se.set_label("Photon Standard Error")
 
-    # Middle: mean background
     ax_img.set_title("Mean Background")
     im_mean = ax_img.imshow(snaps[0].mean, origin="upper", cmap=viridis, norm=mean_norm)
     ax_img.set_xticks([])
     ax_img.set_yticks([])
     fig.colorbar(im_mean, ax=ax_img, location="right", fraction=0.046, pad=0.04)
 
-    # Right: radial profile
     ax_rad.set_title("Radial Background Profile")
     ghost_lines = [
         ax_rad.plot([], [], color="0.8", lw=0.8, zorder=1)[0] for _ in range(n_batches)
@@ -202,7 +199,6 @@ def animate_noise_diagnostics(
     ax_rad.spines["right"].set_visible(False)
     ax_rad.spines["top"].set_visible(False)
 
-    # Bottom: per-batch drift
     ax_drift.set_title("Per-batch Drift (log-scale)")
     (drift_line,) = ax_drift.plot([], [], "o-", color="black", ms=4, lw=1.0)
     ax_drift.set_yscale("log")

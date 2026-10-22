@@ -16,7 +16,7 @@ import torch
 PathLike = Union[str, Path]
 
 _SECTION = b"--CIF-BINARY-FORMAT-SECTION--"
-_START = b"\x0c\x1a\x04\xd5"
+_START = b"\x0c\x1a\x04\xd5"  # CBF marker before the first binary data byte
 _CHUNK = 1 << 14
 _MAX_HEADER = 1 << 22
 
@@ -35,65 +35,26 @@ _DTYPES = {
 
 
 class UnsupportedCbf(ValueError):
-    """A valid CBF variant that this reader does not decode."""
+    # A valid CBF variant this reader does not decode
+    ...
 
 
 @dataclass(frozen=True)
 class CbfHeader:
-    """Layout of the binary section of one CBF file.
-
-    Parameters
-    ----------
-    shape : tuple[int, int]
-        Image shape ``(ss, fs)``: second dimension first, fastest last.
-    dtype : numpy.dtype
-        Pixel type of the decoded image.
-    compression : {"byte_offset", "none"}
-        Encoding of the binary section.
-    offset : int
-        Position of the first data byte in the (decompressed) file.
-    size : int
-        Length in bytes of the data (``X-Binary-Size``).
-    md5 : str, optional
-        Base64 ``Content-MD5`` of the data bytes, when the file carries one.
-    """
-
-    shape: tuple[int, int]
+    shape: tuple[int, int]  # (ss, fs): second dimension, then fastest
     dtype: np.dtype
-    compression: str
-    offset: int
-    size: int
-    md5: Optional[str] = None
+    compression: str  # "byte_offset" or "none"
+    offset: int  # first data byte in the decompressed file
+    size: int  # X-Binary-Size, bytes
+    md5: Optional[str] = None  # base64 Content-MD5 of the data bytes
 
 
 def is_cbf(path: PathLike) -> bool:
-    """Whether ``path`` names a CBF file (``.cbf``, ``.cbf.gz`` or ``.cbf.bz2``)."""
     return str(path).lower().endswith((".cbf", ".cbf.gz", ".cbf.bz2"))
 
 
 def read_cbf_header(path: PathLike) -> CbfHeader:
-    """Read the binary-section header of a CBF file without decoding the image.
-
-    Only the start of the file is read (and decompressed for ``.gz``/``.bz2``).
-
-    Parameters
-    ----------
-    path : str or Path
-        A ``.cbf``, ``.cbf.gz`` or ``.cbf.bz2`` file.
-
-    Returns
-    -------
-    CbfHeader
-        Image shape, pixel type and location of the data bytes.
-
-    Raises
-    ------
-    UnsupportedCbf
-        For compression other than ``x-CBF_BYTE_OFFSET``/``x-CBF_NONE``,
-        big-endian data, non-integer or 64-bit pixels, or 3-D arrays.
-    ValueError
-        If the file is not a readable CBF image or is truncated.
-    """
+    # Reads, and inflates, only up to the binary start marker
     path = Path(path)
     inflate = _decompressor(path)
     head = b""
@@ -130,27 +91,18 @@ def read_cbf(path: PathLike, verify: bool = True) -> np.ndarray:
     Raises
     ------
     UnsupportedCbf
-        As for :func:`read_cbf_header`, and for files with several binary
-        sections.
+        For compression other than ``x-CBF_BYTE_OFFSET`` or ``x-CBF_NONE``,
+        big-endian data, non-integer or 64-bit pixels, 3-D arrays, or several
+        binary sections.
     ValueError
-        If the file is truncated, corrupt or fails its checksum.
+        If the file is not a CBF image, is truncated, or fails its checksum.
     """
     header, data = read_cbf_data(path, verify)
     return decode_cbf(header, data, path)
 
 
 def read_cbf_data(path: PathLike, verify: bool = True) -> tuple[CbfHeader, memoryview]:
-    """Read and check a CBF file without decoding its pixels.
-
-    Parameters and exceptions are those of :func:`read_cbf`.
-
-    Returns
-    -------
-    CbfHeader
-        Layout of the binary section.
-    memoryview
-        The (decompressed) data bytes of the binary section.
-    """
+    # Checked, decompressed data bytes, still encoded; raises as read_cbf does
     path = Path(path)
     raw = path.read_bytes()
     inflate = _decompressor(path)
@@ -173,7 +125,7 @@ def read_cbf_data(path: PathLike, verify: bool = True) -> tuple[CbfHeader, memor
 
 
 def decode_cbf(header: CbfHeader, data, path: PathLike) -> np.ndarray:
-    """Decode the data bytes returned by :func:`read_cbf_data` on the CPU."""
+    # CPU decode; the GPU path in frames.py sends byte-offset data to kernels/cbf
     if header.compression == "none":
         pixels = np.frombuffer(data, header.dtype.newbyteorder("<")).astype(
             header.dtype
@@ -189,32 +141,7 @@ def decode_cbf(header: CbfHeader, data, path: PathLike) -> np.ndarray:
 
 
 def decode_byte_offset(data, count: int, dtype=np.int32) -> np.ndarray:
-    """Decode ``x-CBF_BYTE_OFFSET`` data into a flat array.
-
-    Each pixel is stored as the difference to its predecessor: one signed byte,
-    or ``0x80`` followed by an int16, ``0x80 0x00 0x80`` followed by an int32, or
-    ``0x80 0x00 0x80 0x00 0x00 0x00 0x80`` followed by an int64, all little
-    endian. The running sum starts at zero and wraps at the width of ``dtype``.
-
-    Parameters
-    ----------
-    data : bytes-like
-        The compressed bytes.
-    count : int
-        Number of pixels the data must decode to.
-    dtype : numpy dtype, default numpy.int32
-        Integer type of the result (at most 32 bits).
-
-    Returns
-    -------
-    numpy.ndarray
-        ``count`` pixels.
-
-    Raises
-    ------
-    ValueError
-        If the data hold a different number of pixels or end inside a value.
-    """
+    # Little-endian deltas: int8 | 80 int16 | 80 0080 int32 | 80 0080 00000080 int64
     d = np.frombuffer(data, dtype=np.int8)
     candidates = np.flatnonzero(d == -128)
     if candidates.size:
@@ -239,10 +166,7 @@ def decode_byte_offset(data, count: int, dtype=np.int32) -> np.ndarray:
 
 
 def _escapes(d: np.ndarray, candidates: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-    # Start and byte width of every escape token among the 0x80 candidates. A
-    # candidate inside the payload of an earlier token is not one: the tokens
-    # are the chain candidate -> first candidate past its end, followed by
-    # pointer doubling.
+    # Start and byte width of each escape; a 0x80 inside an earlier payload is none
     ahead = d[np.minimum(candidates[:, None] + np.arange(1, 7), d.size - 1)]
     wide = (ahead[:, 0] == 0) & (ahead[:, 1] == -128)
     huge = wide & ~ahead[:, 2:5].any(axis=1) & (ahead[:, 5] == -128)
@@ -250,6 +174,7 @@ def _escapes(d: np.ndarray, candidates: np.ndarray) -> tuple[np.ndarray, np.ndar
     end = candidates + width
     if (candidates[1:] < end[:-1]).any():
         n = candidates.size
+        # Tokens chain to the first candidate past their end; pointer doubling walks it
         jump = np.append(np.searchsorted(candidates, end), n)
         token = np.zeros(n + 1, dtype=bool)
         token[0] = True
@@ -277,7 +202,7 @@ def _payload(d: np.ndarray, pos: np.ndarray, width: np.ndarray) -> np.ndarray:
 def _decompressor(path: Path):
     name = path.name.lower()
     if name.endswith(".gz"):
-        return zlib.decompressobj(wbits=31)
+        return zlib.decompressobj(wbits=31)  # gzip container
     if name.endswith(".bz2"):
         return bz2.BZ2Decompressor()
     return None

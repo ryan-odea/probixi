@@ -9,16 +9,12 @@ from torch import Tensor
 from .forward import detector_to_q, q_to_detector
 from .rocking import rocking_radius
 
-# Given orientation A, a lattice point diffracts when its scattered
-# vector S = lambda*q + zhat is ~unit (Ewald condition). Mosaicity/bandwidth
-# thicken the sphere into a shell, modeled by a tolerance on |S| - 1
+# Ewald-shell prediction; see docs/overview/indexing.md, Spot prediction
 
 
 @dataclass
 class PredictedReflections:
-    # Reflections predicted to diffract on one frame: hkl, detector positions,
-    # q = A @ hkl, excitation error |S|-1, and resolution |q|.
-
+    # One frame: hkl (M, 3), (row, col) (M, 2), q = A @ hkl, |S| - 1, and |q| in A^-1
     hkl: Tensor
     positions: Tensor
     q: Tensor
@@ -50,7 +46,7 @@ def _centering_mask(hkl: Tensor, centering: str | None) -> Tensor:
         return ((h + k) % 2 == 0) & ((h + l) % 2 == 0) & ((k + l) % 2 == 0)
     if c == "R":  # rhombohedral on hexagonal axes, obverse setting
         return (-h + k + l) % 3 == 0
-    if c == "H":  # hexagonal H-centered (triple) cell
+    if c == "H":  # hexagonal H-centred (triple) cell
         return (h - k) % 3 == 0
     return keep_all  # "P" or unknown symbol: no absences
 
@@ -58,6 +54,7 @@ def _centering_mask(hkl: Tensor, centering: str | None) -> Tensor:
 def _enumerate_hkls_within(
     A: Tensor, q_max: float, dtype: torch.dtype, device, centering: str | None = None
 ) -> Tensor:
+    # |h_i| = |row_i(A^-1) . q| <= |row_i(A^-1)| q_max bounds the hkl box
     row_norms = torch.linalg.vector_norm(torch.linalg.inv(A), dim=1)
     maxima = torch.ceil(q_max * row_norms).to(torch.long).tolist()
     return _hkl_box(tuple(maxima), centering, dtype, device)
@@ -91,10 +88,7 @@ def predict_reflections(
     centering: str | None = None,
     frame_shape: tuple[int, int] | None = None,
 ) -> PredictedReflections:
-    # Reflections that diffract on one frame for orientation A (q = A @ hkl):
-    # enumerate hkl within q_max, drop centering-forbidden ones, keep those on the
-    # Ewald shell (|eps| < rocking tol when eta given, else partiality_threshold) and
-    # the forward hemisphere / detector, then project to (row, col).
+    # hkl on the Ewald shell and the detector for orientation A, projected to (row, col)
     if A.shape != (3, 3):
         raise ValueError("A must be (3, 3)")
     device, dtype = A.device, A.dtype
@@ -104,8 +98,7 @@ def predict_reflections(
     q = hkl @ A.transpose(-1, -2)  # (M, 3) = (A @ hkl^T)^T
     qn = torch.linalg.vector_norm(q, dim=-1)
 
-    # S = lambda*q + zhat; diffracts when |S| ~ 1. Keep the forward-scattering
-    # hemisphere (Sz > 0) so the ray reaches the detector at z = clen.
+    # Only forward-scattered rays (Sz > 0) can reach the detector plane z = clen
     S = q * wavelength
     Sz = S[:, 2] + 1.0
     S_norm = torch.sqrt(S[:, 0] ** 2 + S[:, 1] ** 2 + Sz * Sz)
@@ -157,6 +150,7 @@ def predict_reflections(
 
 
 def detector_q_max(geometry: dict, frame_shape: tuple[int, int]) -> float:
+    # max |q| over a flat detector lies at a frame or panel corner
     rows, cols = frame_shape
     corners = [[0.0, 0.0], [0.0, cols - 1], [rows - 1, 0.0], [rows - 1, cols - 1]]
     for panel in (geometry.get("panels") or {}).values():

@@ -18,13 +18,7 @@ _PANEL_FIELDS = itemgetter(
 def _panel_bases(
     geometry: dict, device: Optional[torch.device], dtype: torch.dtype
 ) -> Optional[Tensor]:
-    # (P, 10) tensor [min_ss, max_ss, min_fs, max_fs, corner_x, corner_y,
-    # fs_x, fs_y, ss_x, ss_y] per panel
-    # Panels are coplanar at z = clen: fs/ss keep only their in-plane (x, y)
-    # components.
-    #
-    # NEED TO TEST [TODO] (3D): a tilted-panel detector (nonzero fs/ss z) needs per-panel
-    # 3-D placement and ray-plane intersection in q_to_detector.
+    # TODO: support tilted panels; all panels are taken as coplanar at z = clen
     panels = geometry.get("panels") or {}
     try:
         return _panel_tensor(tuple(map(_PANEL_FIELDS, panels.values())), device, dtype)
@@ -68,8 +62,7 @@ def _panel_tensor(
 def _panel_model_bases(
     geometry: dict, device: Optional[torch.device], dtype: torch.dtype
 ) -> Optional[Tensor]:
-    # General per-panel affine map when panels carry an fs/ss basis (any count);
-    # None if any panel lacks fs/ss, so the caller falls back to the beam-centre map.
+    # None without panels or when one lacks fs/ss; callers then use the beam-centre map
     if not (geometry.get("panels") or {}):
         return None
     return _panel_bases(geometry, device, dtype)
@@ -102,6 +95,7 @@ def _constants(
     device: Optional[torch.device],
     dtype: torch.dtype,
 ) -> dict:
+    # clen and pixel_size arrive in m, the wavelength in A
     consts = {
         "bc_row": torch.tensor(bc_row, dtype=dtype, device=device),
         "bc_col": torch.tensor(bc_col, dtype=dtype, device=device),
@@ -111,7 +105,7 @@ def _constants(
     }
     consts["clen_sq"] = consts["clen_A"] * consts["clen_A"]
     consts["inv_lambda"] = 1.0 / consts["wavelength_A"]
-    consts["packed"] = torch.stack(
+    consts["packed"] = torch.stack(  # CONST layout of kernels/forward.py
         [consts[k] for k in ("bc_row", "bc_col", "pix_A", "clen_A", "wavelength_A")]
     )
     return consts
@@ -120,6 +114,7 @@ def _constants(
 def _lab_xy_pixels(
     positions: Tensor, geometry: dict, bases: Optional[Tensor]
 ) -> Tensor:
+    # (N, 2) lab (x, y) in px; positions on no panel use the beam-centre map
     bc_row = float(geometry["beam_center"][0])
     bc_col = float(geometry["beam_center"][1])
     rows, cols = positions[:, 0], positions[:, 1]
@@ -164,9 +159,7 @@ def detector_to_q(
     frame_rotation: Optional[Tensor] = None,
     dtype: torch.dtype = torch.float32,
 ) -> Tensor:
-    # Detector pixels -> reciprocal-space q (A^-1) via the Ewald construction
-    # (beam +z): pixel lab direction s_hat gives q = (s_hat - s0)/lambda, s0 = (0,0,1).
-    # frame_rotation (3,3) optionally maps q from lab into the crystal frame.
+    # (N, 2) (row, col) to q (N, 3) in A^-1; frame_rotation maps lab q into the crystal
     if positions.ndim != 2 or positions.shape[-1] != 2:
         raise ValueError("positions must be (N, 2)")
     device = positions.device
@@ -178,6 +171,7 @@ def detector_to_q(
     if kernel is not None:
         q_lab = kernel.lift(pos, bases, g["packed"])
     else:
+        # q = (s_hat - s0) / lambda with s0 = (0, 0, 1), the beam along +z
         xy_lab = _lab_xy_pixels(pos, geometry, bases) * g["pix_A"]
         sq = xy_lab * xy_lab
         r = torch.sqrt(sq[:, 0] + sq[:, 1] + g["clen_sq"])
@@ -196,6 +190,7 @@ def detector_to_q(
 def _project_to_panels(
     x_pix: Tensor, y_pix: Tensor, valid: Tensor, bases: Tensor
 ) -> Tensor:
+    # Inverts each panel's 2x2 fs/ss basis; positions on no panel are NaN
     n = x_pix.shape[0]
     P = bases.shape[0]
     min_ss, max_ss, min_fs, max_fs = bases[:, 0], bases[:, 1], bases[:, 2], bases[:, 3]
@@ -228,8 +223,7 @@ def q_to_detector(
     frame_rotation: Optional[Tensor] = None,
     dtype: torch.dtype = torch.float32,
 ) -> Tensor:
-    # S = q*lambda + s0
-    # Intersect the ray with z = clen.
+    # Intersects S = lambda q + s0 with the plane z = clen; returns (N, 2) (row, col)
     if q.ndim != 2 or q.shape[-1] != 3:
         raise ValueError("q must be (N, 3)")
     device = q.device

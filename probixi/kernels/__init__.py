@@ -8,10 +8,11 @@ __all__ = ["Engine", "use_engine"]
 
 
 class Engine(Enum):
-    """Backend selection for optional processing and decoding kernels.
+    """Backend policy for the optional Triton and nvCOMP kernels.
 
-    AUTO selects supported accelerators, REFERENCE disables them, and
-    ACCELERATED raises when an accelerated entry point is unsupported.
+    ``AUTO`` uses an accelerated kernel wherever the inputs support one,
+    ``REFERENCE`` uses the torch implementation everywhere, and ``ACCELERATED``
+    raises ``RuntimeError`` where no accelerated kernel applies.
     """
 
     AUTO = "auto"
@@ -24,21 +25,19 @@ _engine = ContextVar("probixi_engine", default=Engine.AUTO)
 
 @contextmanager
 def use_engine(engine):
-    """Temporarily select a backend in the current execution context.
+    """Select a backend for the enclosed block or decorated function.
 
     Parameters
     ----------
     engine : Engine or {'auto', 'reference', 'accelerated'}
-        Backend policy, restored on leaving the context, including exceptions.
-
-    Yields
-    ------
-    None
-        Execute processing or consume lazy frame iterators inside the context.
+        Backend policy. The previous policy is restored on exit, including exit
+        by an exception.
 
     Notes
     -----
-    Calibration computations always use the reference implementations.
+    The policy is read when a kernel is dispatched, so a lazy frame iterator or
+    stream must also be consumed inside the block.
+    :meth:`probixi.Probixi.calibrate` always runs under ``REFERENCE``.
     """
     token = _engine.set(Engine(engine))
     try:
@@ -49,6 +48,7 @@ def use_engine(engine):
 
 @lru_cache(None)
 def _module(name):
+    # None when Triton or another dependency of the kernel module is missing
     try:
         return import_module(f"{__name__}.{name}")
     except ImportError:
@@ -56,7 +56,7 @@ def _module(name):
 
 
 def select(name, supported):
-    """Return a lazy kernel module, or None for the reference implementation."""
+    # kernel module, or None for the torch reference; ACCELERATED raises instead
     engine = _engine.get()
     if engine is Engine.REFERENCE:
         return None
@@ -69,6 +69,6 @@ def select(name, supported):
 
 
 def tensor_key(t):
-    # Identity plus the in-place version counter
-    version = object() if t.is_inference() else t._version
+    # valid while the caller holds t; a freed tensor's id() can be reused
+    version = object() if t.is_inference() else t._version  # inference: never matches
     return (id(t), version, t.device, t.dtype, tuple(t.shape))

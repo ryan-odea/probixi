@@ -24,9 +24,6 @@ _PIXEL_SIZE = 150e-6
 _WAVELENGTH = 1.3
 
 
-# --------------------------------------------------------------------------- #
-# block_bounds
-# --------------------------------------------------------------------------- #
 @pytest.mark.parametrize(
     "total,world",
     [(810, 4), (10, 3), (7, 8), (100, 1), (1, 1), (0, 3), (256, 8)],
@@ -56,9 +53,6 @@ def test_block_bounds_rejects_bad_rank():
         block_bounds(0, 10, 3, 3)
 
 
-# --------------------------------------------------------------------------- #
-# resolve_devices
-# --------------------------------------------------------------------------- #
 def test_resolve_devices_explicit_list():
     devs = resolve_devices(["cpu", "cpu"])
     assert devs == [torch.device("cpu"), torch.device("cpu")]
@@ -80,9 +74,6 @@ def test_resolve_devices_rejects_empty():
         resolve_devices(0)
 
 
-# --------------------------------------------------------------------------- #
-# merge_streams
-# --------------------------------------------------------------------------- #
 def _fake_stream(path: Path, events: list[int]) -> None:
     lines = [
         "CrystFEL stream format 2.3",
@@ -142,8 +133,7 @@ def test_merge_streams_handles_empty_and_missing_parts(tmp_path):
 
 
 def test_merge_streams_skips_zero_byte_first_part(tmp_path):
-    # a worker that crashed after truncating its file to 0 bytes must not eat the
-    # header: the merged stream still recovers its header from the next valid part
+    # a rank that crashed after truncating to 0 bytes; the next part supplies the header
     p0, p1 = tmp_path / "o.rank0", tmp_path / "o.rank1"
     p0.write_text("")  # 0-byte part from a crashed rank 0
     _fake_stream(p1, [5, 6])
@@ -183,11 +173,7 @@ def test_env_int_rejects_non_integer(monkeypatch):
     assert _env_int("RANK", default=0) == 3
 
 
-# --------------------------------------------------------------------------- #
-# Integration: run the actual per-block pipeline on a SYNTHETIC run, then merge.
-# Indexing correctness itself is covered by test_pipeline_cli; here we exercise the
-# multi-GPU-specific orchestration (block sub-range, per-rank offload, stats, merge).
-# --------------------------------------------------------------------------- #
+# Block orchestration on a synthetic run; test_pipeline_cli covers indexing itself
 def _sim_geom_text() -> str:
     # single centred panel; beam_center=(-corner_y,-corner_x), res=1/pixel_size
     bc = (_DET - 1) / 2.0
@@ -209,8 +195,7 @@ def _sim_geom_text() -> str:
 
 
 def _synthetic_noise_run(tmp_path: Path) -> tuple[Path, Path]:
-    # 8 signal-free frames written as an HDF5 stack + a .lst (absolute paths, so the
-    # run is CWD-independent), plus a matching single-panel geometry.
+    # 8 signal-free frames, a .lst of absolute paths, and a matching geometry
     geom_path = tmp_path / "sim.geom"
     geom_path.write_text(_sim_geom_text(), encoding="utf-8")
     noise = sim.simulate_noise_frames((_DET, _DET), 8, seed=100)
@@ -231,7 +216,7 @@ def test_run_block_covers_disjoint_ranges_and_merges(tmp_path):
         threads=2,
         quiet=True,
     )
-    # drive both ranks in-process (no spawn) to keep the test fast + robust
+    # both ranks in-process, without spawning workers
     parts = [tmp_path / "o.rank0", tmp_path / "o.rank1"]
     s0 = run_block(0, 2, "cpu", cfg, parts[0])
     s1 = run_block(1, 2, "cpu", cfg, parts[1])
@@ -244,8 +229,7 @@ def test_run_block_covers_disjoint_ranges_and_merges(tmp_path):
     assert Path(f"{parts[0]}.stats.json").is_file()
     assert Path(f"{parts[1]}.stats.json").is_file()
 
-    # the per-rank parts merge into one well-formed stream: a single header and
-    # globally renumbered, monotonic serials (empty is fine -- noise indexes nothing)
+    # one header and serials 1..n; the stream may be empty, as noise indexes nothing
     out = tmp_path / "merged.stream"
     merge_streams(parts, out)
     txt = out.read_text()

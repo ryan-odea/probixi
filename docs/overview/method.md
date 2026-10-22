@@ -1,14 +1,14 @@
 # The method, end to end
 
-The derivation follows the pipeline from a raw detector frame to the reflection list a merging program reads. Every symbol is defined at first use and collected in the notation table at the end. Defaults are quoted with the configuration field or module constant that holds them, and each quantity is marked as **fixed** (a constant in the code) or **learned** (estimated from the data at hand).
+This page follows the pipeline from a raw detector frame to the reflection list a merging program reads. Defaults are quoted with the configuration field or module constant that holds them, and each quantity is marked fixed (a constant in the code) or learned (estimated from the data). Symbols are collected in §10.
 
 ## 0. Objects and conventions
 
 A run is a sequence of frames $x_f \in \mathbb{R}^{H\times W}$, $f = 1, \dots, F$, in detector units (ADU; for a photon-counting detector one ADU is one photon). A pixel is indexed by $p = (i, j)$ with $i$ the slow-scan row and $j$ the fast-scan column; CrystFEL's `fs`/`ss` are $j$/$i$. A static Boolean mask $m(p) \in \{0, 1\}$ marks live pixels. Three coordinate frames appear:
 
-- **detector** $(i, j)$ in pixels;
-- **laboratory** $(x, y, z)$ in metres, $z$ along the beam, given by the geometry's per-panel origin and fast/slow basis vectors;
-- **reciprocal space** $\mathbf{q} \in \mathbb{R}^3$ in $\text{Å}^{-1}$ (streams and databases use $\text{nm}^{-1}$: multiply by $10$, `A_INV_TO_NM_INV`).
+- detector $(i, j)$, in pixels;
+- laboratory $(x, y, z)$, in metres, $z$ along the beam, given by the geometry's per-panel origin and fast/slow basis vectors;
+- reciprocal space $\mathbf{q} \in \mathbb{R}^3$, in $\text{Å}^{-1}$ (streams and databases use $\text{nm}^{-1}$: multiply by $10$, `A_INV_TO_NM_INV`).
 
 Wavelength $\lambda$ (Å) and camera length $L$ (m) come from the geometry file, $\lambda$ per frame when the geometry reads the photon energy per event and $L$ re-fitted on the seed lattices (§5.6); the detector gain $g$ (ADU per photon) is read from the geometry when declared and re-measured from the data when the flux-variance model is on (§2.6).
 
@@ -16,7 +16,7 @@ Wavelength $\lambda$ (Å) and camera length $L$ (m) come from the geometry file,
 
 ### 1.1 Streaming moments
 
-For each of three "views" of the detector, `probixi` maintains a running mean $\mu$ and second central moment $M_2$ over frames with Welford's update (`NoiseStats.update`, `peakfinding/noise/model.py`). With $n$ the number of frames seen so far and $y$ the projected, clipped frame (§1.3):
+For each of three views of the detector, `probixi` maintains a running mean $\mu$ and second central moment $M_2$ over frames with Welford's update (`NoiseStats.update`, `peakfinding/noise/model.py`). With $n$ the number of frames seen so far and $y$ the projected, clipped frame (§1.3):
 
 $$
 \delta = y - \mu, \qquad \mu \leftarrow \mu + \frac{\delta}{n}, \qquad M_2 \leftarrow M_2 + \delta\,(y - \mu_{\text{new}}), \qquad \hat\sigma^2 = \frac{M_2}{\max(n-1, 1)} .
@@ -24,11 +24,11 @@ $$
 
 With `decay` $= \alpha < 1$ the update is exponentially weighted, $\mu \leftarrow \mu + \alpha\delta$, $M_2 \leftarrow (1-\alpha) M_2 + (1-\alpha)\alpha\,\delta^2$, and $\hat\sigma^2 = M_2$. The pipeline default is $\alpha = 1$ (plain running statistics).
 
-### 1.2 Three views
+### 1.2 Pixel, radial, and frame-wide estimators
 
-- **Pixel** (`_pixel.py`): $\mu_{\text{pix}}(p)$, $\sigma^2_{\text{pix}}(p)$ per pixel, fed without a mask.
-- **Radial** (`_radial.py`): with $r(p)$ the lab-frame radius of pixel $p$ from the beam centre in pixels and bin width $\Delta = 2$ px (`radial_bin_width`, fixed), bin $b(p) = \lfloor r(p)/\Delta \rfloor$; each frame is projected to masked bin means $\bar y_b = \sum_{p\in b} m(p)\,y(p) / \max(\sum_{p\in b} m(p), 1)$, and the running statistics live on the bins. Per pixel, $\mu_{\text{rad}}(p) = \mu_{b(p)}$ and $\sigma^2_{\text{rad}}(p) = \hat\sigma^2_{b(p)}\,N_{b(p)}$ with $N_b$ the bin's pixel count (the variance of a bin *mean* re-inflated to a single pixel).
-- **Frame-wide** (`_panel.py`): the same construction with a single bin covering the frame. The class accepts a tile map for per-panel statistics, but the pipeline passes none.
+- Pixel (`_pixel.py`): $\mu_{\text{pix}}(p)$, $\sigma^2_{\text{pix}}(p)$ per pixel, fed without a mask.
+- Radial (`_radial.py`): with $r(p)$ the lab-frame radius of pixel $p$ from the beam centre in pixels and bin width $\Delta = 2$ px (`radial_bin_width`, fixed), bin $b(p) = \lfloor r(p)/\Delta \rfloor$; each frame is projected to masked bin means $\bar y_b = \sum_{p\in b} m(p)\,y(p) / \max(\sum_{p\in b} m(p), 1)$, and the running statistics live on the bins. Per pixel, $\mu_{\text{rad}}(p) = \mu_{b(p)}$ and $\sigma^2_{\text{rad}}(p) = \hat\sigma^2_{b(p)}\,N_{b(p)}$ with $N_b$ the bin's pixel count (the variance of a bin *mean* re-inflated to a single pixel).
+- Frame-wide (`_panel.py`): the same construction with one bin per geometry panel (`_panel_boxes`, `probixi.py`), or a single bin covering the frame when the geometry has one panel.
 
 ### 1.3 Robust update and dead pixels
 
@@ -52,7 +52,7 @@ where $s_v$ is the variance scale of §2.2. Before calibration the `shrinkage` p
 
 ## 2. Calibration on the seed frames
 
-Calibration runs once on $F_s$ randomly drawn **seed frames** (`--seed-frames`, default 32) after they have warmed the model (`Probixi.calibrate`, `probixi.py`). Everything in this section is learned unless marked fixed.
+Calibration runs once on $F_s$ randomly drawn *seed frames* (`--seed-frames`, default 32) after they have warmed the model (`Probixi.calibrate`, `probixi.py`). Everything in this section is learned unless marked fixed.
 
 ### 2.1 Static shadows
 
@@ -94,7 +94,7 @@ $$
 
 falling back to $v_r = 0$, $g = \operatorname{med}_b(\bar\sigma^2_b/\bar\mu_b)$ if the fit is unphysical. $g$ is the *measured* gain and is what the stream header reports as `probixi/adu_per_photon`.
 
-Unless `--flux-variance` or `--no-flux-variance` is given, calibration decides (`background_fluctuation_ratio`, `calibrate.py`). The running variance $\sigma_0^2$ also holds every shot-to-shot change of the level, which the per-frame local background removes again, so on the brightest quarter of the background, in up to 16 seed frames, the median of $\sigma_0^2/\ell_{\sigma^2}$ against the frame's own local variance is $\approx 1$ for a steady exposure and $1 + \operatorname{var}(s)\,N_\gamma$ for a level scaling by $s$ between shots on $N_\gamma$ background photons. Above 1.5 the photon-transfer model is used: β<sub>2</sub>AR (Jungfrau, SwissFEL) 7.9, rhodopsin (MPCCD, SACLA) 4.2, run0037 (Jungfrau, Cristallina) 2.2; C1C2 (0.95) and bR (0.86, both Eiger at SLS) stay off.
+Unless `--flux-variance` or `--no-flux-variance` is given, calibration decides (`background_fluctuation_ratio`, `calibrate.py`). The running variance $\sigma_0^2$ also holds every shot-to-shot change of the level, which the per-frame local background removes again, so on the brightest quarter of the background, in up to 16 seed frames, the median of $\sigma_0^2/\ell_{\sigma^2}$ against the frame's own local variance is $\approx 1$ for a steady exposure and $1 + \operatorname{var}(s)\,N_\gamma$ for a level scaling by $s$ between shots on $N_\gamma$ background photons. Above 1.5 the photon-transfer model is used ([values per dataset](../vignettes/variable_flux.md#automatic-selection-of-the-flux-model)).
 
 ### 2.5 Eigen-background (optional)
 
@@ -114,7 +114,7 @@ $$
 \tau = \min\{T^\star : \operatorname{med}_{\text{quiet}} \#\text{blobs}(T^\star) \le N_{\text{noise}}\}, \qquad N_{\text{noise}} = 5 \ (\texttt{--target-noise-peaks}),
 $$
 
-i.e. the lowest threshold at which a signal-free frame yields at most $N_{\text{noise}}$ spurious blobs. Hit-only input has no quiet frame; the counts are then taken on the mirrored statistic $-\min_k \text{MF}_k$ over all seed frames, which positive signal never populates and symmetric noise populates as often as $T$ (the lower half by $\max T$ remains the fallback when even the lowest grid value leaves fewer than $N_{\text{noise}}$ mirrored blobs, i.e. strongly skewed low-count noise). If no grid value achieves this, $\tau$ pins at the grid maximum 8.0, which is the symptom that revealed the shadow problem of §2.1.
+i.e. the lowest threshold at which a signal-free frame yields at most $N_{\text{noise}}$ spurious blobs. Hit-only input has no quiet frame; the counts are then taken on the mirrored statistic $-\min_k \text{MF}_k$ over all seed frames, which positive signal never populates and symmetric noise populates as often as $T$ (the lower half by $\max T$ remains the fallback when even the lowest grid value leaves fewer than $N_{\text{noise}}$ mirrored blobs, i.e. strongly skewed low-count noise). If no grid value achieves this, $\tau$ pins at the grid maximum 8.0; the usual cause is unmodelled structure such as the shadows of §2.1.
 
 ### 2.7 Frame level and the blank-shot screen
 
@@ -189,7 +189,7 @@ For a blob $B$ with weights $w_p = \max(E(p), 0)$ (`compute_blob_stats`, `peaks/
 
 | quantity | definition |
 |---|---|
-| size $n_B$ | $|B|$ (px) |
+| size $n_B$ | $\lvert B\rvert$ (px) |
 | centroid $(\bar i, \bar j)$ | $\sum_B w_p\,p / \sum_B w_p$ (px) |
 | intensity $I_B$ | $\sum_B E(p)$ (ADU, signed) |
 | $\sigma(I_B)$ | $\sqrt{\sum_B \sigma^2_{\text{eff}}(p)}$ |
@@ -205,6 +205,7 @@ $$
 $$
 
 four times the area a Gaussian of width $\sigma_{\max}$ and peak response $R_B$ has above $\tau$, which allows a bright spot the footprint its own response implies while `size_max` $= 30$ binds only dim blobs. The kept centroids, $I_B$, $\sigma(I_B)$, background sums and pixel counts are the *peaks* handed to indexing and written to the `Peaks from peak search` table.
+
 ## 4. From pixels to reciprocal space
 
 ### 4.1 The forward model
@@ -251,12 +252,12 @@ a quarter of the shortest reciprocal axis of the target cell, so it scales with 
 
 The cell is known; only $\mathbf U$ is sought (`sphere_seed_candidates`, `indexer/seed.py`). Peaks are capped to the 80 brightest (`max_seed_peaks`) for seeding. With $\hat{\mathbf a}$ the direct $a$-axis of the target cell and $L_a = |\mathbf a|$:
 
-1. **Directions.** $2n_d$ directions $\pm\hat{\mathbf d}_i$ from a Fibonacci hemisphere, $n_d = \max\big(6000,\; 6000\,(L_a / 55\,\text{Å})^2\big)$ by default (`n_directions`), so the grid spacing tracks the fitness peak width $\sim 1/(L_a q)$.
-2. **Integer-projection fitness.** Placing $\mathbf a$ along $\hat{\mathbf d}$, every peak's projection $L_a\,\hat{\mathbf d}\cdot\mathbf q_i$ must be near an integer if the direction is right:
+1. Directions. $2n_d$ directions $\pm\hat{\mathbf d}_i$ from a Fibonacci hemisphere, $n_d = \max\big(6000,\; 6000\,(L_a / 55\,\text{Å})^2\big)$ by default (`n_directions`), so the grid spacing tracks the fitness peak width $\sim 1/(L_a q)$.
+2. Integer-projection fitness. Placing $\mathbf a$ along $\hat{\mathbf d}$, every peak's projection $L_a\,\hat{\mathbf d}\cdot\mathbf q_i$ must be near an integer if the direction is right:
    $$F(\hat{\mathbf d}) = \frac{\sum_i w_i \cos\!\big(2\pi L_a\,\hat{\mathbf d}\cdot\mathbf q_i\big)}{\sum_i w_i},$$
    with $w_i$ the peaks' posterior means (§3.3). The 64 best directions are kept (`2 * top_directions`).
-3. **Roll.** For each kept direction, the shortest-arc rotation $\mathbf R_0: \hat{\mathbf a} \to \hat{\mathbf d}$ is combined with $n_s = 120$ rolls about $\hat{\mathbf d}$ (`n_spin`), $\mathbf U = \mathbf R(\theta_s\hat{\mathbf d})\,\mathbf R_0$, giving $64 \times 120$ candidate $\mathbf A = \mathbf U\mathbf B$.
-4. **Score.** $S(\mathbf A) = \sum_i w_i\,\mathbb 1\big[|\mathbf A\,\operatorname{round}(\mathbf A^{-1}\mathbf q_i) - \mathbf q_i| < q_{\text{tol}}\big]$; the top 64 (`max_candidates`) go to refinement.
+3. Roll. For each kept direction, the shortest-arc rotation $\mathbf R_0: \hat{\mathbf a} \to \hat{\mathbf d}$ is combined with $n_s = 120$ rolls about $\hat{\mathbf d}$ (`n_spin`), $\mathbf U = \mathbf R(\theta_s\hat{\mathbf d})\,\mathbf R_0$, giving $64 \times 120$ candidate $\mathbf A = \mathbf U\mathbf B$.
+4. Score. $S(\mathbf A) = \sum_i w_i\,\mathbb 1\big[|\mathbf A\,\operatorname{round}(\mathbf A^{-1}\mathbf q_i) - \mathbf q_i| < q_{\text{tol}}\big]$; the top 64 (`max_candidates`) go to refinement.
 
 Frames with fewer than 5 peaks are not attempted; below 30 peaks the direction and roll grids are doubled (`adaptive_sparse`).
 
@@ -301,7 +302,7 @@ The prior is a unit-variance Tikhonov term of width one third of the cell-match 
 
 With `max_lattices` $> 1$ the peaks explained by an accepted lattice, $|\mathbf A\mathbf h_i - \mathbf q_i| < q_{\text{tol}}$ of §4.3 (`peel_radius`), are removed and the residue re-seeded while at least 6 remain. With `--enrich-gate` each lattice is gated on enrichment (§7.4) as it is found; one that fails is not kept but its peaks are still removed, and every pass counts toward `max_lattices`; a new $\mathbf A$ within 2 % (Frobenius) of an existing one in any setting, $\mathbf A_{\text{new}} \approx \mathbf A\mathbf T$ with $\mathbf T$ integral and unimodular (sign flips, axis swaps), is a duplicate and is skipped.
 
-### 5.6 Camera length
+### 5.6 Camera-length refinement
 
 Cell scale and camera length are degenerate only at low angle. For an indexed peak at lab radius $\rho$ (px) and scattering angle $2\theta$, a relative camera-length error $\epsilon$ moves the prediction radially by $\rho\,\epsilon$ and a crystal's isotropic cell-scale error $\eta_c$ by $\rho\,\eta_c/\cos 2\theta$ (`camera_length_error`, `probixi.py`). On the seed lattices,
 
@@ -326,7 +327,8 @@ R(q) = r_{\text{size}} + \tfrac12\,\eta\,q + \tfrac12\,\lambda\,\beta_{bw}\,q^2,
 \tau(q) = \max\!\big(\lambda\cdot 1.5\cdot R(q),\ 5\times10^{-4}\big),
 $$
 
-where $r_{\text{size}} = 5\times10^{-5}\ \text{Å}^{-1}$ is the domain-size term (`domain_size_recip`, fixed), $\beta_{bw} = \Delta\lambda/\lambda$ the bandwidth (default 0), the factor 1.5 is `predict_sigma` and $5\times10^{-4}$ the `partiality_threshold` floor. The mosaicity $\eta$ is **learned per crystal** from its indexed peaks (`estimate_mosaicity`): with $r_{s,i} = |\varepsilon_i|/\lambda - \tfrac12\lambda\beta_{bw}q_i^2$ the through-origin fit $r_s = \tfrac12\eta\,q$ gives $\eta = 2\,\sqrt{\pi/2}\,\sum_i q_i r_{s,i} / \sum_i q_i^2$ (half-normal mean to $\sigma$), clamped to $[0.02^\circ, 0.8^\circ]$ and falling back to the prior $0.1^\circ$ below 8 peaks. Predicted positions come from `q_to_detector`; those off the detector are dropped. The rocking radius at the crystal's resolution limit is what the stream reports as `profile_radius` (§8).
+where $r_{\text{size}} = 5\times10^{-5}\ \text{Å}^{-1}$ is the domain-size term (`domain_size_recip`, fixed), $\beta_{bw} = \Delta\lambda/\lambda$ the bandwidth (default 0), the factor 1.5 is `predict_sigma` and $5\times10^{-4}$ the `partiality_threshold` floor. The mosaicity $\eta$ is learned per crystal from its indexed peaks (`estimate_mosaicity`): with $r_{s,i} = |\varepsilon_i|/\lambda - \tfrac12\lambda\beta_{bw}q_i^2$ the through-origin fit $r_s = \tfrac12\eta\,q$ gives $\eta = 2\,\sqrt{\pi/2}\,\sum_i q_i r_{s,i} / \sum_i q_i^2$ (half-normal mean to $\sigma$), clamped to $[0.02^\circ, 0.8^\circ]$ and falling back to the prior $0.1^\circ$ below 8 peaks. Predicted positions come from `q_to_detector`; those off the detector are dropped. The rocking radius at the crystal's resolution limit is what the stream reports as `profile_radius` (§8).
+
 ## 7. Integration
 
 ### 7.1 Learning the aperture
@@ -337,7 +339,9 @@ $$
 P(b) = \operatorname{med}_i\,\bar E_i(b), \qquad p(b) = P(b) - \min_b P(b), \qquad b = 0, \dots, 16 .
 $$
 
-**Flux rule** (`radii_from_profile`, `integrate.py`). A Gaussian is fitted to the core, $\ln p(b) = \text{const} + s\,b^2$ over the rings before $p$ first drops below $10\,\%$ of $p(0)$, giving $\sigma_{\text{spot}} = \sqrt{-1/2s}$ and the radius at which the spot falls to the `floor` of 2 %:
+#### Flux rule
+
+`radii_from_profile`, `integrate.py`. A Gaussian is fitted to the core, $\ln p(b) = \text{const} + s\,b^2$ over the rings before $p$ first drops below $10\,\%$ of $p(0)$, giving $\sigma_{\text{spot}} = \sqrt{-1/2s}$ and the radius at which the spot falls to the `floor` of 2 %:
 
 $$
 r_{\text{sig}} = \sigma_{\text{spot}}\sqrt{-2\ln 0.02} \approx 2.8\,\sigma_{\text{spot}}, \qquad
@@ -347,7 +351,9 @@ $$
 
 so the background annulus always holds about 120 pixels (`background_pixels`, fixed) and starts one pixel outside the spot.
 
-**SNR rule** (`--aperture snr`; `snr_disk_radius`, `integrate.py`). With $n(b)$ the number of integer offsets on ring $b$, the disk radius is the one maximising the background-limited signal-to-noise of the *profile*:
+#### SNR rule
+
+`--aperture snr`; `snr_disk_radius`, `integrate.py`. With $n(b)$ the number of integer offsets on ring $b$, the disk radius is the one maximising the background-limited signal-to-noise of the *profile*:
 
 $$
 S(k) = \sum_{b\le k} p(b)\,n(b), \qquad N(k) = \sum_{b\le k} n(b), \qquad
@@ -356,17 +362,21 @@ $$
 
 with $r_{\text{in}}, r_{\text{out}}$ left at the flux-rule values so the annulus still clears the 2 % radius. On 1 px spots this gives a $3\times3$ disk ($r_{\text{sig}} = 1.5$) where the flux rule gave 5 px; on broad spots both rules agree. If too few peaks are found the indexer falls back to $(3.0, 4.0, 7.36)$ px (`FALLBACK_RADII`).
 
-**Predicted positions** The profile above is centred on found peaks. A reflection with no peak within the snap radius is integrated at its prediction, so its profile is the spot convolved with the prediction error, which grows with $|q|$. While the seed lattices are integrated, the excess (clipped at $10\sigma$) is stacked around their unsnapped predictions in 12 shells of equal reciprocal volume; per shell, $p(b)$ is the stacked ring mean less its mean over rings 6–8, and the disk radius is the smallest $k + 0.5$, $1 \le k \le 4$, with $S(k)/\sqrt{N(k)}$ within 2 % of its maximum, provided $S(k)$ exceeds five standard errors. Otherwise, and whenever smaller, the previous shell's radius is kept, starting from $r_{\text{sig}}$. Such a reflection's annulus starts at $\max(r_{\text{in}}, r + 1)$ and keeps the pixel count of the learned annulus.
+#### Radii for unsnapped predictions
 
-**Auto rule** (default, `--aperture auto`; `choose_aperture`). The SNR disk captures a fraction $f$ of each spot's flux. Not every loss survives merging: a per-crystal constant is absorbed by that crystal's scale factor, and a resolution trend common to all crystals by an overall $B$. What no scale model removes is a resolution dependence of $f$ that *differs between crystals*, as it does when their mosaicity differs, and that is what the rule measures. On strong ($I/\sigma \ge 10$ in the flux disk, both disks corrected by the peak's own annulus as in 7.2), isolated (no neighbour within $2 r_{\text{sig}}^{\text{flux}} + 1$ px) calibration peaks with their frame ids, the trend common to all crystals is estimated first (weighted means of $\log f$ in $|q|^2$ bins, interpolated) and removed, since a curved common trend would otherwise read as crystal-specific slopes wherever crystals sample different $|q|$ ranges. Each crystal's residual $\log f$ is then regressed on $|q|^2$; the slope errors are calibrated on the pooled within-crystal residuals, so per-reflection scatter (sub-pixel centring, spot shape) does not count as a crystal difference. The spread of the slopes beyond their errors, times the $|q|^2$ span from the median to the 90th percentile, is the intensity error the SNR disk would leave at the resolution edge. It is estimated with a winsorised $\chi^2$ (each crystal's standardised deviation capped at 9, against the null mean 0.995 and variance 1.90 of a capped $\chi^2_1$), so a few wild crystals cannot decide. If it reaches 2 % (`aperture_tolerance`) at $\ge 3\sigma$, the flux disk is taken unless its extra background costs more: on the weaker half in $I/\sigma$ of the outer half in $|q|$ of all usable calibration peaks (the edge reflections that limit a merge are weaker still than detected spots), the median of $(\sigma_f^2/I_f^2)/(\sigma_s^2/I_s^2 + \delta^2)$, with $\delta$ that spread, must stay below 1 (`noise_ratio`). Otherwise the SNR disk stays. Fewer than 50 usable peaks or 10 crystals keep the SNR disk. The choice, its reason, the common trend, the crystal spread and its significance are printed after calibration; the stream header records the rule actually applied.
+The profile above is centred on found peaks. A reflection with no peak within the snap radius is integrated at its prediction, so its profile is the spot convolved with the prediction error, which grows with $|q|$. While the seed lattices are integrated, the excess (clipped at $10\sigma$) is stacked around their unsnapped predictions in 12 shells of equal reciprocal volume; per shell, $p(b)$ is the stacked ring mean less its mean over rings 6–8, and the disk radius is the smallest $k + 0.5$, $1 \le k \le 4$, with $S(k)/\sqrt{N(k)}$ within 2 % of its maximum, provided $S(k)$ exceeds five standard errors. Otherwise, and whenever smaller, the previous shell's radius is kept, starting from $r_{\text{sig}}$. Such a reflection's annulus starts at $\max(r_{\text{in}}, r + 1)$ and keeps the pixel count of the learned annulus.
+
+#### Auto rule
+
+Default, `--aperture auto`; `choose_aperture`. The SNR disk captures a fraction $f$ of each spot's flux. Not every loss survives merging: a per-crystal constant is absorbed by that crystal's scale factor, and a resolution trend common to all crystals by an overall $B$. What no scale model removes is a resolution dependence of $f$ that *differs between crystals*, as it does when their mosaicity differs, and that is what the rule measures. On strong ($I/\sigma \ge 10$ in the flux disk, both disks corrected by the peak's own annulus as in 7.2), isolated (no neighbour within $2 r_{\text{sig}}^{\text{flux}} + 1$ px) calibration peaks with their frame ids, the trend common to all crystals is estimated first (weighted means of $\log f$ in $|q|^2$ bins, interpolated) and removed, since a curved common trend would otherwise read as crystal-specific slopes wherever crystals sample different $|q|$ ranges. Each crystal's residual $\log f$ is then regressed on $|q|^2$; the slope errors are calibrated on the pooled within-crystal residuals, so per-reflection scatter (sub-pixel centring, spot shape) does not count as a crystal difference. The spread of the slopes beyond their errors, times the $|q|^2$ span from the median to the 90th percentile, is the intensity error the SNR disk would leave at the resolution edge. It is estimated with a winsorised $\chi^2$ (each crystal's standardised deviation capped at 9, against the null mean 0.995 and variance 1.90 of a capped $\chi^2_1$), so a few wild crystals cannot decide. If it reaches 2 % (`aperture_tolerance`) at $\ge 3\sigma$, the flux disk is taken unless its extra background costs more: on the weaker half in $I/\sigma$ of the outer half in $|q|$ of all usable calibration peaks (the edge reflections that limit a merge are weaker still than detected spots), the median of $(\sigma_f^2/I_f^2)/(\sigma_s^2/I_s^2 + \delta^2)$, with $\delta$ that spread, must stay below 1 (`noise_ratio`). Otherwise the SNR disk stays. Fewer than 50 usable peaks or 10 crystals keep the SNR disk. The choice, its reason, the common trend, the crystal spread and its significance are printed after calibration; the stream header records the rule actually applied.
 
 ### 7.2 Ring integration of a predicted reflection
 
 For each predicted position (`integrate_rings`, `integrate.py`), first snapped onto an observed peak centroid within 5 px (`snap_radius`) when one exists, the raw frame is $R = E + \mu_{\text{eff}}$ and pixel offsets $(\delta r, \delta c)$ about the rounded centre have $\rho^2 = \delta r^2 + \delta c^2$:
 
-- **annulus** $\mathcal A_i = \{r_{\text{in}}^2 \le \rho^2 \le r_{\text{out}}^2\}$ on live in-frame pixels, $n_{b,i} = |\mathcal A_i|$,
+- annulus $\mathcal A_i = \{r_{\text{in}}^2 \le \rho^2 \le r_{\text{out}}^2\}$ on live in-frame pixels, $n_{b,i} = |\mathcal A_i|$,
   $$B_i = \frac{1}{n_{b,i}}\sum_{\mathcal A_i} R_p \ [\text{ADU/px}], \qquad s^2_{b,i} = \frac{1}{n_{b,i}-1}\sum_{\mathcal A_i}(R_p - B_i)^2 ;$$
-- **disk** $\mathcal D_i = \{\rho^2 \le r_{\text{sig}}^2\}$, *deblended*: a pixel claimed by several disks belongs to the reflection whose (unrounded) centre is nearest, ties to the lower index; the owned set is $\mathcal U_i$ with $n_i = |\mathcal U_i|$ pixels.
+- disk $\mathcal D_i = \{\rho^2 \le r_{\text{sig}}^2\}$, *deblended*: a pixel claimed by several disks belongs to the reflection whose (unrounded) centre is nearest, ties to the lower index; the owned set is $\mathcal U_i$ with $n_i = |\mathcal U_i|$ pixels.
 
 $$
 I_i = \sum_{p\in\mathcal U_i}(R_p - B_i)\ [\text{ADU}], \qquad
@@ -392,22 +402,22 @@ $$
 
 The variance follows from §3.1: the only frame-dependent part of $\mu_{\text{eff}}$ under a disk is the single local-annulus mean $\ell_\mu$ shared by all $n_i$ pixels, whose variance is $\bar V/n_{\text{bg}}$, so the summed background has variance $n_i^2\,\bar V/n_{\text{bg}}$. Compared with the ring estimate's $c\,B_i n_i$ with $c = n_i/n_{b,i}$, this is smaller by roughly $n_{b,i}/n_{\text{bg}}$ and carries no Poisson-count bias. It is written as the extra columns `n_pix bg_model bg_model_var` for a merging program that models the background explicitly (torchsx `--background model`).
 
-### 7.4 Enrichment: is this lattice real?
+### 7.4 Enrichment test
 
-A lattice that explains a handful of noise blobs must not survive. Before integrating, the predicted positions are tested against the image (`spot_enrichment`, `integrate.py`). With $z = E/\sqrt{V}$, a pixel is *bright* when the $5\times5$ maximum of $z$ around it exceeds the detection threshold $\tau$; the background bright rate is $p_0 = \#\{\text{bright live pixels}\}/\#\{\text{live pixels}\}$. Of the $n_{\text{keep}}$ predicted centres on live pixels, $n_{\text{bright}}$ land on bright pixels, and
+Before integrating, the predicted positions are tested against the image, which rejects a lattice fitted to a handful of noise blobs (`spot_enrichment`, `integrate.py`). With $z = E/\sqrt{V}$, a pixel is *bright* when the $5\times5$ maximum of $z$ around it exceeds the detection threshold $\tau$; the background bright rate is $p_0 = \#\{\text{bright live pixels}\}/\#\{\text{live pixels}\}$. Of the $n_{\text{keep}}$ predicted centres on live pixels, $n_{\text{bright}}$ land on bright pixels, and
 
 $$
 \text{enrichment} = \frac{n_{\text{bright}}/n_{\text{keep}}}{p_0}, \qquad
 \texttt{enrich\_p} = \Pr\big[X \ge n_{\text{bright}}\big],\ X \sim \text{Poisson}(n_{\text{keep}}\,p_0) .
 $$
 
-An enrichment near 1 is a lattice indistinguishable from chance; `--enrich-gate` drops crystals with $\texttt{enrich\_p} > \alpha$, $\alpha = 10^{-3}$ (`--enrich-alpha`). The bright spots a lattice was fitted to cannot prove it real: on a crowded frame an orientation optimised against 100 peaks catches a dozen by chance, and snapping moves predictions onto peaks up to `snap_radius` away. After integration the lattice must therefore also carry signal where no found peak explains it. Over the predictions that were not snapped and lie inside the crystal's limit (§7.5), $z = \sum_i I_i/\sigma_i \,/\, \sqrt{n}$ is $\sim\mathcal N(0, 1)$ for a chance lattice and large for a real one (`unexplained_signal_p`); $\texttt{enrich\_p}$ is the larger of the two chance probabilities, $\Pr[X \ge n_{\text{bright}}]$ and $1 - \Phi(z)$. On SACLA rhodopsin (0.8.3, seg1) 3.7 % of first, 17 % of second and 36 % of third lattices did not correlate with an independent CrystFEL merge (Fisher $z_{CC} < 2$); on that stream this test rejects 86 % of them and 1.8 % of the lattices with $z_{CC} \ge 3$. Both numbers are written per crystal.
+An enrichment near 1 is a lattice indistinguishable from chance; `--enrich-gate` drops crystals with $\texttt{enrich\_p} > \alpha$, $\alpha = 10^{-3}$ (`--enrich-alpha`). The bright spots a lattice was fitted to cannot prove it real: on a crowded frame an orientation optimised against 100 peaks catches a dozen by chance, and snapping moves predictions onto peaks up to `snap_radius` away. After integration the lattice must therefore also carry signal where no found peak explains it. Over the predictions that were not snapped and lie inside the crystal's limit (§7.5), $z = \sum_i I_i/\sigma_i \,/\, \sqrt{n}$ is $\sim\mathcal N(0, 1)$ for a chance lattice and large for a real one (`unexplained_signal_p`); $\texttt{enrich\_p}$ is the larger of the two chance probabilities, $\Pr[X \ge n_{\text{bright}}]$ and $1 - \Phi(z)$.
 
 ### 7.5 Resolution limit and profile radius
 
 The crystal's diffraction limit is the more generous of two estimates. The first is the second-highest $|\mathbf q|$ among its indexed peaks, so that one hot pixel or noise peak that a dense high-resolution lattice indexes by chance cannot set it. The second is where its shell-averaged $I/\sigma$ falls to 0.5 (`falloff_resolution_limit`, `resolution_isigma`), with predicted reflections sorted by $|\mathbf q|$ into 10 equal-count shells and the crossing interpolated linearly between the two shells that bracket it. With fewer than 40 reflections, or when not even the innermost shell reaches 0.5, the second estimate is skipped, and when neither exists the 0.90 quantile of the observed peaks' $|\mathbf q|$ is used. It is reported (`diffraction_resolution_limit`, nm$^{-1}$) but never used to truncate the reflection list. The `profile_radius` is the rocking half-width of §6 evaluated at that limit, $R(q_{\text{lim}})$, converted to nm$^{-1}$ and clamped to $[5\times10^{-4}, 2\times10^{-2}]$.
 
-## 8. What is written
+## 8. Output contents
 
 Per frame: the peak list (fs, ss, $10|\mathbf q|$ in nm$^{-1}$, $I_B$), `hit = [n_{\text{peaks}} \ge 5]`. Per crystal: the cell recovered from $\mathbf A$ (nm, degrees), $\mathbf a^*, \mathbf b^*, \mathbf c^*$ as the columns of $10\,\mathbf A$ (nm$^{-1}$), `profile_radius`, the diffraction limit, and the reflection table:
 
@@ -424,7 +434,7 @@ A disk touching the mask, the frame edge or another predicted disk is not writte
 
 The stream carries nothing CrystFEL does not read. The DuckDB output holds the recipe the run actually used in `integration` ($r_{\text{sig}}, r_{\text{in}}, r_{\text{out}}$; $g$, the measured gain when the flux model is on, else the geometry's; $n_{\text{bg}}$; the aperture rule), the per-crystal diagnostics (`rmsd`, `mosaicity_deg`, `enrichment`, `enrich_p` on `crystals`, `scale` $= s \pm \sigma_s$ of §2.9 on `frames`), and per reflection `n_pixels` $= n_i$, `background_model` $= \sum_{\mathcal U_i}\mu_{\text{eff}}$ (ADU) and `background_model_var` $= \tfrac{n_i}{n_{\text{bg}}}\sum_{\mathcal U_i}V_p$ (ADU$^2$); `peaks` carries `photons` $= (I_B + \text{bg})/g$ and `background_photons` $= \text{bg}/g$ for every searched peak.
 
-## 9. Handing over to merging
+## 9. Inputs to Poisson merging
 
 A merging program that models detection as $n \sim \text{Poisson}(S + b)$ needs the raw disk count and an estimate of $b$ with its uncertainty. From the database columns, in photons,
 
@@ -457,7 +467,7 @@ The ring pair is the CrystFEL convention (torchsx `--background annulus`); the m
 | $s, \sigma_s$ | per-frame scale and its uncertainty | | §2.9 |
 | $\mathbf q, \lambda, L, p$ | scattering vector, wavelength, camera length, pixel size | Å$^{-1}$, Å, Å, Å | §4.1 |
 | $\mathbf A = \mathbf U\mathbf B$, $\mathbf h$ | orientation matrix, reciprocal basis, Miller indices | Å$^{-1}$ | §4.2 |
-| $q_{\text{tol}}$ | reciprocal tolerance, $0.25\min|\mathbf a^*, \mathbf b^*, \mathbf c^*|$ | Å$^{-1}$ | §4.3 |
+| $q_{\text{tol}}$ | reciprocal tolerance, $0.25\min\lvert\mathbf a^*, \mathbf b^*, \mathbf c^*\rvert$ | Å$^{-1}$ | §4.3 |
 | $m_i, n_{\text{idx}}, \text{rmsd}$ | inlier indicator, count, residual | Å$^{-1}$ | §5.2 |
 | $\hat{\mathbf k}_i, d_\parallel, \mathbf d_\perp, s_\parallel, s_\perp$ | scattered ray, residual components, whitening scales | Å$^{-1}$ | §5.4 |
 | $\boldsymbol\sigma_{\text{prior}}$ | cell prior width, tolerance/3 | Å, rad | §5.4 |

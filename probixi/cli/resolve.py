@@ -12,37 +12,40 @@ import click
     type=click.Path(exists=True, dir_okay=False),
     help="DuckDB database written by probixi (.duckdb/.db).",
 )
-@click.option("-y", "--symmetry", required=True, help="Actual point group, e.g. '3'.")
+@click.option(
+    "-y", "--symmetry", required=True, help="Point group of the structure, e.g. '3'."
+)
 @click.option(
     "-w",
     "--apparent",
     required=True,
-    help="Apparent (lattice) point group, e.g. '321'. The ambiguity operator is "
-    "derived from it and --symmetry.",
+    help="Apparent point group of the lattice, e.g. '321'; with --symmetry it "
+    "fixes the ambiguity operator.",
 )
 @click.option(
     "-o",
     "--output",
     default=None,
     type=click.Path(dir_okay=False, writable=True),
-    help="Reindex a copy written here, leaving the input alone. Without it "
-    "the input database is rewritten in place.",
+    help="Write the reindexed database here; without it the input is rewritten "
+    "in place.",
 )
 @click.option(
     "-n", "--iterations", default=6, show_default=True, help="Refinement passes."
 )
 @click.option(
-    "--ncorr", default=1000, show_default=True, help="Partners correlated per crystal."
+    "--ncorr",
+    default=1000,
+    show_default=True,
+    help="Partner crystals correlated per crystal.",
 )
-@click.option("--lowres", default=None, type=float, help="Low-resolution cutoff in A.")
+@click.option("--lowres", default=None, type=float, help="Low-resolution cutoff (A).")
+@click.option("--highres", default=None, type=float, help="High-resolution cutoff (A).")
 @click.option(
-    "--highres", default=None, type=float, help="High-resolution cutoff in A."
-)
-@click.option(
-    "--seed", default=1988, show_default=True, help="Seeds the starting split."
+    "--seed", default=1988, show_default=True, help="Seed for the starting split."
 )
 @click.option("--device", default=None, help="Torch device, or 'auto'.")
-@click.option("--quiet", is_flag=True, help="Only report errors.")
+@click.option("--quiet", is_flag=True, help="Print only the summary and errors.")
 def main(
     database,
     symmetry,
@@ -56,11 +59,11 @@ def main(
     device,
     quiet,
 ):
-    """Resolve the indexing ambiguity in a probixi DuckDB run.
+    """Resolve the indexing ambiguity of the crystals in a probixi DuckDB run.
 
-    Clusters the crystals into the two indexing choices of --symmetry under
-    --apparent, then reindexes the crystals on the wrong side. The algorithm
-    is CrystFEL's ambigator, by Thomas White.
+    Clusters the crystals into the two indexing choices that --apparent allows
+    for --symmetry and reindexes those on the wrong side, following the method
+    of Brehm and Diederichs as CrystFEL's ambigator (Thomas White) implements it.
 
         probixi-resolve -i run.duckdb -y 3 -w 321 -o detwinned.duckdb
     """

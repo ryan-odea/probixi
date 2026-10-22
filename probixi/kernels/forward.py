@@ -5,15 +5,17 @@ import triton.language as tl
 BLOCK = 128
 
 
-# CONST = [bc_row, bc_col, pix_A, clen_A, wavelength_A] (see indexer.forward._constants)
+# BASES (P, 10) = [min_ss, max_ss, min_fs, max_fs, cx, cy, fs_x, fs_y, ss_x, ss_y]
 @triton.jit(do_not_specialize=["N", "P"])
 def lift_kernel(POS, BASES, CONST, OUT, N, P, BLOCK: tl.constexpr):
+    # q = (s - s0) / lambda in A^-1, with s the unit ray to the pixel and s0 = +z
     i = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
     valid = i < N
     row = tl.load(POS + i * 2, valid, 0.0)
     col = tl.load(POS + i * 2 + 1, valid, 0.0)
-    pix = tl.load(CONST + 2)
+    pix = tl.load(CONST + 2)  # CONST = [bc_row, bc_col, pix_A, clen_A, wavelength_A]
     clen = tl.load(CONST + 3)
+    # off every panel, a flat detector about the beam centre
     x = col - tl.load(CONST + 1)
     y = row - tl.load(CONST)
     for p in range(P):
@@ -64,6 +66,7 @@ def project_kernel(Q, BASES, CONST, OUT, N, P, BLOCK: tl.constexpr):
         row = y_pix + tl.load(CONST)
         col = x_pix + tl.load(CONST + 1)
     else:
+        # NaN unless the ray meets a panel with sz > 0; the first such panel wins
         row = tl.full((BLOCK,), float("nan"), tl.float32)
         col = tl.full((BLOCK,), float("nan"), tl.float32)
         found = i < 0

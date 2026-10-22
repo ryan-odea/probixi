@@ -98,7 +98,7 @@ def test_sampled_frames_are_deterministic_spread_and_disjoint():
     assert len(warmup) == 32 and warmup == sorted(warmup)
     assert warmup == p._sample_frame_indices(32)
     assert warmup != pipeline(1989)._sample_frame_indices(32)
-    # spread over the run, not the leading frames
+    # sampled across the run rather than from its first frames
     assert max(warmup) > 500
     training = p._sample_frame_indices(32, warmup)
     assert not set(training) & set(warmup)

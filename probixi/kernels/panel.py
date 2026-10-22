@@ -60,9 +60,11 @@ def finish(
 
 
 class TiledPanelProjector:
+    # (n_panels,) mean of a frame over the valid pixels, and over mask when given
     def __init__(self, panel, block=4096):
         self.panel = panel
         self.block = block
+        # a panel's pixels form several flat runs; tiles cut runs, ptr groups by panel
         ids = panel._pid_flat.detach().cpu().numpy()
         bounds = np.r_[0, np.flatnonzero(ids[1:] != ids[:-1]) + 1, ids.size]
         runs = [[] for _ in range(panel.n_panels)]
@@ -131,5 +133,6 @@ class TiledPanelProjector:
             enable_fp_fusion=False,
         )
         self.mask_key = key
+        # hold both masks so their id() stays unique while mask_key names them
         self.mask_ref = (p.valid_mask, mask)
         return out

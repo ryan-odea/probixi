@@ -10,41 +10,42 @@ from .writer import _build_frame_ranges
 
 PathLike = str | Path
 
-PEAK_LIST_PATH = "/entry_1/result_1"
+PEAK_LIST_PATH = "/entry_1/result_1"  # Cheetah's CXI peak-list group
 
 
 class PeakOffloader:
-    """Write peak-search results as CrystFEL-readable CXI files.
+    """Write peak-search results as CXI files for ``indexamajig --peaks=cxi``.
 
-    Exports peaks in the CXI layout so that ``indexamajig --peaks=cxi`` can
-    re-index probixi's peaks with its own engine. One ``.cxi`` is written per source HDF5 file; each external-links
-    the raw image stack and stores the peak arrays under ``/entry_1/result_1`` indexed by event.
-
-    Alongside the ``.cxi`` files it writes ``peaks.lst`` and a companion
-    geometry file (the input geometry plus ``peak_list``/``peak_list_type``),
-    so the output directory is drop-in for indexamajig.
-
-    Note: CBF input has no HDF5 image stack to link; you may wish to
-    write a ``.duckdb`` peak set for it instead.
-
-    Use as a context manager; the instance is the per-frame writer expected by
-    ``PeakStream.for_each`` (``__call__`` forwards to :meth:`write`)::
-
-        with PeakOffloader(out_dir, geometry=geom, geometry_file=gf,
-                           files=meta.files) as off:
-            for result in pipeline.peak_stream(frames):
-                off.write(result)
+    One ``.cxi`` is written per source HDF5 file. It external-links the raw image
+    stack and stores the peaks under ``/entry_1/result_1``, indexed by event. The
+    directory also receives ``peaks.lst`` and ``<geometry>_cxi.geom``, the input
+    geometry with ``peak_list`` and ``peak_list_type`` appended. Nothing is written
+    until the context exits.
 
     Parameters
     ----------
     path : str or Path
-        Output directory (created if absent).
+        Output directory, created on entry.
     geometry_file : str or Path, optional
-        Input geometry file; copied verbatim with peak-list keys appended.
-    files : dict
-        Loader file map (``filename`` -> :class:`~probixi.io.metadata.H5Info`),
-        used to resolve frames to their source file/event and to external-link
-        the raw image stack.
+        Input geometry file. Without it no ``_cxi.geom`` is written.
+    files : dict, optional
+        Loader file map, list entry to :class:`~probixi.io.metadata.H5Info`, which
+        resolves each frame to its source file and event.
+
+    Raises
+    ------
+    ValueError
+        If ``files`` holds CBF or per-event input, which has no image stack to
+        link. Write a DuckDB output for such input.
+
+    Notes
+    -----
+    Use as a context manager. The instance is callable, so it can be passed to
+    ``PeakStream.for_each``::
+
+        with PeakOffloader(out_dir, geometry_file=gf, files=meta.files) as off:
+            for result in pipeline.peak_stream(frames):
+                off.write(result)
     """
 
     def __init__(
@@ -95,6 +96,7 @@ class PeakOffloader:
         return "unknown", int(frame_index)
 
     def write(self, result) -> None:
+        """Buffer the kept peaks of one frame; frames without peaks add nothing."""
         if not self._active:
             raise RuntimeError("PeakOffloader must be used as a context manager")
         stats = result.kept_stats
@@ -107,9 +109,10 @@ class PeakOffloader:
         if not rows:
             return
         fname, event = self._locate(result.frame_index)
-        self._buf.setdefault(fname, {})[event] = (cols, rows, intensities)
+        self._buf.setdefault(fname, {})[event] = (cols, rows, intensities)  # (fs, ss)
 
     def flush(self) -> None:
+        """Write the buffered peaks, ``peaks.lst`` and the geometry; runs on exit."""
         lst_lines: list[str] = []
         for fname in sorted(self._buf):
             info = self._info.get(fname)

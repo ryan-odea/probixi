@@ -36,17 +36,38 @@ def _coord_grids(
 
 @dataclass
 class BlobStats:
-    """Per peak-blob statistics as parallel ``(n_blobs,)`` device tensors.
+    """Per-blob statistics as parallel ``(n_blobs,)`` tensors on the frame's device.
 
-    Fields: label_id (1-based contiguous), size, row/col_centroid
-    (intensity-weighted), bbox_{r0,r1,c0,c1} (r1/c1 exclusive), intensity_sum
-    (excess), intensity_sigma (sqrt of summed per-pixel variance), intensity_max,
-    z_max, log_bf_sum, posterior_mean, eccentricity (lambda_max/lambda_min >= 1),
-    peakedness (intensity_max / mean intensity), background_sum (noise-model
-    mean summed over the blob's own pixels; 0 when no mean map was supplied),
-    response_max (peak matched-filter response over the blob; None when the
-    detection ran without a response map), n_masked (pixels bordering the
-    mask or the frame edge; None until counted).
+    Attributes
+    ----------
+    label_id : Tensor
+        Component label in the label image, 1-based and contiguous.
+    size : Tensor
+        Pixels in the component.
+    row_centroid, col_centroid : Tensor
+        Centroid weighted by the positive excess; the unweighted mean when no
+        pixel has positive excess.
+    bbox_r0, bbox_r1, bbox_c0, bbox_c1 : Tensor
+        Bounding box; ``bbox_r1`` and ``bbox_c1`` are exclusive.
+    intensity_sum, intensity_sigma : Tensor
+        Summed excess over the background and its uncertainty, the root of the
+        summed pixel variance.
+    intensity_max, z_max : Tensor
+        Largest pixel excess and largest whitened residual.
+    log_bf_sum, posterior_mean : Tensor
+        Summed log Bayes factor and mean posterior over the pixels.
+    eccentricity : Tensor
+        Ratio of the weighted second-moment eigenvalues, >= 1; ``inf`` for a single
+        pixel or a straight line.
+    peakedness : Tensor
+        ``intensity_max`` over the mean excess; 0 when the mean is not positive.
+    background_sum : Tensor
+        Background mean summed over the pixels, so ``intensity_sum +
+        background_sum`` is the raw sum; 0 without a mean map.
+    response_max : Tensor or None
+        Largest matched-filter response; None without a response map.
+    n_masked : Tensor or None
+        Pixels with a masked or off-frame 8-neighbour; None until counted.
     """
 
     label_id: Tensor
@@ -88,9 +109,7 @@ def label_connected_components(
     device = mask.device
     out = torch.zeros(H, W, dtype=torch.long, device=device)
 
-    # Work only on foreground pixels: the detector is extremely sparse, so a dense
-    # per-pixel flood over H*W is wasteful. Build the fg adjacency graph and flood
-    # component labels over the ~10^2 fg nodes instead.
+    # Min-label propagation over the foreground adjacency graph, which is sparse
     flat = mask.reshape(-1)
     fg = flat.nonzero(as_tuple=True)[0]
     K = int(fg.numel())
@@ -114,12 +133,12 @@ def label_connected_components(
     c2 = cols[:, None] + coff[None, :]
     valid = (r2 >= 0) & (r2 < H) & (c2 >= 0) & (c2 < W)
     nflat = (r2 * W + c2).clamp_(0, H * W - 1)
-    nbr_c = torch.searchsorted(fg, nflat).clamp_(max=K - 1)  # in [0, K-1]
+    nbr_c = torch.searchsorted(fg, nflat).clamp_(max=K - 1)
     nbr_valid = valid & (fg[nbr_c] == nflat)
 
     labels = torch.arange(K, dtype=torch.long, device=device)
     big = torch.full((), K, dtype=torch.long, device=device)
-    # Convergence needs a host sync (torch.equal)
+    # torch.equal syncs with the host, so convergence is tested every 4th iteration
     check_every = 4
     for it in range(max_iters):
         gathered = torch.where(nbr_valid, labels[nbr_c], big)
@@ -210,8 +229,7 @@ def compute_blob_stats(
     dtype = excess.dtype
     n_total = n_blobs + 1
 
-    # only foreground pixels (label > 0) contribute; gather them once so every
-    # scatter runs over the sparse set, not all H*W (bin 0 stays empty, sliced off)
+    # gather foreground pixels once for every scatter; bin 0 stays empty
     flat_labels_full = labels.flatten()
     fg = flat_labels_full.nonzero(as_tuple=True)[0]
     lbl = flat_labels_full[fg]
@@ -220,8 +238,6 @@ def compute_blob_stats(
     flat_lbf = log_bf.flatten()[fg]
     flat_post = posterior.flatten()[fg]
     flat_var = var.flatten()[fg]
-    # background over the blob's own pixels: paired with intensity_sum (excess)
-    # this gives the observed counts without a second pass over the frame
     flat_mean = (
         mean.flatten()[fg] if mean is not None else torch.zeros_like(flat_excess)
     )
@@ -231,7 +247,7 @@ def compute_blob_stats(
     rows = grid_rows_f[fg]
     cols = grid_cols_f[fg]
 
-    # Fused per-blob reductions: batch each group of same-index scatters into one call over a stacked source.
+    # one scatter call per index set, over stacked sources
     lbl2 = lbl.unsqueeze(1)
     size = torch.zeros(n_total, dtype=torch.long, device=device)
     size.scatter_add_(0, lbl, torch.ones_like(lbl))
@@ -281,7 +297,7 @@ def compute_blob_stats(
     add2 = torch.zeros(n_total, 3, dtype=dtype, device=device)
     add2.scatter_add_(0, lbl2.expand_as(add2_src), add2_src)
     Crr, Ccc, Crc = add2[:, 0] / w_safe, add2[:, 1] / w_safe, add2[:, 2] / w_safe
-    # Closed-form symmetric-2x2 eigenvalues; ratio = eccentricity. disc >=0
+    # closed-form eigenvalues of the symmetric 2x2; the clamp absorbs round-off
     tr = Crr + Ccc
     disc = (tr * tr - 4.0 * (Crr * Ccc - Crc * Crc)).clamp_min(0.0).sqrt()
     lam_max = 0.5 * (tr + disc)
@@ -291,7 +307,6 @@ def compute_blob_stats(
         lam_max / lam_min.clamp_min(1e-12),
         torch.full_like(lam_max, float("inf")),
     )
-    # sigma(I) = sqrt(sum var)
     intensity_sigma = var_sum.sqrt()
 
     # per-blob maxima of (excess, z[, response])
@@ -311,7 +326,7 @@ def compute_blob_stats(
     intensity_max, z_max = amax[:, 0], amax[:, 1]
     response_max = amax[:, 2] if response is not None else None
 
-    # bbox min/max in float (row/col indices exact in float32), cast to long.
+    # bbox reduced in float, where row and col indices are exact, then cast to long
     bbox_lo = torch.empty(n_total, 2, dtype=dtype, device=device)
     bbox_lo[:, 0] = float(H)
     bbox_lo[:, 1] = float(W)
@@ -336,7 +351,7 @@ def compute_blob_stats(
     bbox_c1 = bbox_hi[:, 1].to(torch.long)
 
     intensity_mean = intensity_sum / size_f
-    # peakedness = max/mean (>= 1); gate to 0 for non-positive mean (undefined)
+    # peakedness = max / mean (>= 1), undefined and set to 0 for a non-positive mean
     peakedness = torch.where(
         intensity_mean > 1e-12,
         intensity_max / intensity_mean.clamp_min(1e-12),
@@ -369,6 +384,7 @@ def compute_blob_stats(
 def footprint_cap(
     response_max: Tensor, scale: float, threshold: float, tolerance: float
 ) -> Tensor:
+    # tolerance x 2 pi s^2 ln(R / T), the area where a Gaussian of height R exceeds T
     ratio = (response_max / threshold).clamp_min(1.0)
     return tolerance * 2.0 * math.pi * scale * scale * torch.log(ratio)
 

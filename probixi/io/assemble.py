@@ -62,13 +62,14 @@ def build_placements(geometry: Geometry) -> Optional[list[PanelPlacement]]:
 
 
 def assembled_frame_shape(placements: list[PanelPlacement]) -> tuple[int, int]:
-    # Data-space (H, W) spanning every panel rectangle.
+    # Data-space (H, W) spanning every panel rectangle
     h = max(p.max_ss for p in placements) + 1
     w = max(p.max_fs for p in placements) + 1
     return (int(h), int(w))
 
 
 def _panel_index(p: PanelPlacement, arr_ndim: int, event_i: int) -> tuple:
+    # An array without the layout's full ndim (a static mask) skips the event axis
     has_event = p.event_axis is not None and arr_ndim == p.ndim
     idx: list = []
     for ax in range(p.ndim):
@@ -86,6 +87,7 @@ def _panel_index(p: PanelPlacement, arr_ndim: int, event_i: int) -> tuple:
 
 
 def _slab_to_ss_fs(slab: np.ndarray, p: PanelPlacement) -> np.ndarray:
+    # The slab follows the geometry's dim order; data space is (ss, fs)
     if p.ss_axis is not None and p.fs_axis is not None and p.ss_axis > p.fs_axis:
         return slab.T
     return slab
@@ -124,6 +126,7 @@ def assemble_batch(
 
 
 def _read_static_mask_slab(dset: h5py.Dataset, geometry: Geometry) -> np.ndarray:
+    # A mask stored per event contributes its first event
     layout = geometry.data_layout
     if (
         layout is not None
@@ -145,6 +148,7 @@ NEXUS_MASK_PATHS = (
 
 
 def _apply_mask_bits(raw: np.ndarray, mask_good: int, mask_bad: int) -> np.ndarray:
+    # CrystFEL rule: good when every mask_good bit is set and no mask_bad bit is
     m = np.asarray(raw)
     if not np.issubdtype(m.dtype, np.unsignedinteger):
         m = m.astype(np.uint64)
@@ -218,8 +222,7 @@ def read_mask(
 
 
 def _physical_bases(geometry: Geometry) -> Optional[list[tuple]]:
-    # (min_ss, max_ss, min_fs, max_fs, corner_x, corner_y, fs_x, fs_y, ss_x, ss_y)
-    # per panel; None unless >=2 panels all carry a usable corner + fs/ss basis.
+    # Per panel: (min_ss, max_ss, min_fs, max_fs, cx, cy, fs_x, fs_y, ss_x, ss_y)
     panels = geometry.panels or {}
     if len(panels) < 2:
         return None
@@ -250,23 +253,26 @@ def _physical_bases(geometry: Geometry) -> Optional[list[tuple]]:
 
 
 def build_physical_assembler(geometry: Optional[Geometry]):
-    """Build a raw-image -> physically-assembled-detector-image mapping.
+    """Map raw frames and points onto the physically assembled detector image.
 
-    Tiled/rotated detectors (e.g. a CSPAD whose ASICs are stored in raw readout
-    order) place each panel by its ``corner_x``/``corner_y`` + ``fs``/``ss``
-    basis. This scatters each raw panel slab to its true physical position
-    (nearest pixel), so a continuous powder ring renders as a continuous ring
-    rather than fragments across panel boundaries.
+    Each panel is placed to the nearest pixel from its ``corner_x``/``corner_y`` and
+    ``fs``/``ss`` vectors, which reassembles tiled or rotated detectors such as a
+    CSPAD stored in readout order.
+
+    Parameters
+    ----------
+    geometry : Geometry or None
+        Parsed CrystFEL geometry.
 
     Returns
     -------
     tuple or None
-        ``(assemble, beam_yx, out_shape, place)`` where ``assemble`` maps a raw
-        ``(H, W)`` array to a physical ``(H', W')`` array (gaps ``NaN``) and
-        ``beam_yx`` is the beam position in that output. ``None`` when the
-        geometry is single-panel or lacks usable per-panel bases -- the raw image
-        is already the physical image, so no assembly is needed.
-        ``place`` maps raw ``(row, col)`` points likewise, ``NaN`` off every panel.
+        ``(assemble, beam_yx, out_shape, place)``. ``assemble`` maps a raw ``(H, W)``
+        array to an ``out_shape`` image with ``NaN`` in the gaps, ``beam_yx`` is the
+        beam position in that image, and ``place`` maps raw ``(row, col)`` points to
+        it, ``NaN`` off every panel. ``None`` for no geometry, a single panel, or
+        panels without ``corner``/``fs``/``ss``, where the raw image is already
+        physical.
     """
     if geometry is None:
         return None

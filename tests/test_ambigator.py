@@ -53,7 +53,6 @@ def test_point_group_orders(name, order):
     ops = point_group_ops(name)
     assert len(ops) == order
     assert len(set(ops)) == order
-    # closed under composition
     for a in ops:
         for b in ops:
             assert _apply(a, b[0]), (a, b)
@@ -82,7 +81,7 @@ def test_ambiguity_operator_is_an_involution_outside_the_target(symmetry, appare
     op = ambiguity_operator(symmetry, apparent)
     target = point_group_ops(symmetry)
     assert op not in target
-    # applying it twice lands back inside the target group
+    # op^2 lies in the target group
     squared = tuple(
         tuple(sum(op[r][t] * op[t][c] for t in range(3)) for c in range(3))
         for r in range(3)
@@ -126,7 +125,7 @@ def test_pair_cc_reference_matches_numpy_pearson():
 
 
 def _twinned_database(path, n_crystals=180, seed=5):
-    """A P3 dataset whose crystals are randomly indexed in one of two choices."""
+    # P3 crystals, each indexed in one of the two choices at random; returns {id: flip}
     ops = point_group_ops("3")
     operator = ambiguity_operator("3", "321")
     gen = torch.Generator().manual_seed(seed)
@@ -250,8 +249,7 @@ def test_reindex_writes_assignments_and_transforms_hkl(tmp_path):
             "SELECT crystal_id, sum(h * 1000 + k) FROM reflections GROUP BY 1"
         ).fetchall()
     )
-    # a* started as the identity in nm^-1, so a flipped crystal's real-space
-    # basis is inv(M^T): edges of sqrt(2), 1 and 1 nm with gamma = 135 degrees
+    # a*, b*, c* = I nm^-1, so a flipped basis inv(M^T) has sqrt(2), 1, 1 nm, gamma 135
     cells = conn.execute(
         "SELECT DISTINCT round(cell_a_A, 3), round(cell_b_A, 3), round(cell_c_A, 3), "
         "round(cell_alpha_deg, 2), round(cell_beta_deg, 2), round(cell_gamma_deg, 2) "
@@ -420,7 +418,7 @@ def test_cli_reports_bad_input_without_a_traceback(tmp_path):
     assert "unknown point group '999'" in bad_group.output
     assert bad_group.exc_info[0] is SystemExit
 
-    # a cutoff that admits nothing leaves the database unusable, not misused
+    # A cutoff that admits no reflection exits 1, the data-error code
     empty = _cli("-i", path, "-y", "3", "-w", "321", "--lowres", 0.1)
     assert empty.exit_code == 1
     assert "no usable reflections" in empty.output

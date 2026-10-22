@@ -23,28 +23,7 @@ DEAD_VALUE = 0.0
 
 @dataclass
 class SimTruth:
-    """Ground truth accompanying a simulated indexable frame.
-
-    Attributes
-    ----------
-    positions : Tensor
-        (N, 2) injected spot ``(row, col)`` detector positions.
-    intensities : Tensor
-        (N,) total counts added per spot.
-    hkl : Tensor
-        (N, 3) integer Miller indices for each spot.
-    U : Tensor
-        (3, 3) crystal orientation used (``A = U @ B``).
-    cell : CellParams
-        Unit cell used.
-    background : float
-        Mean background level added.
-    noise_sigma : float
-        Background Gaussian noise std.
-    frame_shape : tuple[int, int]
-        ``(H, W)`` of the rendered frame.
-    """
-
+    # positions (N, 2) as (row, col); intensities (N,) total counts; A = U @ B
     positions: Tensor
     intensities: Tensor
     hkl: Tensor
@@ -62,13 +41,7 @@ def synthetic_geometry(
     pixel_size: float = 75e-6,
     wavelength: float = 1.0,
 ) -> dict:
-    """Single-panel geometry dict with the beam at the frame center.
-
-    Returns a dict consistent with what ``read_geometry``/``_panel_bounds`` and
-    :func:`write_geometry`-style writers expect: ``beam_center=(row, col)``,
-    ``clen`` (m), ``pixel_size`` (m), ``wavelength`` (A), and one panel whose
-    ``corner_x/corner_y`` place the beam center at ``((h-1)/2, (w-1)/2)``.
-    """
+    # beam at ((h - 1) / 2, (w - 1) / 2); clen and pixel_size in m, wavelength in A
     bc_row = (h - 1) / 2.0
     bc_col = (w - 1) / 2.0
     panels = {
@@ -105,36 +78,7 @@ def render_frame(
     saturated_pixels=None,
     dead_pixels=None,
 ) -> np.ndarray:
-    """Render Gaussian-PSF spots over a noisy background.
-
-    Each spot deposits ``intensity`` total counts (a sum-normalised Gaussian of
-    width ``psf_sigma``), added on top of ``N(background, noise_sigma)``. Listed
-    ``saturated_pixels`` are forced to ``SATURATED_VALUE`` and ``dead_pixels`` to
-    ``DEAD_VALUE``. The background-subtracted sum over a spot's box recovers its
-    intensity to within the noise.
-
-    Parameters
-    ----------
-    shape : tuple[int, int]
-        ``(H, W)`` frame shape.
-    positions : array-like
-        (N, 2) spot ``(row, col)`` positions (sub-pixel ok).
-    intensities : array-like
-        (N,) total counts per spot.
-    psf_sigma : float
-        Gaussian PSF sigma (pixels).
-    background, noise_sigma : float
-        Background mean and Gaussian noise std.
-    seed : int
-        Seed for the background noise (``numpy.random.Generator``).
-    saturated_pixels, dead_pixels : array-like, optional
-        (K, 2) ``(row, col)`` integer pixels to force to saturated/dead values.
-
-    Returns
-    -------
-    np.ndarray
-        ``(H, W)`` float32 frame.
-    """
+    # Each spot adds its total count as a unit-sum Gaussian (psf_sigma px) at (row, col)
     H, W = int(shape[0]), int(shape[1])
     rng = np.random.Generator(np.random.PCG64(int(seed)))
     frame = rng.normal(background, noise_sigma, size=(H, W)).astype(np.float32)
@@ -179,11 +123,7 @@ def simulate_noise_frames(
     noise_sigma: float = 10.0,
     seed: int = 0,
 ) -> np.ndarray:
-    """Signal-free background+noise frames for calibration/threshold tests.
-
-    Returns ``(n, H, W)`` float32 of ``N(background, noise_sigma)``, each frame
-    drawn from a distinct, deterministic substream of ``seed``.
-    """
+    # (n, H, W) signal-free frames; frame i draws from PCG64(seed + i)
     H, W = int(shape[0]), int(shape[1])
     out = np.empty((int(n), H, W), dtype=np.float32)
     for i in range(int(n)):
@@ -199,18 +139,7 @@ def lattice_peaks(
     *,
     max_index: int = 6,
 ) -> tuple[Tensor, Tensor]:
-    """Enumerate on-frame Bragg reflections for an oriented lattice.
-
-    Builds ``A = U @ cell_to_B(cell)``, forms ``q = hkl @ A.T`` for every integer
-    ``hkl`` in ``[-max_index, max_index]^3`` (origin dropped), keeps reflections
-    that forward-scatter (the Ewald-projected ray hits ``z = clen`` ahead of the
-    sample) and land within the panel bounds.
-
-    Returns
-    -------
-    tuple[Tensor, Tensor]
-        ``(positions (N, 2) float32 (row, col), hkl (N, 3) float32 integer)``.
-    """
+    # (row, col) and hkl of the on-panel reflections with max |h|, |k|, |l| <= max_index
     dtype = torch.float32
     B = cell_to_B(cell, dtype=dtype)
     Um = U.to(dtype=dtype)
@@ -221,9 +150,9 @@ def lattice_peaks(
         [list(t) for t in product(rng, rng, rng) if any(t)],
         dtype=dtype,
     )
-    q = hkl @ A.transpose(-1, -2)  # (M, 3), == hkl @ (U @ B).T
+    q = hkl @ A.transpose(-1, -2)  # (M, 3)
 
-    # Ewald excitation error |S| - 1 with S = lambda*q + zhat.
+    # Ewald excitation error |S| - 1 with S = lambda q + zhat
     wl = float(geometry_dict["wavelength"])
     S = q * wl
     S[:, 2] += 1.0
@@ -257,11 +186,6 @@ def simulate_indexable_frame(
     noise_sigma: float = 10.0,
     seed: int = 0,
 ) -> tuple[np.ndarray, SimTruth]:
-    """Render the lattice reflections of ``(cell, U)`` onto a noisy frame.
-
-    Returns the float32 frame and a :class:`SimTruth` carrying the injected
-    positions/intensities/hkl plus the orientation and noise parameters.
-    """
     panel = next(iter(geometry_dict["panels"].values()))
     H = int(panel["max_ss"]) + 1
     W = int(panel["max_fs"]) + 1
@@ -297,26 +221,7 @@ def write_run(
     *,
     dataset: str = "entry/data/data",
 ) -> tuple[Path, Path]:
-    """Write a frame stack to HDF5 plus a ``.lst`` listing it.
-
-    ``DataLoader(list_file=lst, geometry_file=..., cell_file=...)`` reads the
-    result; ``scan_h5`` finds the first 3-D dataset, which is the one written
-    here.
-
-    Parameters
-    ----------
-    dirpath : str or Path
-        Output directory (created if missing).
-    frames : np.ndarray
-        ``(N, H, W)`` frame stack.
-    dataset : str
-        Internal HDF5 path for the stack.
-
-    Returns
-    -------
-    tuple[Path, Path]
-        ``(h5_path, lst_path)``.
-    """
+    # scan_h5 takes the first 3-D dataset, which is the only one written here
     dirpath = Path(dirpath)
     dirpath.mkdir(parents=True, exist_ok=True)
     arr = np.asarray(frames, dtype=np.float32)
@@ -341,40 +246,6 @@ def write_cxi_run(
     mask_path: str = "/entry/data/mask",
     extra_datasets: Optional[dict] = None,
 ) -> tuple[Path, Path]:
-    """Write a single-panel CXI-style run plus a ``.lst`` listing it.
-
-    Mirrors a Cheetah/CrystFEL CXI file: the frame stack lives at ``data_path``.
-    With ``decoy=True`` a second 3-D dataset is written first and at a path that
-    sorts ahead of ``data_path``, so the legacy "first 3-D dataset" discovery
-    would grab the decoy -- proving a geometry-aware reader honors ``data =``.
-
-    Parameters
-    ----------
-    dirpath : str or Path
-        Output directory (created if missing).
-    frames : np.ndarray
-        ``(N, H, W)`` frame stack.
-    data_path : str
-        Internal HDF5 path for the real frame stack.
-    decoy : bool
-        Also write a competing 3-D dataset that would win the first-3-D fallback.
-    decoy_path : str
-        Path for the decoy dataset (chosen to sort before ``data_path``).
-    mask : np.ndarray, optional
-        Bad-pixel mask array to write at ``mask_path``. May be 2-D (static) or
-        ``(N, H, W)`` (per-event, the LCLS/Cheetah layout).
-    mask_path : str
-        Internal HDF5 path for the mask.
-    extra_datasets : dict, optional
-        Extra ``{hdf5_path: array}`` to write -- e.g. the per-event
-        ``/LCLS/detector_1/EncoderValue`` and ``/LCLS/photon_energy_eV`` arrays a
-        CrystFEL geom may reference for ``clen``/``photon_energy``.
-
-    Returns
-    -------
-    tuple[Path, Path]
-        ``(cxi_path, lst_path)``.
-    """
     dirpath = Path(dirpath)
     dirpath.mkdir(parents=True, exist_ok=True)
     arr = np.asarray(frames, dtype=np.float32)
@@ -383,12 +254,15 @@ def write_cxi_run(
     cxi_path = dirpath / "cxi_run.cxi"
     lst_path = dirpath / "cxi_run.lst"
     with h5py.File(cxi_path, "w") as f:
+        # The decoy sorts first, so only a reader that honours geometry data= skips it
         if decoy:
             decoy_arr = np.zeros((1, arr.shape[1], arr.shape[2]), dtype=np.float32)
             f.create_dataset(decoy_path, data=decoy_arr)
         f.create_dataset(data_path, data=arr)
+        # mask is 2-D (static) or (N, H, W) per event, the LCLS/Cheetah layout
         if mask is not None:
             f.create_dataset(mask_path, data=np.asarray(mask))
+        # e.g. per-event /LCLS/photon_energy_eV that a geometry reads photon_energy from
         for path, values in (extra_datasets or {}).items():
             f.create_dataset(path, data=np.asarray(values))
     lst_path.write_text(f"{cxi_path}\n", encoding="utf-8")
@@ -403,30 +277,7 @@ def write_multipanel_run(
     mask: Optional[np.ndarray] = None,
     mask_path: str = "/entry/data/mask",
 ) -> tuple[Path, Path]:
-    """Write a multi-panel / 4-D ``(N, panel, ss, fs)`` run plus its ``.lst``.
-
-    The panels live in a single array indexed by a fixed selector dim (the layout
-    a CrystFEL ``dimN = <int>`` geometry describes), so the reader must slice and
-    re-place each panel into the assembled data-space image.
-
-    Parameters
-    ----------
-    dirpath : str or Path
-        Output directory (created if missing).
-    data4d : np.ndarray
-        ``(N, n_panels, ss, fs)`` stack.
-    data_path : str
-        Internal HDF5 path for the stack.
-    mask : np.ndarray, optional
-        ``(n_panels, ss, fs)`` static mask written at ``mask_path``.
-    mask_path : str
-        Internal HDF5 path for the mask.
-
-    Returns
-    -------
-    tuple[Path, Path]
-        ``(cxi_path, lst_path)``.
-    """
+    # Axis 1 is the panel a geometry's dimN = <int> selects; mask is (panel, ss, fs)
     dirpath = Path(dirpath)
     dirpath.mkdir(parents=True, exist_ok=True)
     arr = np.asarray(data4d, dtype=np.float32)
@@ -448,7 +299,6 @@ def write_external_mask(
     *,
     mask_path: str = "/pixel_mask",
 ) -> Path:
-    """Write a standalone HDF5 mask file (a CrystFEL ``mask_file`` target)."""
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     with h5py.File(path, "w") as f:
@@ -457,24 +307,7 @@ def write_external_mask(
 
 
 def proper_rotation(seed: int, max_angle_deg: Optional[float] = None) -> Tensor:
-    """Deterministic proper rotation (``det == +1``), (3, 3) float32.
-
-    With ``max_angle_deg`` given, the rotation is a small axis-angle perturbation
-    of the identity (angle drawn in ``(0, max_angle_deg]``), so coarse orientation
-    seeding recovers it quickly on CPU. Without it, a uniformly random rotation.
-
-    Parameters
-    ----------
-    seed : int
-        Seed for the ``torch.Generator``.
-    max_angle_deg : float, optional
-        Cap on the rotation angle (degrees); enables the near-identity mode.
-
-    Returns
-    -------
-    Tensor
-        (3, 3) float32 rotation matrix.
-    """
+    # Random axis; angle in [0.25, 1) x max_angle_deg if given, else in [0, 2 pi)
     g = torch.Generator()
     g.manual_seed(int(seed))
     axis = torch.randn(3, generator=g, dtype=torch.float32)
@@ -501,7 +334,7 @@ def proper_rotation(seed: int, max_angle_deg: Optional[float] = None) -> Tensor:
 
 
 if __name__ == "__main__":
-    # Self-check (run with the venv python). Verifies indexing, noise, peaks.
+    # Standalone check of indexing, noise calibration, and peakfinding
     import time
 
     from probixi.indexer.indexer import Indexer, RefineConfig, SeedConfig
@@ -515,7 +348,6 @@ if __name__ == "__main__":
     cell = read_crystfel_cell(here / "fixtures" / "bR.cell")
     geom = read_geometry(here / "fixtures" / "Eiger4M.geom").to_dict()
 
-    # 1) INDEXING
     U = proper_rotation(0, max_angle_deg=8)
     positions, hkl = lattice_peaks(geom, cell, U)
     print(f"[index] on-frame reflections: {positions.shape[0]}")
@@ -541,7 +373,6 @@ if __name__ == "__main__":
     assert r.n_indexed >= int(0.8 * positions.shape[0]), "too few indexed"
     assert r.rmsd < 0.01, "rmsd too large"
 
-    # 2) NOISE
     nframes = simulate_noise_frames((128, 128), 40)
     nm = NoiseModel((128, 128), mode="online")
     cal = calibrate_noise(nm, [torch.from_numpy(f) for f in nframes])
@@ -552,7 +383,6 @@ if __name__ == "__main__":
     assert abs(zstd - 1.0) < 0.15, "z std off"
     assert cal.kappa > 1.0, "kappa <= 1"
 
-    # 3) PEAKS
     pshape = (160, 160)
     grng = np.random.Generator(np.random.PCG64(7))
     gridr = np.array([30, 30, 30, 80, 80, 80, 130, 130, 130, 105], dtype=float)

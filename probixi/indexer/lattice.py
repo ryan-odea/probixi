@@ -13,14 +13,14 @@ def cell_to_B(
     device=None,
     dtype: torch.dtype = torch.float32,
 ) -> Tensor:
-    # Reciprocal basis B = M^-T from cell params: q = B @ hkl (crystallographer
-    # convention, no 2*pi). M columns are the direct lattice vectors a, b, c.
+    # B = M^-T with the direct axes a, b, c as columns of M; q = B @ hkl, no 2 pi
     a, b, c = cell.a, cell.b, cell.c
     ca, cb, cg = math.cos(cell.alpha), math.cos(cell.beta), math.cos(cell.gamma)
     sg = math.sin(cell.gamma)
     if abs(sg) < 1e-12:
         raise ValueError("gamma cannot be 0 or pi")
 
+    # Standard setting: a along x, b in the xy plane
     a_vec = [a, 0.0, 0.0]
     b_vec = [b * cg, b * sg, 0.0]
     cx = c * cb
@@ -35,7 +35,7 @@ def cell_to_B(
 
 
 def B_to_cell(B: Tensor) -> CellParams:
-    # Recover cell edges/angles from reciprocal basis B (inverse of cell_to_B).
+    # Inverse of cell_to_B: edges in A and angles in rad from B
     if B.shape[-2:] != (3, 3):
         raise ValueError("B must be (3, 3)")
     M = torch.linalg.inv(B.transpose(-1, -2))

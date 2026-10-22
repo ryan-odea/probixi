@@ -14,21 +14,31 @@ def fit_eigen_background(
     robust_k: float = 4.0,
     iters: int = 2,
 ) -> tuple[Tensor, Tensor]:
-    """Fit ``n_modes`` low-rank background eigen-images on the seed frames and
-    store them on ``noise_model.eigen_modes`` (shape ``(n_modes, H, W)``, zero
-    outside the valid mask, orthonormal over valid pixels).
+    """Fit low-rank background eigen-images on seed frames.
 
-    Args:
-        noise_model: a warmed ``NoiseModel`` (provides ``mu``, ``sigma``, mask).
-        seed_frames: calibration frames (consumed once).
-        n_modes: number of background modes to keep.
-        robust_k: residuals beyond ``robust_k * sigma`` are clipped before the
-            SVD so Bragg peaks do not leak into the modes.
-        iters: trimmed-PCA passes; each re-clips against the current fit.
+    The modes are stored on ``noise_model.eigen_modes``. Each frame's clipped residual
+    is projected onto them and added to the background mean before detection.
 
-    Returns:
-        ``(modes, explained)`` -- the ``(n_modes, H, W)`` modes and their
-        eigenvalues (variance explained, descending).
+    Parameters
+    ----------
+    noise_model : NoiseModel
+        Warmed model; its pixel mean and variance define the residuals.
+    seed_frames : iterable of Tensor
+        ``(H, W)`` calibration frames, read once.
+    n_modes : int
+        Modes to keep.
+    robust_k : float
+        Residuals are clipped at ``robust_k * sigma`` before each decomposition,
+        which keeps Bragg peaks out of the modes.
+    iters : int
+        Trimmed-PCA passes; each pass clips against the previous fit.
+
+    Returns
+    -------
+    modes : Tensor
+        ``(n_modes, H, W)``, orthonormal over valid pixels and zero elsewhere.
+    explained : Tensor
+        ``(n_modes,)`` variance explained by each mode, descending.
     """
     frames = [f for f in seed_frames]
     if not frames:
@@ -41,10 +51,9 @@ def fit_eigen_background(
     m = noise_model.valid_mask.to(dtype)
     cap = robust_k * sigma
 
-    # raw per-frame residuals on valid pixels
     raw = torch.stack([(f.to(device=device, dtype=dtype) - mu) for f in frames])
     R = (torch.clamp(raw, min=-cap, max=cap) * m).flatten(1)  # (F, P)
-    R = R - R.mean(dim=0, keepdim=True)  # center so modes capture variation
+    R = R - R.mean(dim=0, keepdim=True)  # centre per pixel: modes span the variation
 
     modes = torch.zeros(n_modes, R.shape[1], dtype=dtype, device=device)
     explained = torch.zeros(n_modes, dtype=dtype, device=device)

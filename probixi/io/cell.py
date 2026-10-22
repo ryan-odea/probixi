@@ -11,21 +11,21 @@ PathLike = Union[str, Path]
 
 @dataclass
 class CellParams:
-    """Parsed unit cell from a CrystFEL `.cell`` file.
+    """Unit cell from a CrystFEL ``.cell`` file.
 
     Parameters
     ----------
     a, b, c : float
-        Cell edge lengths (same unit as the file, typically nm/A).
+        Edge lengths in Å.
     alpha, beta, gamma : float
-        Inter-axial angles in radians (alpha between b/c, beta between a/c,
-        gamma between a/b).
+        Angles in radians: alpha between b and c, beta between a and c, gamma
+        between a and b.
     lattice_type : str, optional
-        Bravais lattice type (e.g. ``"triclinic"``).
+        Lattice system, for example ``"monoclinic"``.
     unique_axis : str, optional
-        Unique axis label (e.g. ``"a"``/``"b"``/``"c"``).
+        ``"a"``, ``"b"`` or ``"c"``.
     centering : str, optional
-        Lattice centering symbol (e.g. ``"P"``, ``"C"``, ``"F"``).
+        Centring symbol, for example ``"P"``, ``"C"`` or ``"F"``.
     """
 
     a: float
@@ -40,7 +40,7 @@ class CellParams:
 
     @property
     def volume(self) -> float:
-        # Triclinic Volume = abc*sqrt(1 - cos^2a - cos^2b - cos^2g + 2 cosa cosb cosg)
+        # General triclinic volume; the clamp absorbs rounding at degenerate angles
         ca = math.cos(self.alpha)
         cb = math.cos(self.beta)
         cg = math.cos(self.gamma)
@@ -81,7 +81,8 @@ def read_crystfel_cell(path: PathLike) -> CellParams:
     Returns
     -------
     CellParams
-        Parsed cell with angles converted to radians.
+        Edges as written, read as Å (the unit token is ignored), and angles in
+        radians.
 
     Raises
     ------
@@ -143,7 +144,7 @@ def read_crystfel_cell(path: PathLike) -> CellParams:
 
 
 def median_cell(cells, template: Optional[CellParams] = None) -> CellParams:
-    """Component-wise median of ``cells``"""
+    # Component-wise median; symmetry labels come from template, else the first cell
     cells = list(cells)
     if not cells:
         raise ValueError("median_cell needs at least one cell")

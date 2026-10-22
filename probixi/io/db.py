@@ -29,7 +29,7 @@ _FLUSH_ROWS = 50_000
 
 
 def is_duckdb_path(path: Optional[PathLike]) -> bool:
-    """True if ``path`` names a DuckDB output (``.duckdb`` / ``.db`` suffix)."""
+    """Whether ``path`` has a ``.duckdb`` or ``.db`` suffix."""
     return path is not None and Path(path).suffix.lower() in _DB_SUFFIXES
 
 
@@ -289,62 +289,73 @@ CREATE INDEX idx_peaks_frame ON peaks(frame_id);
 
 
 def frame_id(filename: str, event: int) -> str:
+    """Return the database key of one file-event.
+
+    Parameters
+    ----------
+    filename : str
+        Source file, as recorded in ``frames.filename``.
+    event : int
+        Event index within the file.
+
+    Returns
+    -------
+    str
+        First 16 hex digits of the SHA-1 of ``"{filename}//{event}"``.
+
+    Notes
+    -----
+    The key depends only on its inputs, so a peaks-only pass, an indexed pass and
+    multi-GPU shards give the same frame the same ``frame_id``.
+    """
     digest = hashlib.sha1(f"{filename}//{event}".encode("utf-8"))
     return digest.hexdigest()[:16]
 
 
 class DuckDBOffloader(_StreamWriter):
-    """Write ``IndexResult``s to a DuckDB database.
+    """Write index results to a DuckDB database.
 
-    A relational alternative to the CrystFEL ``.stream``: run metadata lands in
-    small ``geometry``/``panels``/``cell`` tables, every file-event becomes a row
-    in ``frames`` (flagged indexed or not, with its peak search and fluence),
-    and each accepted lattice becomes a row in ``crystals`` keyed to it. The
-    searched ``peaks`` are keyed by the frame's :func:`frame_id` and the
-    integrated ``reflections`` by both ``crystal_id`` and ``frame_id``.
-
-    Same interface as :class:`~probixi.io.writer.DataOffloader`::
-
-        with DuckDBOffloader(out, geometry=geom, cell=cell, files=files) as off:
-            stream.to_stream(off)
-
-    or, more directly, via :meth:`~probixi.indexer.indexer.IndexStream.to_db`.
-
-    When ``files`` is supplied every file-event is enumerated, so frames that
-    never indexed are recorded with ``indexed = FALSE`` and null statistics; the
-    indexed rate is then ``AVG(indexed::INT)`` over ``frames``. Without ``files``
-    only indexed frames are written.
+    Run metadata goes into the ``geometry``, ``panels``, ``cell`` and
+    ``integration`` tables. Every file-event becomes a row of ``frames`` and every
+    accepted lattice a row of ``crystals``. Searched ``peaks`` are keyed by
+    :func:`frame_id`, and integrated ``reflections`` by ``frame_id`` and
+    ``crystal_id``. The frames that never indexed are added, and the indexes built,
+    when the context exits.
 
     Parameters
     ----------
     path : str or Path
-        Destination ``.duckdb`` file. Overwritten if it exists.
+        Destination ``.duckdb`` or ``.db`` file, replaced if it exists.
     geometry : dict
-        Indexer geometry (``beam_center``, ``clen``, ``pixel_size``,
-        ``wavelength``, ``adu_per_photon``, and -- when available -- ``panels``).
+        Indexer geometry: ``beam_center``, ``clen``, ``pixel_size``,
+        ``wavelength``, ``adu_per_photon`` and, when available, ``panels``.
     cell : CellParams, optional
-        Target unit cell; written to the ``cell`` table and used for any
-        symmetry labels.
+        Target cell, written to the ``cell`` table.
     geometry_file : str or Path, optional
-        Geometry file whose text is stored verbatim in ``geometry.geometry_file``.
+        Geometry file stored verbatim in ``geometry.geometry_file``.
     files : dict, optional
-        Loader file map, used both to resolve a global frame index to its source
-        file/event and to enumerate the non-indexed frames.
-    frame_range : tuple[int, int], optional
-        Half-open ``[lo, hi)`` global-frame-index range this writer is
-        responsible for. When set, the non-indexed backfill is restricted to
-        this range -- required when only a sub-range is processed (``--start`` /
-        ``--stop``) or when several writers each cover a disjoint block (the
-        multi-GPU path), so the whole dataset is not marked non-indexed by every
-        writer. ``None`` backfills every file-event.
+        Loader file map. It resolves frame indices to file and event, and lists
+        the frames that never indexed, which get ``indexed = FALSE``. Without it,
+        ``frames`` holds only the frames passed to :meth:`write`.
+    frame_range : tuple of int, optional
+        Half-open range ``[lo, hi)`` of global frame indices this writer owns.
+        Only frames in it receive unindexed rows, as ``--start``/``--stop`` and
+        multi-GPU blocks require. ``None`` covers every file-event.
     indexer_name : str, default "probixi"
-        Recorded for provenance parity with the stream writer (unused in the DB).
+        Accepted for parity with :class:`DataOffloader`; not stored.
     panel : str, default "0"
-        Fallback panel name for peaks/reflections outside every geometry panel.
+        Panel name for peaks and reflections outside every geometry panel.
     integration : dict, optional
-        Integration recipe (``radii``, ``adu_per_photon``,
-        ``bg_annulus_pixels``, ``aperture``) stored in the ``integration``
-        table; see :attr:`~probixi.Probixi.integration_recipe`.
+        Integration recipe (``radii``, ``adu_per_photon``, ``bg_annulus_pixels``,
+        ``aperture``), as :attr:`~probixi.Probixi.integration_recipe` returns it.
+
+    Notes
+    -----
+    Use as a context manager, as for :class:`DataOffloader`, or through
+    :meth:`~probixi.indexer.IndexStream.to_db`::
+
+        with DuckDBOffloader(out, geometry=geom, cell=cell, files=files) as off:
+            stream.to_stream(off)
     """
 
     def __init__(
@@ -403,11 +414,12 @@ class DuckDBOffloader(_StreamWriter):
             self._conn = None
 
     def write(self, result: Union["IndexResult", "FrameIndexResult"]) -> None:
-        """Buffer one image and its lattices.
+        """Buffer one frame and its lattices.
 
         Parameters
         ----------
         result : IndexResult or FrameIndexResult
+            One lattice, or every lattice found on one frame.
         """
         if self._conn is None:
             raise RuntimeError("DuckDBOffloader must be used as a context manager")
@@ -450,12 +462,15 @@ class DuckDBOffloader(_StreamWriter):
         self._maybe_flush()
 
     def write_peaks(self, result) -> None:
-        """Buffer one frame's peak-search result (peaks-only; no indexing).
+        """Buffer one frame's peak search for a peaks-only run.
 
-        Records a ``frames`` row with ``indexed = FALSE`` and the peak count, and
-        the searched peaks in the ``peaks`` table; the ``reflections`` table stays
-        empty. ``result`` is a
-        :class:`~probixi.peakfinding.peaks.peakfinder.PeakResult`.
+        The frame gets a ``frames`` row with ``indexed = FALSE`` and its peaks go to
+        ``peaks``; ``crystals`` and ``reflections`` stay empty.
+
+        Parameters
+        ----------
+        result : PeakResult
+            One item of :meth:`~probixi.Probixi.peak_stream`.
         """
         if self._conn is None:
             raise RuntimeError("DuckDBOffloader must be used as a context manager")
@@ -513,8 +528,6 @@ class DuckDBOffloader(_StreamWriter):
             or len(self._frame_rows) >= _FLUSH_ROWS
         ):
             self._flush()
-
-    # META =================================
 
     def _write_metadata_tables(self) -> None:
         assert self._conn is not None
@@ -574,10 +587,8 @@ class DuckDBOffloader(_StreamWriter):
                 ],
             )
 
-    # FRAME =========================
-
     def _gain(self, result=None) -> float:
-        """ADU per photon: what the frame was processed with, else geometry."""
+        # ADU per photon the frame was processed with, else the geometry's; 1 if unset
         g = getattr(result, "adu_per_photon", None) if result is not None else None
         if g is None:
             g = (self.geometry or {}).get("adu_per_photon")
@@ -602,8 +613,7 @@ class DuckDBOffloader(_StreamWriter):
         )
 
     def _reflections(self, result: "IndexResult") -> tuple:
-        # (2, N) positions, (3, N) hkl, (4, N) intensity/sigma/peak/background and
-        # (3, N) n_pix/bg_model/bg_var, which are NaN where not recorded
+        # pos (2, N), hkl (3, N), I/sigma/peak/bg (4, N), extras (10, N); NaN unrecorded
         if result.predicted_hkl is not None:
             assert (
                 result.predicted_positions is not None
@@ -734,7 +744,7 @@ class DuckDBOffloader(_StreamWriter):
             _as_float(result.enrich_p),
             drl,
             int(num_reflections),
-            recovered.a,  # B_to_cell returns edges in Angstroms
+            recovered.a,  # B_to_cell returns edges in Å
             recovered.b,
             recovered.c,
             math.degrees(recovered.alpha),
@@ -902,7 +912,7 @@ class DuckDBOffloader(_StreamWriter):
         return np.where(inside.any(axis=1), name[inside.argmax(axis=1)], self.panel)
 
     def _edge_px(self, fs: np.ndarray, ss: np.ndarray) -> np.ndarray:
-        # distance to the spot's panel edge, NaN off-panel
+        # px to the nearest edge of the containing panel, NaN off every panel
         if not self._panels:
             return np.full(len(fs), np.nan)
         _, min_fs, max_fs, min_ss, max_ss = map(np.array, zip(*self._panels))
@@ -923,6 +933,7 @@ class DuckDBOffloader(_StreamWriter):
             if values.dtype.kind == "f":
                 nan |= np.isnan(values) if valid is None else np.isnan(values) & valid
         names = ", ".join(columns)
+        # A numpy scan reads NaN as NULL, so rows with a NaN to keep are bound singly
         start = 0
         for stop in (*np.flatnonzero(nan), n):
             if stop > start:
@@ -954,7 +965,7 @@ class DuckDBOffloader(_StreamWriter):
 
 
 def _to_array(t, n: int = 0, dtype=np.float64) -> np.ndarray:
-    """Optional tensor -> array, or zeros when it was not recorded."""
+    # Optional tensor -> array, or zeros(n) when it was not recorded
     if t is None:
         return np.zeros(n, dtype=dtype)
     return t.detach().cpu().numpy().astype(dtype)
@@ -1058,29 +1069,7 @@ def _unindexed_frame_row(
 
 
 def attach_frame_values(path: PathLike, table: PathLike, sep: str = "\t") -> list[str]:
-    """Attach per-frame values from a text table to a database's ``frames`` rows.
-
-    The table has a header ``filename event <name> ...`` (events as ``//N`` or
-    plain integers); every further column becomes a DOUBLE column of
-    ``frames``, matched on filename and event (by basename when the recorded
-    paths differ). Frames the table does not name keep NULL, as do empty or
-    ``nan`` cells. Beam-synchronous diagnostics (pulse energy, spectral width)
-    attached this way reach a merging program as per-image quantities.
-
-    Parameters
-    ----------
-    path : str or Path
-        Database written by :class:`DuckDBOffloader`, updated in place.
-    table : str or Path
-        Text table with a header row, ``sep``-separated.
-    sep : str, default tab
-        Column separator.
-
-    Returns
-    -------
-    list of str
-        The column names attached.
-    """
+    # Columns past filename/event become DOUBLE frames columns; empty or nan is NULL
     import csv
 
     with open(table, newline="") as fh:
@@ -1100,7 +1089,7 @@ def attach_frame_values(path: PathLike, table: PathLike, sep: str = "\t") -> lis
             f
             for (f,) in conn.execute("SELECT DISTINCT filename FROM frames").fetchall()
         }
-        by_base = {Path(f).name: f for f in recorded}
+        by_base = {Path(f).name: f for f in recorded}  # fallback match on basename
         filenames = [
             (
                 r["filename"]
@@ -1111,7 +1100,7 @@ def attach_frame_values(path: PathLike, table: PathLike, sep: str = "\t") -> lis
         ]
         data = {
             "filename": np.array(filenames),
-            "event": np.array(
+            "event": np.array(  # "//N" or "N"
                 [int(str(r["event"]).strip().lstrip("/") or 0) for r in rows]
             ),
         }

@@ -34,7 +34,7 @@ __all__ = [
 
 
 def block_bounds(start: int, stop: int, rank: int, world_size: int) -> tuple[int, int]:
-    """Contiguous, balanced ``[lo, hi)`` sub-range of ``[start, stop)`` for ``rank``"""
+    # contiguous [lo, hi) of [start, stop) for rank; lower ranks take the remainder
     if not 0 <= rank < world_size:
         raise ValueError(f"rank {rank} out of range for world_size {world_size}")
     total = max(0, stop - start)
@@ -47,13 +47,7 @@ def block_bounds(start: int, stop: int, rank: int, world_size: int) -> tuple[int
 def resolve_devices(
     devices: Optional[Union[int, Sequence[Union[str, torch.device]]]] = None,
 ) -> list[torch.device]:
-    """Normalise a device spec to a list of ``torch.device``.
-
-    ``None`` -> every visible CUDA device (or the best single device from
-    ``auto_device`` if there are none); an ``int`` ->
-    the first N CUDA devices; a sequence -> those devices verbatim
-    (e.g. ``["cuda:0", "cuda:1"]`` or ``["cpu", "cpu"]`` for testing).
-    """
+    # None: every CUDA device, else auto_device(); int: first N CUDA; list: as given
     if devices is None:
         if torch.cuda.is_available():
             return [torch.device(f"cuda:{i}") for i in range(torch.cuda.device_count())]
@@ -69,7 +63,7 @@ def resolve_devices(
 
 
 def _validate_cuda_devices(dev_list: Sequence[torch.device]) -> None:
-    # fail fast in the parent
+    # raise in the parent, before any worker spawns
     cuda = [d for d in dev_list if d.type == "cuda"]
     if not cuda:
         return
@@ -84,14 +78,23 @@ def _validate_cuda_devices(dev_list: Sequence[torch.device]) -> None:
 
 
 def merge_streams(part_paths: Sequence[PathLike], output_path: PathLike) -> int:
-    """Concatenate per-rank ``.stream`` files into one, renumbering serials."""
+    """Concatenate per-rank ``.stream`` files in order, renumbering image serials.
+
+    The header comes from the first part that has one. Missing and empty parts
+    are skipped.
+
+    Returns
+    -------
+    int
+        Number of chunks written.
+    """
     serial = 0
     header_written = False
     with Path(output_path).open("w") as out:
         for p in part_paths:
             part = Path(p)
             if not part.exists() or part.stat().st_size == 0:
-                continue  # skip a crashed/empty worker's part
+                continue  # a crashed or empty worker's part
             has_header = None
             in_chunks = False
             with part.open("r") as fh:
@@ -115,7 +118,7 @@ def merge_streams(part_paths: Sequence[PathLike], output_path: PathLike) -> int:
 
 
 def merge_dbs(part_paths: Sequence[PathLike], output_path: PathLike) -> int:
-    """Union per-rank DuckDB parts into one database."""
+    # union of the parts; metadata from the first readable one; returns frames indexed
     import duckdb
 
     from ..io import db as _db
@@ -135,7 +138,7 @@ def merge_dbs(part_paths: Sequence[PathLike], output_path: PathLike) -> int:
             try:
                 conn.execute(f"ATTACH '{escaped}' AS {alias} (READ_ONLY)")
             except duckdb.Error:
-                continue  # skip a crashed/corrupt worker's part
+                continue  # a crashed or corrupt worker's part
             try:
                 if not meta_done:
                     for tbl in _DB_META_TABLES:
@@ -145,7 +148,7 @@ def merge_dbs(part_paths: Sequence[PathLike], output_path: PathLike) -> int:
                     conn.execute(f"INSERT INTO {tbl} SELECT * FROM {alias}.{tbl}")
             finally:
                 conn.execute(f"DETACH {alias}")
-        conn.execute(
+        conn.execute(  # serials renumbered in frame order across the parts
             "UPDATE frames SET serial = r.rn FROM ("
             "  SELECT frame_id, row_number() OVER (ORDER BY frame_index) AS rn"
             "  FROM frames WHERE serial IS NOT NULL"
@@ -159,9 +162,17 @@ def merge_dbs(part_paths: Sequence[PathLike], output_path: PathLike) -> int:
     return int(n_indexed)
 
 
-# worker
 @dataclass
 class BlockConfig:
+    """Settings for one rank's block of a data-parallel run.
+
+    ``start`` and ``stop`` span the whole run, and each rank indexes a
+    contiguous, balanced block of it. ``calibration_seed`` seeds calibration on
+    every rank, so all ranks calibrate identically. ``threads`` caps the CPU
+    threads of each worker. ``db`` writes DuckDB parts instead of ``.stream``
+    parts. The other fields take their meaning from :func:`run_data_parallel`.
+    """
+
     list_file: str
     geometry_file: str
     cell_file: Optional[str]
@@ -191,7 +202,7 @@ class BlockConfig:
     cell_calibrate_after: int = 200
     threads: Optional[int] = None
     quiet: bool = False
-    db: bool = False  # write per-rank DuckDB parts instead of .stream parts
+    db: bool = False
 
 
 def _part_path(output: PathLike, rank: int) -> Path:
@@ -211,8 +222,7 @@ def run_block(
     cfg: BlockConfig,
     part_path: PathLike,
 ) -> dict:
-    """Calibrate on the shared seed frames, then index this rank's block."""
-    # cap CPU threads before any torch work so co-resident workers don't oversubscribe
+    # cap threads before any torch work, or co-resident workers oversubscribe the CPU
     if cfg.threads is not None and cfg.threads > 0:
         torch.set_num_threads(cfg.threads)
     dev = torch.device(device)
@@ -241,7 +251,7 @@ def run_block(
     )
     if p.indexer is None:
         raise RuntimeError("multi-GPU indexing requires a cell_file")
-    # deterministic calibration -> every rank recovers identical detector params
+    # one seed for every rank, so every rank calibrates identically
     with torch.random.fork_rng(devices=[dev.index or 0] if dev.type == "cuda" else []):
         torch.manual_seed(cfg.calibration_seed)
         p.calibrate(n_seed=cfg.seed_frames, target_noise_peaks=cfg.target_noise_peaks)
@@ -355,7 +365,45 @@ def run_data_parallel(
     keep_parts: bool = False,
     quiet: bool = False,
 ) -> Path:
-    """Run indexing across several devices on one node and merge the outputs."""
+    """Index a run across several devices of one node and merge the outputs.
+
+    Each device runs in its own process: it calibrates on the same seed frames
+    as every other device, then indexes a contiguous block of frames. The parts
+    are merged into ``output`` in frame order. A single device runs inline.
+    Parameters not listed below take their meaning and default from
+    :class:`Probixi`, :meth:`Probixi.calibrate`, and
+    :meth:`Probixi.index_frame_stream`.
+
+    Parameters
+    ----------
+    list_file, geometry_file, cell_file : str or Path
+        As for :class:`Probixi`. A cell file is required.
+    output : str or Path
+        A ``.stream`` file, or a ``.db`` or ``.duckdb`` database. Parts are
+        written beside it as ``<output>.rank<N>``.
+    devices : int or sequence of str or torch.device, optional
+        Every visible CUDA device by default, or :func:`auto_device` without
+        CUDA. An int selects the first N CUDA devices; a sequence names them.
+    start, stop : int, optional
+        Frame range of the whole run, start inclusive and stop exclusive.
+    seed_frames : int, default 32
+        Seed frames for calibration, ``n_seed`` of :meth:`Probixi.calibrate`.
+    enrich_gate : bool, default False
+        Keep only lattices whose chance probability ``enrich_p`` is at most
+        ``enrich_alpha``.
+    threads_per_worker : int, optional
+        CPU threads per worker. With several devices the default divides the
+        CPU count between them.
+    keep_parts : bool, default False
+        Keep the per-device parts after the merge.
+    quiet : bool, default False
+        Suppress the per-device progress lines.
+
+    Returns
+    -------
+    Path
+        ``output``.
+    """
     dev_list = resolve_devices(devices)
     _validate_cuda_devices(dev_list)
     world = len(dev_list)
@@ -421,7 +469,6 @@ def run_data_parallel(
     merge = merge_dbs if cfg.db else merge_streams
     merge(part_paths, output)
 
-    # aggregate block stats, then remove the per-rank parts
     totals = {"frames": 0, "hits": 0, "indexed": 0, "crystals": 0}
     for part in part_paths:
         sidecar = Path(f"{part}.stats.json")
@@ -441,7 +488,6 @@ def run_data_parallel(
     return Path(output)
 
 
-# Cluster (SLURM / torchrun) launcher
 def _env_int(*names: str, default: Optional[int] = None) -> Optional[int]:
     for name in names:
         val = os.environ.get(name)
@@ -454,13 +500,31 @@ def _env_int(*names: str, default: Optional[int] = None) -> Optional[int]:
 
 
 def run_block_from_env(cfg: BlockConfig, output: PathLike) -> dict:
-    """Process this process's block using rank/world/local-rank from the env.
+    """Index this process's block, with its rank and world size from the environment.
 
-    Reads ``RANK``/``WORLD_SIZE``/``LOCAL_RANK`` (torchrun) or
-    ``SLURM_PROCID``/``SLURM_NTASKS``/``SLURM_LOCALID`` (srun). Each rank binds to
-    ``cuda:LOCAL_RANK`` (or CPU) and writes ``<output>.rank{rank}``. After every
-    rank finishes, call :func:`merge_streams` on the parts from a shared
-    filesystem (e.g. from rank 0 once a barrier confirms all parts exist).
+    Reads ``RANK``, ``WORLD_SIZE``, and ``LOCAL_RANK`` (torchrun), or
+    ``SLURM_PROCID``, ``SLURM_NTASKS``, and ``SLURM_LOCALID`` (srun). Each rank
+    uses ``cuda:LOCAL_RANK``, or the CPU without CUDA, and writes
+    ``<output>.rank<N>``.
+
+    Parameters
+    ----------
+    cfg : BlockConfig
+        Settings shared by every rank; ``start`` and ``stop`` span the whole run.
+    output : str or Path
+        Path of the merged output; the parts are written beside it.
+
+    Returns
+    -------
+    dict
+        Block statistics: ``rank``, ``device``, ``lo``, ``hi``, ``frames``,
+        ``hits``, ``indexed``, and ``crystals``.
+
+    Notes
+    -----
+    No rank merges the parts. Once every part exists on a shared filesystem,
+    merge them with :func:`merge_streams`, or with
+    ``probixi.tools.multigpu.merge_dbs`` when ``cfg.db`` is set.
     """
     rank = _env_int("RANK", "SLURM_PROCID", default=0) or 0
     world = _env_int("WORLD_SIZE", "SLURM_NTASKS", default=1) or 1

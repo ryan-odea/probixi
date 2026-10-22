@@ -14,8 +14,7 @@ from .lattice import B_to_cell
 
 @dataclass
 class RefineResult:
-    # Refinement output over K candidate orientations and N peaks: refined A,
-    # per-candidate rmsd / inlier count / soft score, indexed mask, hkl, loss history.
+    # A (K, 3, 3); rmsd, n_indexed, soft_score (K,); indexed (K, N); hkl (K, N, 3)
     A: Tensor
     rmsd: Tensor
     n_indexed: Tensor
@@ -26,11 +25,12 @@ class RefineResult:
 
 
 def _axis_angle_to_rotation(omega: Tensor) -> Tensor:
-    # Axis-angle (..., 3) -> rotation (..., 3, 3) via Rodrigues.
+    # Rodrigues: axis-angle (..., 3) to rotation (..., 3, 3)
     if omega.shape[-1] != 3:
         raise ValueError("omega must have last dim 3")
     batch = omega.shape[:-1]
     dtype, device = omega.dtype, omega.device
+    # The clamp keeps R = I and dR/domega finite at omega = 0, where refinement starts
     theta_sq = (omega * omega).sum(dim=-1, keepdim=True).clamp_min(1e-24)
     theta = theta_sq.sqrt()
     axis = omega / theta
@@ -56,7 +56,7 @@ _TIED_EDGE_TYPES = ("tetragonal", "hexagonal", "trigonal")
 
 
 def _cell_dofs(cell: CellParams, dtype, device) -> tuple[Tensor, Tensor]:
-    # (6, m) map T and base p0 so p6 = p0 + T @ r
+    # Free parameters r of the lattice type: p = p0 + T @ r, T (6, m), angles in rad
     lt = (cell.lattice_type or "triclinic").lower()
     u = (cell.unique_axis or ("b" if lt == "monoclinic" else "c")).lower()
     cols: list[list[int]] = []
@@ -86,6 +86,7 @@ def _cell_dofs(cell: CellParams, dtype, device) -> tuple[Tensor, Tensor]:
 
 
 def _B_from_params(p: Tensor) -> Tensor:
+    # Differentiable cell_to_B of p = (a, b, c, alpha, beta, gamma)
     a, b, c, al, be, ga = p
     ca, cb, cg, sg = torch.cos(al), torch.cos(be), torch.cos(ga), torch.sin(ga)
     cx = c * cb
@@ -105,6 +106,7 @@ def _B_from_params(p: Tensor) -> Tensor:
 def _assign_hkls(
     A: Tensor, q: Tensor, q_tolerance: float, khat: Optional[Tensor] = None
 ) -> tuple[Tensor, Tensor]:
+    # khat (N, 3), when given, drops the residual along the scattered beam from the test
     hkl = torch.round(q @ torch.linalg.inv(A).transpose(-1, -2))
     d = hkl @ A.transpose(-1, -2) - q
     if khat is not None:
@@ -126,6 +128,7 @@ def refine_cell(
     angle_tolerance_rad: float = math.radians(3.0),
     wavelength: Optional[float] = None,
 ) -> Optional[tuple[Tensor, Tensor, Tensor, float, bool]]:
+    # LM over rotation and cell; returns (A, hkl, indexed, rmsd, improved) or None
     kernel = select("refine_cell", True)
     if kernel is not None:
         return kernel.refine_analytic(
@@ -172,6 +175,7 @@ def refine_cell(
     def build(th: Tensor) -> Tensor:
         return _axis_angle_to_rotation(th[:3]) @ U0 @ _B_from_params(p0 + T @ th[3:])
 
+    # Prior sigma is a third of the cell-match window
     prior_width = (
         torch.tensor(
             [edge_tolerance * c0.a, edge_tolerance * c0.b, edge_tolerance * c0.c]
@@ -182,6 +186,7 @@ def refine_cell(
         / 3.0
     )
 
+    # khat: unit scattered-beam direction of q + s0 / lambda
     khat = None
     if wavelength is not None and wavelength > 0:
         k_out = q_d + torch.tensor(
@@ -195,6 +200,7 @@ def refine_cell(
         par = (d * k).sum(-1)
         return d - par[:, None] * k, par
 
+    # Along-beam and perpendicular residuals are whitened by their own initial RMS
     d0 = (hkl_d @ A.to(wd).transpose(-1, -2) - q_d)[indexed]
     d0_perp, d0_par = split(d0, khat[indexed] if khat is not None else None)
     s_par = d0_par.square().mean().sqrt().clamp_min(1e-9)
@@ -211,7 +217,7 @@ def refine_cell(
     before = float(whitened(A.to(wd), hkl_d, indexed).square().mean())
     A_new = A.to(wd)
     for _ in range(rounds):
-        if int(indexed.sum()) * 3 <= m:
+        if int(indexed.sum()) * 3 <= m:  # fewer residuals than free parameters
             return None
         sel = indexed.clone()
 
@@ -264,7 +270,7 @@ def _assign_hkls_padded(
     obs_mask: Tensor,
     q_tolerance: float,
 ) -> tuple[Tensor, Tensor]:
-    # Round A^{-1} q to integer hkl; flag peaks whose back-prediction is within tol.
+    # A (F, K, 3, 3), q_pad (F, N, 3): hkl (F, K, N, 3) and inliers within q_tolerance
     A_inv = torch.linalg.inv(A)
     hkl_cont = torch.einsum("fkij,fnj->fkni", A_inv, q_pad)
     hkl = torch.round(hkl_cont).long()
@@ -277,7 +283,6 @@ def _assign_hkls_padded(
 
 
 def _empty_refine_result(device, dtype) -> RefineResult:
-    # RefineResult with zero candidates and zero peaks.
     return RefineResult(
         A=torch.zeros(0, 3, 3, dtype=dtype, device=device),
         rmsd=torch.zeros(0, dtype=dtype, device=device),
@@ -299,8 +304,7 @@ def refine_multiframe_known_B(
     min_indexed: int = 6,
     weights_per_frame: Optional[list[Optional[Tensor]]] = None,
 ) -> list[RefineResult]:
-    # Pad (A_init, q_obs) to (F, K_max, ...) / (F, N_max, 3) and run one Adam over
-    # (F, K_max, 3) axis-angle perturbations.
+    # Pads to (F, K_max) candidates and (F, N_max) peaks for one batched Adam run
     F = len(A_init_per_frame)
     if F == 0:
         return []
@@ -351,6 +355,7 @@ def refine_multiframe_known_B(
     for f in range(F):
         K_f, N_f = K_per[f], N_per[f]
         A_anchor[f, :K_f] = A_init_per_frame[f]
+        # Identity padding keeps inv(A) finite for absent candidates
         if K_f < K_max:
             A_anchor[f, K_f:] = eye
         cand_mask[f, :K_f] = True
@@ -374,7 +379,6 @@ def refine_multiframe_known_B(
             obs_mask,
             q_tolerance=q_tolerance,
         )
-    # float view of the current hkl assignment
     hkl_dt = hkl.to(dtype)
     cand_mask_f = cand_mask.to(dtype)
 
@@ -398,10 +402,11 @@ def refine_multiframe_known_B(
         residual = q_pred - q_pad.unsqueeze(1)
         sq = (residual * residual).sum(dim=-1)
         mask = indexed.to(dtype)
-        # weight each inlier's residual by detection confidence
+        # Weights each inlier residual by its detection posterior c_i
         wmask = mask * w_pad.unsqueeze(1) if use_soft else mask
         per_w = wmask.sum(dim=-1).clamp_min(1.0)
         per_loss = (sq * wmask).sum(dim=-1) / per_w
+        # degen is constant in omega: it marks the loss history, not the gradient
         degen = (mask.sum(dim=-1) < min_indexed).to(dtype)
         per_loss = (per_loss + degen) * cand_mask_f
         loss = per_loss.sum()
@@ -427,7 +432,7 @@ def refine_multiframe_known_B(
         n_indexed = indexed.sum(dim=-1).long()
         mask = indexed.to(dtype)
         rmsd = torch.sqrt((sq * mask).sum(dim=-1) / n_indexed.clamp_min(1).to(dtype))
-        # confidence-weighted inlier sum for ranking
+        # c-weighted inlier sum, used to rank candidates
         if use_soft:
             soft_score = (mask * w_pad.unsqueeze(1)).sum(dim=-1)
         else:

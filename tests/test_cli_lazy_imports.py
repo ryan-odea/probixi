@@ -1,12 +1,9 @@
-"""The CLI's --help and `import probixi` must not import torch or the pipeline."""
-
 from __future__ import annotations
 
 import subprocess
 import sys
 
-# Blocking a module in sys.modules with None makes any `import <name>` raise
-# ImportError, so the check fails loudly if a top-level import creeps back in.
+# A None entry in sys.modules makes `import <name>` raise ImportError
 _BLOCK = "import sys; sys.modules.update({m: None for m in %r}); "
 _HEAVY = ["torch", "numpy", "h5py", "duckdb", "probixi.probixi", "probixi.indexer"]
 

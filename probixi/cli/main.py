@@ -18,8 +18,7 @@ def _pct(num: int, denom: int) -> str:
 def _resolve_cli_devices(
     device: Optional[str], devices: Optional[str], gpus: Optional[int]
 ) -> Optional[list]:
-    # Translate the --device / --devices / --gpus flags into a device list, or
-    # None to keep the single-device path. --devices/--gpus imply multi-GPU.
+    # Device list from --device/--devices/--gpus; None keeps the single-device path
     import torch
 
     explicit = bool(device) and device.strip().lower() != "auto"
@@ -99,7 +98,7 @@ def _run_multi_gpu(device_list: list, opts: dict, refine, integrate) -> None:
     "list_file",
     required=True,
     type=click.Path(exists=True, dir_okay=False),
-    help="CrystFEL list file (.lst) of HDF5 or CBF (.cbf, .cbf.gz, .cbf.bz2) "
+    help="CrystFEL list file of HDF5, CXI, or CBF (.cbf, .cbf.gz, .cbf.bz2) "
     "inputs, optionally as 'path //event' or 'path tag-N//'.",
 )
 @click.option(
@@ -108,7 +107,7 @@ def _run_multi_gpu(device_list: list, opts: dict, refine, integrate) -> None:
     "geometry_file",
     required=True,
     type=click.Path(exists=True, dir_okay=False),
-    help="CrystFEL geometry file (.geom).",
+    help="CrystFEL geometry file.",
 )
 @click.option(
     "-p",
@@ -116,18 +115,18 @@ def _run_multi_gpu(device_list: list, opts: dict, refine, integrate) -> None:
     "cell_file",
     default=None,
     type=click.Path(exists=True, dir_okay=False),
-    help="CrystFEL unit-cell file (.cell). Required unless --peaks-only.",
+    help="CrystFEL cell file; approximate is enough. Required unless "
+    "--peaks-only or --render.",
 )
 @click.option(
     "--mask",
     "mask_file",
     default=None,
     type=click.Path(exists=True, dir_okay=False),
-    help="HDF5 file holding the bad-pixel mask (e.g. the Eiger master file), "
-    "overriding the geometry's mask_file or the data file. The dataset is the "
-    "geometry's 'mask' path if the file has it, else the NeXus "
-    "/entry/instrument/detector/[detectorSpecific/]pixel_mask. A mask that "
-    "cannot be read from this file is an error, not skipped.",
+    help="HDF5 file holding the bad-pixel mask, such as an Eiger master file; "
+    "overrides the geometry's mask_file. Reads the geometry's 'mask' dataset, "
+    "else the NeXus /entry/instrument/detector/[detectorSpecific/]pixel_mask. "
+    "An unreadable mask is an error.",
 )
 @click.option(
     "-o",
@@ -136,29 +135,25 @@ def _run_multi_gpu(device_list: list, opts: dict, refine, integrate) -> None:
     required=False,
     default=None,
     type=click.Path(writable=True),
-    help="Output file. A .stream writes a CrystFEL stream; a .duckdb/.db writes "
-    "a DuckDB database (frames/reflections/peaks + geometry/cell/panels tables). "
-    "With --peaks-only it is instead an output directory for the CXI peak set, "
-    "or a .duckdb file with the peaks (required for CBF input). "
-    "Optional when only --render is used.",
+    help="Output; the extension sets the format: .stream (CrystFEL stream) or "
+    ".db/.duckdb (DuckDB). Under --peaks-only, a directory of CXI peak files or "
+    "a .db/.duckdb file, which CBF input requires. Optional with --render alone.",
 )
 @click.option(
     "--peaks-only",
     is_flag=True,
-    help="Only run peak finding and export a CXI peak set (one .cxi per input "
-    "file with external-linked images, plus peaks.lst and a companion .geom) "
-    "for 'indexamajig --peaks=cxi'. -o is an output directory (HDF5 input only). "
-    "No cell needed.",
+    help="Peakfinding only. -o is a directory of CXI peak files for "
+    "'indexamajig --peaks=cxi' (HDF5 input), or a DuckDB file. No cell needed.",
 )
 @click.option(
     "--gif",
     "gif",
     default=None,
     type=click.Path(dir_okay=False, writable=True),
-    help="Also write a noise-model diagnostic GIF over the seed frames.",
+    help="Write a GIF of the noise model over the first --seed-frames frames.",
 )
 @click.option("--start", type=int, default=None, help="First frame index (inclusive).")
-@click.option("--stop", type=int, default=None, help="Stop frame index (exclusive).")
+@click.option("--stop", type=int, default=None, help="Last frame index (exclusive).")
 @click.option(
     "--batch-size",
     type=int,
@@ -171,178 +166,176 @@ def _run_multi_gpu(device_list: list, opts: dict, refine, integrate) -> None:
     type=click.IntRange(min=1),
     default=1,
     show_default=True,
-    help="Lattices to search per frame, peeling indexed peaks between passes.",
+    help="Lattices to search per frame; indexed peaks are removed between passes.",
 )
 @click.option(
     "--recalibrate-every",
     type=click.IntRange(min=0),
     default=None,
-    help="Input frames between fresh calibrations; 0 freezes the initial estimate.",
+    help="Rebuild the calibration every N input frames and freeze the statistics "
+    "in between; 0 freezes the initial calibration.",
 )
 @click.option(
     "--device",
     default=None,
-    help="Torch device, or 'auto' (the default)",
+    help="Torch device, such as cuda, cuda:1, mps, or cpu. Default auto: CUDA, "
+    "then MPS, then CPU.",
 )
 @click.option(
     "--devices",
     default=None,
-    help="Comma-separated device list for multi-GPU data-parallel indexing "
-    "(e.g. 'cuda:0,cuda:1'). Splits frames into blocks across devices and merges "
-    "the per-device streams. Indexing path only.",
+    help="Comma-separated devices for multi-GPU indexing, such as "
+    "'cuda:0,cuda:1'; the run is split into blocks and the outputs merged in "
+    "order. Indexing only.",
 )
 @click.option(
     "--gpus",
     type=int,
     default=None,
-    help="Multi-GPU data-parallel indexing across the first N CUDA devices "
-    "(shorthand for --devices cuda:0,...,cuda:N-1).",
+    help="Multi-GPU indexing on the first N CUDA devices "
+    "(--devices cuda:0,...,cuda:N-1).",
 )
 @click.option(
     "--threads-per-worker",
     type=int,
     default=None,
-    help="Torch CPU intra-op threads per multi-GPU worker (default: "
-    "cpu_count // n_workers, to avoid oversubscribing cores).",
+    help="CPU threads per multi-GPU worker (default: cpu_count // n_workers).",
 )
 @click.option(
     "--noise-mode",
     type=click.Choice(["online", "per_frame"]),
     default="online",
     show_default=True,
-    help="Noise-model update mode.",
+    help="online keeps updating the background after calibration; per_frame "
+    "rebuilds it for each frame.",
 )
 @click.option(
     "--warmup-frames",
     type=int,
     default=16,
     show_default=True,
-    help="Frames observed before the dead-pixel mask is committed.",
+    help="Frames seen before zero-variance pixels are masked as dead.",
 )
 @click.option(
     "--noise-decay",
     type=click.FloatRange(min=0.0, max=1.0, min_open=True),
     default=1.0,
     show_default=True,
-    help="Per-frame weight of the running background statistics; 1 averages the "
-    "whole run, d < 1 remembers about 1/d frames (a sample or beam that changes "
-    "within the run).",
+    help="Per-frame weight of the running background; 1 averages the run, "
+    "d < 1 remembers about 1/d frames.",
 )
 @click.option(
     "--seed-frames",
     type=int,
     default=32,
     show_default=True,
-    help="Frames used to calibrate the noise model and detection threshold.",
+    help="Frames drawn at random to calibrate the noise model and threshold.",
 )
 @click.option(
     "--random-seed",
     type=int,
     default=1988,
     show_default=True,
-    help="Seed for the random draw of calibration and radii-training frames.",
+    help="Seed for the draw of calibration and aperture-training frames.",
 )
 @click.option(
     "--target-noise-peaks",
     type=float,
     default=5.0,
     show_default=True,
-    help="Calibrate the detection threshold so a signal-free frame "
-    "yields at most this many noise blobs.",
+    help="Noise budget: spurious detections allowed on a signal-free frame. "
+    "Lower is stricter.",
 )
 @click.option(
     "--flux-variance/--no-flux-variance",
     default=None,
-    help="Fit a photon-transfer curve during calibration and whiten each pixel "
-    "against its own Poisson noise, instead of using a frozen variance floor. "
-    "Default: on when the background level changes between seed frames beyond "
-    "photon noise (XFEL/SFX, jets), off for steady exposures.",
+    help="Whiten each pixel against the variance predicted at its frame's own "
+    "level. Default: decided at calibration, on when the background changes "
+    "between shots beyond photon noise.",
 )
 @click.option(
     "--flux-var-floor",
     type=float,
     default=0.15,
     show_default=True,
-    help="Variance floor as a fraction of the calibrated per-pixel variance, "
-    "applied under --flux-variance.",
+    help="Lower bound on the flux-scaled variance, as a fraction of the running "
+    "variance.",
 )
 @click.option(
     "--panel",
     default="0",
     show_default=True,
-    help="Fallback panel name for peaks outside all geometry panels.",
+    help="Panel name for peaks outside every geometry panel.",
 )
 @click.option(
     "--enrich-gate",
     is_flag=True,
-    help="Drop indexed frames whose predicted spots are not backed by image signal beyond chance.",
+    help="Drop lattices whose predicted spots land on signal no more often "
+    "than chance.",
 )
 @click.option(
     "--enrich-alpha",
     type=float,
     default=1e-3,
     show_default=True,
-    help="Max chance probability to accept a frame under --enrich-gate.",
+    help="Largest chance probability a lattice may have under --enrich-gate.",
 )
 @click.option(
     "--render",
     "render",
     multiple=True,
     metavar="FRAME",
-    help="Recall a frame and write a peaks/index overlay image. An absolute "
-    "index, 'image_filename//event' or 'image_filename tag-N//'. Repeatable; "
-    "renders before any run.",
+    help="Draw a frame with its peaks and predicted reflections: an index, "
+    "'filename//event', or 'filename tag-N//'. Repeatable; runs after "
+    "calibration, before indexing.",
 )
 @click.option(
     "--render-out",
     "render_out",
     default=None,
     type=click.Path(),
-    help="Render destination: an image file (single --render) or a directory.",
+    help="Image file for a single --render, else a directory.",
 )
 @click.option(
     "-q",
     "--quiet",
     is_flag=True,
-    help="Suppress progress: the periodic frames/hits/indexed rate line and the "
-    "citation printed at the start",
+    help="Suppress the progress line and the citation.",
 )
 @click.option(
     "--force-all",
     is_flag=True,
-    help="Disable the blank-shot screen and index every frame, however dark",
+    help="Disable the blank-shot screen and index every frame.",
 )
 @click.option(
     "--no-refine-cell",
     is_flag=True,
-    help="Keep every crystal at the target cell instead of refining the cell "
-    "(and orientation) per crystal against its indexed peaks.",
+    help="Hold every crystal at the target cell and refine orientation only.",
 )
 @click.option(
     "--aperture",
     type=click.Choice(["snr", "flux", "auto"]),
     default="auto",
     show_default=True,
-    help="Size the learned integration disk for background-limited "
-    "signal-to-noise (smaller on narrow spots) or for total flux (2% profile "
-    "radius); auto keeps snr if it captures a constant fraction of every "
-    "spot's flux on the calibration peaks, or if the flux disk's extra "
-    "background noise costs more than that spread, else flux.",
+    help="Integration disk: snr maximises background-limited signal-to-noise, "
+    "flux reaches the 2% profile radius, and auto keeps snr unless its captured "
+    "flux fraction varies between crystals by more than the flux disk's extra "
+    "background noise costs.",
 )
 @click.option(
     "--cell-calibrate/--no-cell-calibrate",
     default=True,
     show_default=True,
-    help="Re-centre the target cell on the median refined cell of the calibration "
-    "frames' lattices and then of the first accepted lattices (twice), so the cell "
-    "file only has to bootstrap; absorbs a cell/camera-length inconsistency.",
+    help="Re-centre the target cell on the median refined cell of the "
+    "calibration lattices, then twice more during the run, and re-fit the "
+    "camera length.",
 )
 @click.option(
     "--cell-calibrate-after",
     type=int,
     default=200,
     show_default=True,
-    help="Accepted lattices pooled before each re-centring under --cell-calibrate.",
+    help="Accepted lattices pooled before each re-centring during the run.",
 )
 def main(
     list_file: str,
@@ -381,11 +374,11 @@ def main(
     cell_calibrate: bool,
     cell_calibrate_after: int,
 ) -> None:
-    """Run the probixi pipeline and write indexed frames to a CrystFEL stream.
+    """Find peaks, index, and integrate every frame of a CrystFEL list file.
 
-    With --peaks-only, peak finding runs but indexing does not, and a CXI peak
-    set (readable by 'indexamajig --peaks=cxi') is written to the -o directory
-    instead.
+    The -o extension selects a CrystFEL stream or a DuckDB database.
+
+    --peaks-only writes peaks without indexing.
     """
     opts = dict(locals())
     if not peaks_only and not render and cell_file is None:

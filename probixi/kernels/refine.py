@@ -11,6 +11,7 @@ from probixi.indexer.refine import RefineResult
 
 @triton.jit
 def rotation(x, y, z):
+    # Rodrigues R = I + a K + b K^2, a = sin t / t, b = (1 - cos t) / t^2, row-major
     norm2 = x * x + y * y + z * z
     theta = lib.sqrt(tl.maximum(norm2, 1.0e-24))
     sn = lib.sin(theta)
@@ -38,6 +39,7 @@ def rotation(x, y, z):
 
 @triton.jit
 def assign(a00, a01, a02, a10, a11, a12, a20, a21, a22, qx, qy, qz, valid, tol):
+    # hkl = round(A^-1 q) through the adjugate; a match lies within tol of A hkl
     c00 = a11 * a22 - a12 * a21
     c01 = a02 * a21 - a01 * a22
     c02 = a01 * a12 - a02 * a11
@@ -81,7 +83,7 @@ def kernel(
     TOL,
     BLOCK: tl.constexpr,
 ):
-    # One program per orientation candidate, running every Adam step in-register.
+    # one program per orientation candidate, running every Adam step in registers
     c = tl.program_id(0)
     f = tl.load(FID + c)
     i = tl.arange(0, BLOCK)
@@ -138,7 +140,7 @@ def kernel(
             count < MIN_INDEXED
         ).to(tl.float32)
         tl.store(HISTORY + c * STEPS + step, loss)
-        # Gradient of R(omega) @ v, with v = A_anchor @ h.
+        # gradient of R(omega) @ v, with v = A_anchor @ h
         ux = b00 * h + b01 * k + b02 * ell
         uy = b10 * h + b11 * k + b12 * ell
         uz = b20 * h + b21 * k + b22 * ell
@@ -165,6 +167,7 @@ def kernel(
         vgo_z = ux * go_y - uy * go_x
         adot = (theta * cs - sn) / (theta * theta)
         bdot = (theta * sn - 2.0 * (1.0 - cs)) / (theta * theta * theta)
+        # chain rule through theta, with d theta / d omega = omega / theta
         radial = tl.where(
             norm2 > 1.0e-24,
             (
@@ -177,6 +180,7 @@ def kernel(
         gradx = tl.sum(a * vg_x + b * (cg_x + vgo_x), 0) + x * radial
         grady = tl.sum(a * vg_y + b * (cg_y + vgo_y), 0) + y * radial
         gradz = tl.sum(a * vg_z + b * (cg_z + vgo_z), 0) + z * radial
+        # Adam with betas (0.9, 0.999) and eps 1e-8; BC1, BC2 hold the bias corrections
         mx = mx + (gradx - mx) * 0.1
         my = my + (grady - my) * 0.1
         mz = mz + (gradz - mz) * 0.1
@@ -258,7 +262,7 @@ def refine_triton(
     counts = [len(a) for a in A_init_per_frame]
     ns = [len(q) for q in q_obs_per_frame]
     F = len(counts)
-    N = triton.next_power_of_2(max(ns))
+    N = triton.next_power_of_2(max(ns))  # tl.arange needs a power of two
     C = sum(counts)
     dev = A_init_per_frame[0].device
     A = torch.cat(A_init_per_frame).contiguous()
@@ -309,6 +313,7 @@ def refine_triton(
         num_warps=4,
         enable_fp_fusion=False,
     )
+    # per-step loss summed over every candidate of the batch, shared by all frames
     history = HISTORY.sum(0).to(device="cpu", dtype=torch.float32)
     results = []
     offset = 0
