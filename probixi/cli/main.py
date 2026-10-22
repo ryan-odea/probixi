@@ -56,7 +56,7 @@ def format_cell_calibration(cc) -> str:
 
 def _run_multi_gpu(device_list: list, opts: dict, refine, integrate) -> None:
     from probixi.indexer import SeedConfig
-    from probixi.multigpu import run_data_parallel
+    from probixi.tools.multigpu import run_data_parallel
 
     kw = dict(opts)
     if kw.pop("peaks_only") or kw.pop("render") or kw.pop("gif"):
@@ -220,6 +220,15 @@ def _run_multi_gpu(device_list: list, opts: dict, refine, integrate) -> None:
     help="Frames observed before the dead-pixel mask is committed.",
 )
 @click.option(
+    "--noise-decay",
+    type=click.FloatRange(min=0.0, max=1.0, min_open=True),
+    default=1.0,
+    show_default=True,
+    help="Per-frame weight of the running background statistics; 1 averages the "
+    "whole run, d < 1 remembers about 1/d frames (a sample or beam that changes "
+    "within the run).",
+)
+@click.option(
     "--seed-frames",
     type=int,
     default=32,
@@ -242,11 +251,12 @@ def _run_multi_gpu(device_list: list, opts: dict, refine, integrate) -> None:
     "yields at most this many noise blobs.",
 )
 @click.option(
-    "--flux-variance",
-    is_flag=True,
+    "--flux-variance/--no-flux-variance",
+    default=None,
     help="Fit a photon-transfer curve during calibration and whiten each pixel "
     "against its own Poisson noise, instead of using a frozen variance floor. "
-    "Opt-in; intended for XFEL/SFX or jet-intensity-variable data.",
+    "Default: on when the background level changes between seed frames beyond "
+    "photon noise (XFEL/SFX, jets), off for steady exposures.",
 )
 @click.option(
     "--flux-var-floor",
@@ -353,10 +363,11 @@ def main(
     threads_per_worker: Optional[int],
     noise_mode: str,
     warmup_frames: int,
+    noise_decay: float,
     seed_frames: int,
     random_seed: int,
     target_noise_peaks: float,
-    flux_variance: bool,
+    flux_variance: Optional[bool],
     flux_var_floor: float,
     panel: str,
     enrich_gate: bool,
@@ -414,6 +425,7 @@ def main(
         mask_file=mask_file,
         noise_mode=cast("Literal['online', 'per_frame']", noise_mode),
         warmup_frames=warmup_frames,
+        noise_decay=noise_decay,
         flux_variance=flux_variance,
         flux_var_floor=flux_var_floor,
         device=dev,
@@ -454,11 +466,16 @@ def main(
     if not quiet:
         tc = probixi.threshold_calibration
         msg = (
-            f"Calibrated on {seed_frames} frames: kappa={cal.kappa:.2f} "
+            f"Calibrated on {probixi.n_seed_frames} frames: kappa={cal.kappa:.2f} "
             f"prior_peak={cal.prior_peak:.4f} var_scale={cal.var_scale:.3f}"
         )
         if tc is not None:
             msg += f" mf_threshold={tc.threshold:.2f}"
+            if tc.n_quiet_frames == 0:  # no signal-free seed frame: mirrored tail
+                msg += " (noise from the mirrored tail)"
+        msg += f" flux_variance={'on' if probixi.flux_variance else 'off'}"
+        if probixi.background_fluctuation is not None:
+            msg += f" (background fluctuation {probixi.background_fluctuation:.2f})"
         bmr = probixi.beamstop_min_res
         if bmr is not None:
             msg += f" beamstop_min_res={bmr:.1f}A (learned)"
@@ -487,6 +504,27 @@ def main(
                 msg += ")"
             msg += f": {d['reason']}"
         click.echo(msg)
+        pr = probixi.predicted_radii
+        if pr and probixi.indexer is not None and probixi.indexer._radius_by_q:
+            edges = probixi.indexer._radius_by_q[0].tolist()
+            click.echo(
+                "Disk radius at predicted positions (px, from d in A): "
+                + " ".join(
+                    f"{'inf' if e <= 0 else f'{1 / e:.2f}'}:{r:.1f}"
+                    for e, r in zip(edges[:-1], pr)
+                )
+            )
+        cl = probixi.camera_length_calibration
+        if cl is not None:
+            click.echo(
+                f"Camera length fitted on {cl.n_lattices} lattices: "
+                f"{100 * cl.eps:+.2f}% +- {100 * cl.sigma:.2f}% "
+                + (
+                    f"-> {1e3 * cl.distance:.3f} mm (was {1e3 * cl.previous:.3f})"
+                    if cl.applied
+                    else f"(kept {1e3 * cl.previous:.3f} mm)"
+                )
+            )
 
     if render:
         out = Path(render_out) if render_out else Path(".")

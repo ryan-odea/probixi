@@ -64,7 +64,7 @@ def main(
 
         probixi-resolve -i run.duckdb -y 3 -w 321 -o detwinned.duckdb
     """
-    from .ambigator import Ambigator, _format_operator
+    from ..ambigator import Ambigator, _format_operator
 
     if device and device.strip().lower() == "auto":
         device = None

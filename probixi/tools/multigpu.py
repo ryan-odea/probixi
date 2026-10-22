@@ -9,9 +9,9 @@ from typing import Any, Optional, Sequence, Union
 import torch
 from torch.multiprocessing.spawn import spawn
 
-from .indexer import IntegrateConfig, RefineConfig, SeedConfig
-from .io import DataLoader, DataOffloader, DuckDBOffloader, is_duckdb_path
-from .probixi import Probixi, auto_device
+from ..indexer import IntegrateConfig, RefineConfig, SeedConfig
+from ..io import DataLoader, DataOffloader, DuckDBOffloader, is_duckdb_path
+from ..probixi import Probixi, auto_device
 
 PathLike = Union[str, Path]
 
@@ -118,7 +118,7 @@ def merge_dbs(part_paths: Sequence[PathLike], output_path: PathLike) -> int:
     """Union per-rank DuckDB parts into one database."""
     import duckdb
 
-    from .io import db as _db
+    from ..io import db as _db
 
     out = Path(output_path)
     out.unlink(missing_ok=True)
@@ -180,7 +180,8 @@ class BlockConfig:
     target_noise_peaks: Optional[float] = 5.0
     noise_mode: str = "online"
     warmup_frames: int = 16
-    flux_variance: bool = False
+    noise_decay: float = 1.0
+    flux_variance: Optional[bool] = None
     flux_var_floor: float = 0.15
     frame_screen_frac: float = 0.1
     panel: str = "0"
@@ -225,6 +226,7 @@ def run_block(
         mask_file=cfg.mask_file,
         noise_mode=cfg.noise_mode,  # type: ignore[arg-type]
         warmup_frames=cfg.warmup_frames,
+        noise_decay=cfg.noise_decay,
         flux_variance=cfg.flux_variance,
         flux_var_floor=cfg.flux_var_floor,
         frame_screen_frac=cfg.frame_screen_frac,
@@ -280,7 +282,7 @@ def run_block(
             n += bool(result.crystals)
             while n_cellcal < len(p.cell_calibrations):
                 if not cfg.quiet:
-                    from .cli import format_cell_calibration
+                    from ..cli import format_cell_calibration
 
                     print(
                         f"[rank {rank}/{world_size}] "
@@ -340,7 +342,8 @@ def run_data_parallel(
     target_noise_peaks: Optional[float] = 5.0,
     noise_mode: str = "online",
     warmup_frames: int = 16,
-    flux_variance: bool = False,
+    noise_decay: float = 1.0,
+    flux_variance: Optional[bool] = None,
     flux_var_floor: float = 0.15,
     frame_screen_frac: float = 0.1,
     panel: str = "0",
@@ -387,6 +390,7 @@ def run_data_parallel(
         target_noise_peaks=target_noise_peaks,
         noise_mode=noise_mode,
         warmup_frames=warmup_frames,
+        noise_decay=noise_decay,
         flux_variance=flux_variance,
         flux_var_floor=flux_var_floor,
         frame_screen_frac=frame_screen_frac,

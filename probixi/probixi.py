@@ -43,6 +43,7 @@ from .io import (
     render_frame,
 )
 from .io.cell import median_cell
+from .io.geometry import EV_ANGSTROM
 from .kernels import Engine, select, use_engine
 from .peakfinding import PeakFinder, PeakStream
 from .peakfinding.noise import (
@@ -54,6 +55,7 @@ from .peakfinding.noise import (
     calibrate_noise,
     calibrate_threshold,
     fit_eigen_background,
+    background_fluctuation_ratio,
     fit_photon_transfer,
 )
 from .peakfinding.noise.model import value_ok
@@ -83,6 +85,12 @@ _RADII_MIN_FRAMES = 32
 _RADII_MAX_FRAMES = 512
 _RADII_MIN_PEAKS = 200
 _APERTURE_MIN_PEAKS = 4000  # "auto" needs strong, isolated peaks: sample more
+# across-frame / within-frame background variance above which flux variance is on
+_FLUX_AUTO_RATIO = 1.5
+_CLEN_MIN_SHIFT = 1e-3  # camera-length re-fits smaller than this are left alone
+_CLEN_MIN_Z = 5.0
+_CLEN_MAX_RESIDUAL_PX = 6.0
+_CLEN_MAX_ROUNDS = 3
 
 
 # --- BEGIN GENERATED CITATION ---
@@ -90,7 +98,7 @@ _CITATION = r"""
 @software{odea_probixi,
   author  = {O'Dea, Ryan and Kepa, Michal and Weinert, Tobias},
   title   = {{probixi}: Self-Calibrating Probabilistic Peak Finding for Serial X-Ray Crystallographic Data},
-  version = {0.8.3},
+  version = {0.9.0},
   year    = {2026},
   url     = {https://github.com/ryan-odea/probixi}
 }
@@ -185,6 +193,32 @@ class CellCalibration:
 
 
 @dataclass
+class CameraLengthCalibration:
+    """Camera length fitted from the seed lattices (see ``camera_length_error``).
+
+    Attributes
+    ----------
+    n_lattices : int
+        Lattices whose indexed peaks entered the fit.
+    previous, distance : float
+        Camera length (m) before and after; equal when not applied.
+    eps, sigma : float
+        Total relative change ``distance / previous - 1`` and the standard
+        error of the last fit.
+    applied : bool
+        Whether the distance was changed (shifts that are small or not
+        significant are left alone).
+    """
+
+    n_lattices: int
+    previous: float
+    distance: float
+    eps: float
+    sigma: float
+    applied: bool
+
+
+@dataclass
 class Probixi:
     """Self-calibrating probabilistic peak finder and indexer.
 
@@ -211,6 +245,10 @@ class Probixi:
         tracking slow drift) or resets each frame.
     warmup_frames : int, default 16
         Frames observed before the dead-pixel mask is committed.
+    noise_decay : float, default 1.0
+        Per-frame weight of the running background statistics. ``1`` keeps a
+        cumulative average; ``d < 1`` forgets with a memory of about ``1/d``
+        frames, so the model follows a sample or beam change within a run.
     finder_kappa, posterior_threshold, candidate_threshold
         Pre-calibration detector defaults; ``calibrate`` overrides ``kappa`` and
         the peak prior with learned values.
@@ -227,10 +265,12 @@ class Probixi:
     mf_scales, mf_threshold
         Matched-filter kernel scales and the fallback threshold (learned by
         ``calibrate`` when ``target_noise_peaks`` is set).
-    flux_variance : bool, default False
+    flux_variance : bool or None, default None
         Replace the frozen variance floor with a learned photon-transfer curve
         so dim/low-flux shots are whitened against their own Poisson noise.
-        Opt-in; intended for XFEL/SFX or jet-intensity-variable data.
+        ``None`` decides at calibration: on when the background level changes
+        between seed frames beyond photon noise (``background_fluctuation`` above
+        1.5, as at XFELs), off for steady exposures.
     peak_size_max : int, default 30
         Maximum connected-component size accepted as a peak.
     random_seed : int, default 1988
@@ -254,6 +294,7 @@ class Probixi:
 
     noise_mode: Literal["per_frame", "online"] = "online"
     warmup_frames: int = 16
+    noise_decay: float = 1.0
     finder_kappa: float = 10.0
     peak_size_max: int = 30
     posterior_threshold: float = 0.5
@@ -263,7 +304,7 @@ class Probixi:
     mf_threshold: float = 5.0
     seed_level_frac: float = 0.0
     frame_screen_frac: float = 0.1
-    flux_variance: bool = False
+    flux_variance: Optional[bool] = None
     flux_var_floor: float = 0.15
     random_seed: int = 1988
     cell_calibrate: bool = True
@@ -287,6 +328,13 @@ class Probixi:
     _shadow_fraction: float = field(default=0.0, init=False, repr=False)
     screened_frames: list = field(default_factory=list, init=False, repr=False)
     cell_calibrations: list = field(default_factory=list, init=False, repr=False)
+    camera_length_calibration: Optional[CameraLengthCalibration] = field(
+        default=None, init=False, repr=False
+    )
+    predicted_radii: Optional[list] = field(default=None, init=False, repr=False)
+    background_fluctuation: Optional[float] = field(
+        default=None, init=False, repr=False
+    )
     _cell_origin: Optional[CellParams] = field(default=None, init=False, repr=False)
     _noise: Optional[NoiseModel] = field(default=None, init=False, repr=False)
     _finder: Optional[PeakFinder] = field(default=None, init=False, repr=False)
@@ -320,6 +368,7 @@ class Probixi:
                 integrate=self.integrate,
                 device=self.device,
             )
+            self.indexer.frame_wavelengths = _frame_wavelengths(m)
 
     @property
     def integration_radii(self) -> Optional[tuple[float, float, float]]:
@@ -619,6 +668,7 @@ class Probixi:
         self._noise = NoiseModel(
             frame_size=frame_size,
             mode=self.noise_mode,
+            decay=self.noise_decay,
             warmup_frames=self.warmup_frames,
             beam_center=geom.beam_center if geom is not None else None,
             radial_radius=radius,
@@ -762,8 +812,11 @@ class Probixi:
         n_frames = 0
         auto = self.indexer.integrate.aperture == "auto"
         sums, sqs, cnts, qs, nns, frames, qmap = [], [], [], [], [], [], None
+        pool = self._sample_frame_indices(_RADII_MAX_FRAMES, exclude)
+        if len(pool) < _RADII_MIN_FRAMES:  # a short run: reuse the seed frames
+            pool = self._sample_frame_indices(_RADII_MAX_FRAMES)
         for res in self.peak_stream(
-            self._frames_at(self._sample_frame_indices(_RADII_MAX_FRAMES, exclude)),
+            self._frames_at(pool),
             update_noise=False,
             estimate_scale=False,
         ):
@@ -984,8 +1037,8 @@ class Probixi:
         background ``z`` to ``N(0, 1)``. With ``target_noise_peaks`` set (the
         default), also calibrates the matched-filter threshold so a signal-free
         frame yields at most that many noise blobs, and installs it on the
-        finder. With ``flux_variance`` enabled on the pipeline, also fits the
-        photon-transfer curve.
+        finder. Decides ``flux_variance`` when it is ``None`` and, if on, fits
+        the photon-transfer curve.
 
         Parameters
         ----------
@@ -1041,6 +1094,13 @@ class Probixi:
             seed = _FrameSource(self, seed_indices)
         if not seed:
             raise ValueError("no seed frames available to calibrate on")
+        self.n_seed_frames = len(seed)
+        if seed_frames is None and len(seed) < n_seed:
+            warnings.warn(
+                f"calibrating on all {len(seed)} frames of the run, fewer than the "
+                f"{n_seed} seed frames asked for",
+                stacklevel=2,
+            )
         self._calibration_options = dict(
             n_seed=n_seed,
             eigen_modes=eigen_modes,
@@ -1060,6 +1120,15 @@ class Probixi:
             self.fit_noise(seed)
         result = calibrate_noise(self.noise, seed, warm=False, **opts)
         result.apply(self.noise, self.finder)
+        if self.flux_variance is None:
+            self.background_fluctuation = background_fluctuation_ratio(
+                self.noise,
+                seed,
+                self.finder.local_inner_radius,
+                self.finder.local_outer_radius,
+            )
+            self.flux_variance = self.background_fluctuation > _FLUX_AUTO_RATIO
+            self.finder.flux_variance = self.flux_variance
         if self.flux_variance:
             fit_photon_transfer(self.noise)
         if eigen_modes > 0:
@@ -1086,27 +1155,75 @@ class Probixi:
         if self._beamstop_qmin:
             self._apply_beamstop_qmin(self._beamstop_qmin)
         self._sync_active_noise_sources()
-        if (
-            self.cell_calibrate
-            and self.indexer is not None
-            and not self.cell_calibrations
-        ):
+        if self.indexer is not None and not self.cell_calibrations:
             self._calibrate_cell(seed)
         return result
 
     def _calibrate_cell(self, frames: Iterable[Tensor]) -> None:
         n_screened = len(self.screened_frames)
         tc = self.threshold_calibration
-        results = self.indexer.index_frame_stream(
-            self.peak_stream(frames, update_noise=False),
-            bright_threshold=tc.threshold if tc is not None else self.mf_threshold,
-            enrich_alpha=self.cell_calibrate_alpha,
-        )
+
+        def index() -> list:
+            return list(
+                self.indexer.index_frame_stream(
+                    self.peak_stream(frames, update_noise=False),
+                    bright_threshold=(
+                        tc.threshold if tc is not None else self.mf_threshold
+                    ),
+                    enrich_alpha=self.cell_calibrate_alpha,
+                )
+            )
+
+        self.indexer.start_profile_stacking()
+        results = index()
+        for _ in range(_CLEN_MAX_ROUNDS if self.cell_calibrate else 0):
+            if not self._recalibrate_camera_length(
+                [c for r in results for c in r.crystals]
+            ):
+                break
+            # re-index at the new distance, which also sharpens the next fit
+            self.indexer.start_profile_stacking()
+            results = index()
+        cl = self.camera_length_calibration
+        if cl is not None and cl.applied:
+            warnings.warn(
+                f"camera length re-fitted on {cl.n_lattices} seed lattices: "
+                f"{1e3 * cl.previous:.3f} -> {1e3 * cl.distance:.3f} mm "
+                f"({100 * cl.eps:+.2f}%); the geometry's clen does not match the "
+                "radial curvature of the indexed peaks",
+                stacklevel=2,
+            )
+        self.predicted_radii = self.indexer.finish_profile_stacking()
         cells = [c.cell for r in results for c in r.crystals]
         del self.screened_frames[n_screened:]
         self._frame_scales.clear()
-        if len(cells) >= max(1, self.cell_calibrate_after // 10):
+        if self.cell_calibrate and len(cells) >= max(
+            1, self.cell_calibrate_after // 10
+        ):
             self._recalibrate_cell(cells)
+
+    def _recalibrate_camera_length(self, crystals: list) -> bool:
+        assert self.indexer is not None
+        if len(crystals) < 10:
+            return False
+        fit = camera_length_error(self.indexer, crystals)
+        if fit is None:
+            return False
+        eps, se, n = fit
+        old = float(self.indexer.geometry["clen"])
+        step = abs(eps) >= max(_CLEN_MIN_SHIFT, _CLEN_MIN_Z * se)
+        new = old * (1.0 + eps) if step else old
+        prev = self.camera_length_calibration
+        first = prev.previous if prev is not None else old
+        self.camera_length_calibration = CameraLengthCalibration(
+            n, first, new, new / first - 1.0, se, new != first
+        )
+        if step:
+            self.indexer.geometry["clen"] = new
+            self.indexer.geometry["clen_shift"] = new - first  # for the file's clen
+            self.loader.metadata.geometry.distance = new
+            self.indexer._q_max = None
+        return step
 
     @property
     def beamstop_min_res(self) -> Optional[float]:
@@ -1478,6 +1595,79 @@ class _FrameSource:
 
     def __iter__(self) -> Iterator[Tensor]:
         return self._pipeline._frames_at(self._indices)
+
+
+def camera_length_error(
+    indexer: Indexer, crystals: list
+) -> Optional[tuple[float, float, int]]:
+    """Relative camera-length error from the radial residuals of indexed peaks.
+
+    A distance error ``eps`` moves a predicted spot radially by ``rho * eps`` while a
+    crystal's isotropic cell scale ``eta`` moves it by ``rho * eta / cos(2 theta)``;
+    the two are degenerate at low angle only, so ``eta`` is profiled out per crystal
+    and ``eps`` is fitted on the curvature (Huber-weighted least squares).
+
+    Returns
+    -------
+    tuple or None
+        ``(eps, standard error, lattices used)``, or ``None`` with fewer than 10
+        lattices. The corrected distance is ``clen * (1 + eps)``.
+    """
+    g0 = indexer.geometry
+    bases = _panel_bases(g0, None, torch.float64)
+    xs, us, ys, ids = [], [], [], []
+    for c in crystals:
+        sel = c.indexed_mask.cpu()
+        if int(sel.sum()) < 6:
+            continue
+        g = indexer._geometry_at(c.frame_index)
+        L = float(g["clen"]) / float(g["pixel_size"])
+        S = c.hkl.cpu()[sel].double() @ c.A.cpu().double().T * float(g["wavelength"])
+        pred = S[:, :2] * (L / (S[:, 2:] + 1.0))
+        obs = _lab_xy_pixels(c.positions.cpu()[sel].double(), g, bases)
+        rho = obs.norm(dim=-1).clamp_min(1e-9)
+        dr = ((obs - pred) * obs).sum(-1) / rho
+        keep = dr.abs() < _CLEN_MAX_RESIDUAL_PX
+        xs.append(rho[keep])
+        us.append((rho * torch.sqrt(rho * rho + L * L) / L)[keep])
+        ys.append(dr[keep])
+        ids.append(torch.full((int(keep.sum()),), len(ids)))
+    if len(ids) < 10:
+        return None
+    x, u, y, cid = (torch.cat(t) for t in (xs, us, ys, ids))
+    if len(x) < 10 * len(ids):
+        return None
+
+    def per(v: Tensor) -> Tensor:  # per-crystal sums, broadcast back to the peaks
+        return torch.zeros(len(ids), dtype=v.dtype).index_add_(0, cid, v)[cid]
+
+    w = torch.ones_like(y)
+    for _ in range(5):
+        n = per(w * u * u).clamp_min(1e-12)
+        X = x - u * per(w * u * x) / n
+        Y = y - u * per(w * u * y) / n
+        eps = float((w * X * Y).sum() / (w * X * X).sum().clamp_min(1e-12))
+        res = Y - X * eps
+        s = 1.4826 * float(res.abs().median())
+        w = (1.5 * s / res.abs().clamp_min(1e-12)).clamp_max(1.0)
+    se = s / math.sqrt(float((w * X * X).sum().clamp_min(1e-12)))
+    return eps, se, len(ids)
+
+
+def _frame_wavelengths(meta: Metadata) -> Optional[list[float]]:
+    # per-frame wavelength (A) from per-event photon energies, else the geometry's
+    infos = list(meta.files.values())
+    if not any(getattr(i, "photon_energy_eV", None) for i in infos):
+        return None
+    out: list[float] = []
+    for info in infos:
+        e = info.photon_energy_eV or []
+        start = int(info.event_start)
+        out += [
+            EV_ANGSTROM / e[k] if k < len(e) and e[k] > 0 else meta.geometry.wavelength
+            for k in range(start, start + int(info.n_frames))
+        ]
+    return out
 
 
 def _frame_level(frame: Tensor) -> float:
