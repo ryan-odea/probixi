@@ -78,7 +78,7 @@ def kernel(
     STEPS: tl.constexpr,
     REASSIGN: tl.constexpr,
     MIN_INDEXED: tl.constexpr,
-    TOL: tl.constexpr,
+    TOL,
     BLOCK: tl.constexpr,
 ):
     # One program per orientation candidate, running every Adam step in-register.

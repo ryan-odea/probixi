@@ -78,12 +78,12 @@ def background_score(
     INNER: tl.constexpr,
     OUTER: tl.constexpr,
     FLUX: tl.constexpr,
-    GAIN: tl.constexpr,
-    READ: tl.constexpr,
-    FLOOR: tl.constexpr,
-    LOGK: tl.constexpr,
-    BF_FACTOR: tl.constexpr,
-    PRIOR: tl.constexpr,
+    GAIN,
+    READ,
+    FLOOR,
+    LOGK,
+    BF_FACTOR,
+    PRIOR,
     B: tl.constexpr,
 ):
     i = tl.program_id(0) * B + tl.arange(0, B)
