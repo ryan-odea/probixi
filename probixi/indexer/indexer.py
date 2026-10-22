@@ -14,10 +14,15 @@ from .integrate import (
     A_INV_TO_NM_INV,
     disk_overlap_counts,
     falloff_resolution_limit,
+    frame_background_stats,
     integrate_rings,
     peak_resolution_limit,
+    radius_by_shell,
+    resolution_bands,
+    ring_sums,
     snap_positions,
     spot_enrichment,
+    unexplained_signal_p,
 )
 from .lattice import B_to_cell, cell_to_B
 from .predict import detector_q_max, predict_reflections
@@ -28,9 +33,7 @@ from .seed import sphere_seed_candidates
 MIN_PEAKS_TO_INDEX = 5
 # Element type of an IndexStream: one lattice, or one frame carrying several.
 _ResultT = TypeVar("_ResultT", "IndexResult", "FrameIndexResult")
-# Peeling: relative Frobenius distance below which two orientations (either
-# hand) are the same lattice, and the peaks that must remain on each side of a
-# peel for the explained lattice to be kept and the residue reseeded.
+# Peeling: same-lattice tolerance (relative Frobenius, any setting), min peaks per side
 DUPLICATE_LATTICE_TOL = 0.02
 MIN_PEAKS_PER_LATTICE = 6
 # Integration radii used when calibrate() never measured them
@@ -108,7 +111,11 @@ class IndexResult:
         (M, 3) Miller indices of all reflections predicted to diffract on this
         frame, or None if prediction/integration was not run.
     predicted_positions : Tensor, optional
-        (M, 2) predicted detector ``(row, col)`` positions.
+        (M, 2) predicted detector ``(row, col)`` positions, snapped onto an
+        observed centroid where one lies within ``snap_radius``.
+    predicted_raw_positions : Tensor, optional
+        (M, 2) the same positions before snapping; the difference is the
+        observed spot's offset from the lattice prediction.
     predicted_intensities : Tensor, optional
         (M,) integrated intensity per predicted reflection (snapped to the
         observed centroid where a peak coincides).
@@ -145,13 +152,22 @@ class IndexResult:
     peak_n_masked : Tensor, optional
         (N,) pixels of each detected peak's blob that border the mask or the
         frame edge; the stream's peak list skips a peak with any.
+    peak_posterior : Tensor, optional
+        (N,) mean detection posterior of each detected peak's blob.
+    predicted_peak_posterior : Tensor, optional
+        (M,) that posterior for the peak a predicted reflection snapped onto;
+        NaN where no peak lay within ``snap_radius``.
+    peak_aux : Tensor, optional
+        Per detected peak ``(brightest pixel, eccentricity)``, aligned with ``positions``.
+    predicted_peak_max : Tensor, optional
+        Brightest pixel of each snapped reflection's peak (NaN where unsnapped).
     adu_per_photon : float, optional
         Detector gain the frame was processed with, for turning the ADU columns
         into photon counts.
     diffraction_limit : float, optional
         Per-crystal resolution limit (nm^-1) written to the stream as
-        ``diffraction_resolution_limit``: the highest-resolution indexed peak
-        or the falloff crossing, whichever is more generous (partialator's
+        ``diffraction_resolution_limit``: the second-highest-resolution indexed
+        peak or the falloff crossing, whichever is more generous (partialator's
         ``--push-res`` then behaves as on an indexamajig stream); the falloff
         estimate alone is kept in ``falloff_limit``.
     enrichment : float, optional
@@ -161,8 +177,9 @@ class IndexResult:
         Predicted spots landing on above-threshold image signal.
     enrich_p : float, optional
         Chance probability of this many bright predicted spots under the
-        noise-null (``spot_enrichment``); the gate keeps frames with small
-        ``enrich_p``. Self-calibrating: no enrichment cut to choose.
+        noise-null (``spot_enrichment``) or of the unexplained signal
+        (``unexplained_signal_p``), whichever is larger; the gate keeps frames
+        with small ``enrich_p``. Self-calibrating: no enrichment cut to choose.
     scale : float, optional
         Per-frame relative intensity scale (background fluence vs the
         calibration reference), if inferred; an initialization for downstream
@@ -191,6 +208,7 @@ class IndexResult:
     loss_history: Tensor = field(repr=False)
     predicted_hkl: Optional[Tensor] = None
     predicted_positions: Optional[Tensor] = None
+    predicted_raw_positions: Optional[Tensor] = None
     predicted_intensities: Optional[Tensor] = None
     predicted_sigmas: Optional[Tensor] = None
     predicted_peak: Optional[Tensor] = None
@@ -204,6 +222,10 @@ class IndexResult:
     peak_background_sum: Optional[Tensor] = None
     peak_n_pixels: Optional[Tensor] = None
     peak_n_masked: Optional[Tensor] = None
+    peak_posterior: Optional[Tensor] = None
+    predicted_peak_posterior: Optional[Tensor] = None
+    peak_aux: Optional[Tensor] = None
+    predicted_peak_max: Optional[Tensor] = None
     adu_per_photon: Optional[float] = None
     diffraction_limit: Optional[float] = None
     falloff_limit: Optional[float] = None
@@ -221,6 +243,7 @@ class IndexResult:
         default=None, init=False, repr=False
     )
     _integration_valid: Optional[Tensor] = field(default=None, init=False, repr=False)
+    _integration_radius: Optional[Tensor] = field(default=None, init=False, repr=False)
 
 
 @dataclass
@@ -238,6 +261,10 @@ class FrameIndexResult:
     peak_background_sum, peak_n_pixels, peak_n_masked : Tensor, optional
         Per-peak background sum (ADU), pixel count and count of pixels
         bordering the mask, aligned with ``positions``.
+    peak_aux : Tensor, optional
+        Per detected peak ``(brightest pixel, eccentricity)``.
+    frame_stats : Tensor, optional
+        ``(bg_low, bg_mid, bg_ring, bg_high, bg_edge, ice_score)`` of the frame.
     adu_per_photon : float, optional
         Gain the frame was processed with.
     """
@@ -249,6 +276,9 @@ class FrameIndexResult:
     peak_background_sum: Optional[Tensor] = None
     peak_n_pixels: Optional[Tensor] = None
     peak_n_masked: Optional[Tensor] = None
+    peak_posterior: Optional[Tensor] = None
+    peak_aux: Optional[Tensor] = None
+    frame_stats: Optional[Tensor] = None
     adu_per_photon: Optional[float] = None
 
     @property
@@ -625,6 +655,15 @@ class FrameIndexStream(IndexStream["FrameIndexResult"]):
         )
 
 
+def _same_lattice(A: Tensor, B: Tensor) -> bool:
+    # same points in any setting: B ~ A @ T with T integral and unimodular
+    A, B = A.double(), B.double()
+    T = torch.linalg.solve(A, B).round()
+    if round(abs(float(torch.linalg.det(T)))) != 1:
+        return False
+    return float((A @ T - B).norm() / A.norm()) < DUPLICATE_LATTICE_TOL
+
+
 class Indexer:
     """Match detector peaks to a target unit cell to recover crystal orientations.
 
@@ -678,7 +717,18 @@ class Indexer:
         self._measured_radii: Optional[tuple[float, float, float]] = None
         self._resolved_aperture: Optional[str] = None
         self._q_max: Optional[float] = None
+        # per-frame wavelengths (A) by frame index; None: the geometry's
+        self.frame_wavelengths: Optional[list[float]] = None
+        # learned |q|-shell disk radii of unsnapped reflections, and their profile sums
+        self._radius_by_q: Optional[tuple[Tensor, list[float]]] = None
+        self._profile_acc: Optional[list] = None
         self.set_target_cell(target_cell)
+
+    def _geometry_at(self, frame_index: Optional[int]) -> dict:
+        wl = self.frame_wavelengths
+        if wl is None or frame_index is None or not 0 <= frame_index < len(wl):
+            return self.geometry
+        return {**self.geometry, "wavelength": wl[frame_index]}
 
     def set_target_cell(self, cell: CellParams) -> None:
         """Re-centre indexing on ``cell``."""
@@ -728,11 +778,12 @@ class Indexer:
         self,
         positions: Tensor,
         frame_rotation: Optional[Tensor] = None,
+        frame_index: Optional[int] = None,
     ) -> Tensor:
         # Lift detector pixel positions (N, 2) to reciprocal-space q-vectors (N, 3).
         return detector_to_q(
             positions.to(device=self.device, dtype=self.dtype),
-            self.geometry,
+            self._geometry_at(frame_index),
             frame_rotation=frame_rotation,
             dtype=self.dtype,
         )
@@ -747,6 +798,7 @@ class Indexer:
         peak_bg_by_frame: Optional[dict[int, Tensor]] = None,
         peak_npix_by_frame: Optional[dict[int, Tensor]] = None,
         peak_nmask_by_frame: Optional[dict[int, Tensor]] = None,
+        peak_aux_by_frame: Optional[dict[int, Tensor]] = None,
     ) -> dict[int, IndexResult]:
         """Index many frames with batched refinement.
 
@@ -786,11 +838,12 @@ class Indexer:
                 (peak_bg_by_frame or {}).get(i),
                 (peak_npix_by_frame or {}).get(i),
                 (peak_nmask_by_frame or {}).get(i),
+                (peak_aux_by_frame or {}).get(i),
             )
             for i, p in positions_by_frame.items()
         }
         seeded: list[tuple[int, int, Tensor, Tensor, Optional[Tensor]]] = []
-        for idx, (positions, intensities, _, weights, _, _, _) in data.items():
+        for idx, (positions, intensities, _, weights, *_) in data.items():
             if (
                 positions.ndim != 2
                 or positions.shape[-1] != 2
@@ -798,7 +851,7 @@ class Indexer:
             ):
                 continue
             rotation = (frame_rotations or {}).get(idx)
-            q = self.lift(positions, frame_rotation=rotation)
+            q = self.lift(positions, frame_rotation=rotation, frame_index=idx)
             with torch.no_grad():
                 # Seed on a bounded subset of the brightest peaks
                 keep = self._seed_keep_indices(q, intensities)
@@ -841,6 +894,8 @@ class Indexer:
                 peak_bg=data[idx][4],
                 peak_npix=data[idx][5],
                 peak_nmask=data[idx][6],
+                peak_posterior=data[idx][3],
+                peak_aux=data[idx][7],
             )
             if built is not None:
                 out[idx] = built
@@ -904,6 +959,8 @@ class Indexer:
         peak_bg: Optional[Tensor] = None,
         peak_npix: Optional[Tensor] = None,
         peak_nmask: Optional[Tensor] = None,
+        peak_posterior: Optional[Tensor] = None,
+        peak_aux: Optional[Tensor] = None,
     ) -> Optional[IndexResult]:
         # Pick the best refined candidate whose cell matches the target, or None.
         if result.A.shape[0] == 0:
@@ -919,7 +976,7 @@ class Indexer:
         n_indexed = result.n_indexed
         soft = result.soft_score
         if self.seed.rank_sigma is not None:
-            q = self.lift(positions) if q is None else q
+            q = self.lift(positions, frame_index=frame_index) if q is None else q
             predicted = torch.einsum("cij,cnj->cni", result.A, result.hkl.to(result.A))
             soft = torch.exp(
                 -((predicted - q).square().sum(-1)) / (2 * self.seed.rank_sigma**2)
@@ -936,9 +993,9 @@ class Indexer:
             hkl_c, indexed_c = result.hkl[cand], result.indexed[cand]
             n_c, rmsd_c = n_indexed_host[cand], float(rmsd[cand])
             if self.refine.cell:
-                q = self.lift(positions) if q is None else q
+                q = self.lift(positions, frame_index=frame_index) if q is None else q
                 A_cand, hkl_c, indexed_c, n_c, rmsd_c = self._refine_cell(
-                    A_cand, q, hkl_c, indexed_c, n_c, rmsd_c
+                    A_cand, q, hkl_c, indexed_c, n_c, rmsd_c, frame_index
                 )
             try:
                 cell = B_to_cell(A_cand)
@@ -966,6 +1023,8 @@ class Indexer:
                 peak_background_sum=peak_bg,
                 peak_n_pixels=peak_npix,
                 peak_n_masked=peak_nmask,
+                peak_posterior=peak_posterior,
+                peak_aux=peak_aux,
                 adu_per_photon=self._adu_per_photon(),
             )
         return None
@@ -978,6 +1037,7 @@ class Indexer:
         indexed: Tensor,
         n_indexed: int,
         rmsd: float,
+        frame_index: Optional[int] = None,
     ) -> tuple[Tensor, Tensor, Tensor, int, float]:
         out = refine_cell(
             A,
@@ -989,7 +1049,7 @@ class Indexer:
             iters=self.refine.cell_iters,
             edge_tolerance=self.cell_match.edge_tolerance,
             angle_tolerance_rad=self.cell_match.angle_tolerance_rad,
-            wavelength=float(self.geometry["wavelength"]),
+            wavelength=float(self._geometry_at(frame_index)["wavelength"]),
         )
         if out is None:
             return A, hkl, indexed, n_indexed, rmsd
@@ -1018,8 +1078,11 @@ class Indexer:
         n_mask = stats.n_masked
         if n_mask is not None:
             n_mask = n_mask.to(device=self.device, dtype=self.dtype)
+        aux = torch.stack([stats.intensity_max, stats.eccentricity], dim=-1).to(
+            device=self.device, dtype=self.dtype
+        )
         return self._cap_peak_data(
-            positions, intensities, sigmas, weights, bg_sum, n_pix, n_mask
+            positions, intensities, sigmas, weights, bg_sum, n_pix, n_mask, aux
         )
 
     def _cap_peak_data(
@@ -1031,6 +1094,7 @@ class Indexer:
         peak_bg: Optional[Tensor] = None,
         peak_npix: Optional[Tensor] = None,
         peak_nmask: Optional[Tensor] = None,
+        peak_aux: Optional[Tensor] = None,
     ) -> tuple[Optional[Tensor], ...]:
         # Keep only the max_index_peaks brightest peaks, across every array that
         # is aligned with positions, so downstream photometry stays in step
@@ -1042,6 +1106,7 @@ class Indexer:
             peak_bg,
             peak_npix,
             peak_nmask,
+            peak_aux,
         )
         cap = self.seed.max_index_peaks
         if cap is None or len(positions) <= cap:
@@ -1064,6 +1129,7 @@ class Indexer:
         peak_bg_by_frame: Optional[dict[int, Tensor]] = None,
         peak_npix_by_frame: Optional[dict[int, Tensor]] = None,
         peak_nmask_by_frame: Optional[dict[int, Tensor]] = None,
+        peak_aux_by_frame: Optional[dict[int, Tensor]] = None,
         maps_by_frame: Optional[dict[int, tuple]] = None,
         bright_threshold: float = 5.0,
         enrich_alpha: Optional[float] = None,
@@ -1104,6 +1170,7 @@ class Indexer:
                 (peak_bg_by_frame or {}).get(i),
                 (peak_npix_by_frame or {}).get(i),
                 (peak_nmask_by_frame or {}).get(i),
+                (peak_aux_by_frame or {}).get(i),
             )
             for i, p in positions_by_frame.items()
         }
@@ -1120,19 +1187,13 @@ class Indexer:
                 peak_bg_by_frame={i: v[4] for i, v in remaining.items()},
                 peak_npix_by_frame={i: v[5] for i, v in remaining.items()},
                 peak_nmask_by_frame={i: v[6] for i, v in remaining.items()},
+                peak_aux_by_frame={i: v[7] for i, v in remaining.items()},
             )
             next_remaining = {}
             for i, result in results.items():
                 previous = output.setdefault(i, [])
-                # reject a re-found lattice (A and -A index the same one)
-                if any(
-                    float(
-                        torch.minimum((result.A - r.A).norm(), (result.A + r.A).norm())
-                        / r.A.norm()
-                    )
-                    < DUPLICATE_LATTICE_TOL
-                    for r in previous
-                ):
+                # skip a re-found lattice, in any setting
+                if any(_same_lattice(r.A, result.A) for r in previous):
                     continue
                 maps = (maps_by_frame or {}).get(i)
                 gated = enrich_alpha is not None and maps is not None
@@ -1148,7 +1209,9 @@ class Indexer:
                     continue
                 # peel the peaks this lattice explains, reseed on the residue
                 q = self.lift(
-                    result.positions, frame_rotation=(frame_rotations or {}).get(i)
+                    result.positions,
+                    frame_rotation=(frame_rotations or {}).get(i),
+                    frame_index=i,
                 )
                 hkl = torch.round(q @ torch.linalg.inv(result.A).T)
                 assigned = (hkl @ result.A.T - q).norm(dim=-1) < (
@@ -1238,6 +1301,7 @@ class Indexer:
                 peak_bg_by_frame={b["idx"]: b["peak_bg"] for b in hits},
                 peak_npix_by_frame={b["idx"]: b["peak_npix"] for b in hits},
                 peak_nmask_by_frame={b["idx"]: b["peak_nmask"] for b in hits},
+                peak_aux_by_frame={b["idx"]: b["peak_aux"] for b in hits},
                 maps_by_frame={
                     b["idx"]: (b["excess"], b["var"], b["mask"], b["mean"])
                     for b in hits
@@ -1276,6 +1340,9 @@ class Indexer:
                     peak_background_sum=b["peak_bg"],
                     peak_n_pixels=b["peak_npix"],
                     peak_n_masked=b["peak_nmask"],
+                    peak_posterior=b["w"],
+                    peak_aux=b["peak_aux"],
+                    frame_stats=self._frame_stats(b),
                     adu_per_photon=self._adu_per_photon(),
                 )
 
@@ -1292,6 +1359,7 @@ class Indexer:
                     peak_bg,
                     peak_npix,
                     peak_nmask,
+                    peak_aux,
                 ) = self._positions_from_frame(r)
                 buf.append(
                     dict(
@@ -1303,6 +1371,7 @@ class Indexer:
                         peak_bg=peak_bg,
                         peak_npix=peak_npix,
                         peak_nmask=peak_nmask,
+                        peak_aux=peak_aux,
                         excess=r.scores.get("excess") if r.scores else None,
                         var=r.var,
                         mask=r.valid_mask,
@@ -1316,6 +1385,42 @@ class Indexer:
                 yield from _flush(buf)
 
         return FrameIndexStream(_gen(), stats=stats)
+
+    def _resolution_maps(self, shape: tuple[int, int], device) -> tuple[Tensor, Tensor]:
+        # band and ice-window maps, cached per frame shape
+        maps = self.__dict__.setdefault("_res_maps", {})
+        key = (tuple(shape), str(device))
+        if key not in maps:
+            rows, cols = shape
+            grid = torch.stack(
+                torch.meshgrid(
+                    torch.arange(rows, device=device, dtype=torch.float32),
+                    torch.arange(cols, device=device, dtype=torch.float32),
+                    indexing="ij",
+                ),
+                dim=-1,
+            ).reshape(-1, 2)
+            d = torch.empty(len(grid), device=device, dtype=torch.float32)
+            for start in range(0, len(grid), 1 << 20):
+                q = detector_to_q(grid[start : start + (1 << 20)], self.geometry)
+                d[start : start + (1 << 20)] = 1.0 / q.norm(dim=-1).clamp_min(1e-6)
+            maps[key] = resolution_bands(d.view(rows, cols))
+        return maps[key]
+
+    def _frame_stats(self, b: dict) -> Optional[Tensor]:
+        # frame background per band and ice score
+        mean = b.get("mean")
+        if mean is None or mean.ndim not in (2, 3):
+            return None
+
+        def img(t):
+            return None if t is None else (t[0] if t.ndim == 3 else t)
+
+        mean = img(mean)
+        band, ice = self._resolution_maps(tuple(mean.shape), mean.device)
+        return frame_background_stats(
+            mean, img(b.get("excess")), img(b.get("var")), img(b.get("mask")), band, ice
+        )
 
     def _flag_overlaps(self, crystals: list[IndexResult]) -> None:
         # disk pixels shared with any predicted disk on the panel, across all lattices
@@ -1344,7 +1449,19 @@ class Indexer:
             )
             ids = torch.arange(1, len(panels) + 1, device=positions.device)
             panel = torch.where(inside, ids, 0).amax(1)
-        shared = disk_overlap_counts(positions, self._radii()[0], panel)
+        radius = torch.cat(
+            [
+                (
+                    r._integration_radius
+                    if r._integration_radius is not None
+                    else positions.new_full(
+                        (len(r._integration_positions),), self._radii()[0]
+                    )
+                )
+                for r in active
+            ]
+        )
+        shared = disk_overlap_counts(positions, radius, panel)
         offset = 0
         for r in active:
             count = len(r._integration_positions)
@@ -1353,6 +1470,55 @@ class Indexer:
             ]
             offset += count
             r._integration_positions = r._integration_valid = None
+            r._integration_radius = None
+
+    def _reflection_radii(self, q: Tensor, snapped: Tensor) -> tuple:
+        # base disk on found peaks, the learned shell radius elsewhere
+        base = self._radii()
+        if self._radius_by_q is None:
+            return base
+        edges, shell = self._radius_by_q
+        k = torch.bucketize(q, edges.to(q)).clamp(1, len(shell)) - 1
+        r = torch.tensor(shell, dtype=q.dtype, device=q.device)[k]
+        r = torch.where(snapped.to(q.device), base[0], r)
+        r_in = torch.clamp(r + 1.0, min=base[1])
+        return r, r_in, (r_in * r_in + base[2] ** 2 - base[1] ** 2).sqrt()
+
+    def _stack_profiles(self, excess, var, valid, positions, pred, snapped) -> None:
+        # stack excess around unsnapped predictions per |q| shell, clipped at 10 sigma
+        free = ~snapped
+        if not bool(free.any()):
+            return
+        if not self._profile_acc:  # equal-volume |q| shells to the detector edge
+            edges = torch.linspace(0.0, 1.0, 13, dtype=torch.float64) ** (1 / 3)
+            edges = (edges * self._q_max).to(self.device)
+            edges[-1] = float("inf")
+            zeros = torch.zeros(12, 9, dtype=torch.float64, device=self.device)
+            self._profile_acc = [edges, zeros, zeros.clone(), zeros.clone()]
+        acc = self._profile_acc
+        clipped = torch.minimum(excess, 10.0 * var.clamp_min(1e-12).sqrt())
+        total, counts, sq = ring_sums(
+            clipped, positions[free], pixel_valid=valid, max_radius=8, squares=True
+        )
+        shell = torch.bucketize(pred.resolution[free].to(acc[0]), acc[0])
+        k = shell.clamp(1, len(acc[0]) - 1) - 1
+        for buf, v in zip(acc[1:], (total, counts, sq)):
+            buf.index_add_(0, k.to(buf.device), v.to(buf))
+
+    def start_profile_stacking(self) -> None:
+        # stack unsnapped profiles from here on
+        self._profile_acc = []
+
+    def finish_profile_stacking(self) -> Optional[list[float]]:
+        # per-shell radius of unsnapped reflections from the stacked profiles
+        acc, self._profile_acc = self._profile_acc, None
+        if not acc or float(acc[2][:, 0].sum()) <= 0:
+            return None
+        radii = radius_by_shell(
+            acc[1].cpu(), acc[2].cpu(), acc[3].cpu(), self._radii()[0]
+        )
+        self._radius_by_q = (acc[0].float(), radii)
+        return radii
 
     def _aperture(self) -> str:
         return self._resolved_aperture or self.integrate.aperture
@@ -1386,7 +1552,8 @@ class Indexer:
         if self._q_max is None:
             self._q_max = detector_q_max(self.geometry, frame_shape)
 
-        wavelength = float(self.geometry["wavelength"])
+        geometry = self._geometry_at(result.frame_index)
+        wavelength = float(geometry["wavelength"])
         eta = math.radians(self.integrate.mosaicity_deg)
         r_size = self.integrate.domain_size_recip
         indexed = torch.where(result.indexed_mask)[0]
@@ -1406,8 +1573,8 @@ class Indexer:
         result.mosaicity = eta
         pred = predict_reflections(
             result.A.to(excess.dtype),
-            self.geometry,
-            q_max=self._q_max,
+            geometry,
+            q_max=self._q_max * float(self.geometry["wavelength"]) / wavelength,
             eta=eta,
             r_size=r_size,
             bandwidth=self.integrate.bandwidth,
@@ -1416,7 +1583,7 @@ class Indexer:
             centering=self.target_cell.centering,
             frame_shape=frame_shape,
         )
-        diagnostic_positions, _ = snap_positions(
+        diagnostic_positions, snapped, matched = snap_positions(
             pred.positions.to(excess.dtype),
             result.positions.to(excess.dtype),
             self.integrate.snap_radius,
@@ -1429,6 +1596,7 @@ class Indexer:
         if len(pred) == 0:
             result.predicted_hkl = pred.hkl
             result.predicted_positions = pred.positions
+            result.predicted_raw_positions = pred.positions
             for name in (
                 "intensities",
                 "sigmas",
@@ -1443,6 +1611,7 @@ class Indexer:
             ):
                 setattr(result, "predicted_" + name, excess.new_empty(0))
             return
+        radii = self._reflection_radii(pred.resolution.to(excess.dtype), snapped)
         (
             positions,
             intensity,
@@ -1465,11 +1634,11 @@ class Indexer:
             pixel_valid=valid_mask,
             adu_per_photon=self._adu_per_photon(),
             n_bg=self._bg_annulus_pixels,
-            radii=self._radii(),
+            radii=radii,
         )
         peak_res_nm = None
         if result.positions.numel() > 0:
-            peak_q = detector_to_q(result.positions.to(excess.dtype), self.geometry)
+            peak_q = detector_to_q(result.positions.to(excess.dtype), geometry)
             peak_res_nm = peak_q.norm(dim=-1) * A_INV_TO_NM_INV
 
         sig_ok = torch.isfinite(sigma) & (sigma > 0)
@@ -1491,9 +1660,9 @@ class Indexer:
             and result.indexed_mask.shape == peak_res_nm.shape
             and len(indexed)
         ):
-            drl = peak_resolution_limit(
-                peak_res_nm[indexed.to(peak_res_nm.device)], 1.0
-            )
+            # second-highest peak: one chance-indexed hot pixel cannot set the limit
+            top = torch.sort(peak_res_nm[indexed.to(peak_res_nm.device)]).values
+            drl = float(top[-min(2, len(top))])
         if drl is not None and falloff is not None:
             drl = max(drl, falloff)
         elif drl is None:
@@ -1512,6 +1681,18 @@ class Indexer:
             else:
                 drl = float("inf")
         result.diffraction_limit = drl
+        # a real lattice also carries signal where no found peak explains it
+        inner = sig_ok & ~snapped
+        inner &= pred.resolution.to(excess.dtype) * A_INV_TO_NM_INV <= drl
+        result.enrich_p = max(
+            result.enrich_p, unexplained_signal_p(intensity, sigma, inner)
+        )
+        if enrich_alpha is not None and result.enrich_p > enrich_alpha:
+            return
+        if self._profile_acc is not None:
+            self._stack_profiles(
+                excess, var, valid_mask, diagnostic_positions, pred, snapped
+            )
         # profile_radius: the same rocking model at a representative |q| (the
         # resolution limit, else the median indexed peak), for the stream/xsphere.
         if drl is not None and math.isfinite(drl) and drl > 0.0:
@@ -1530,6 +1711,21 @@ class Indexer:
         keep = torch.where(stored)[0]
         result.predicted_hkl = pred.hkl[keep]
         result.predicted_positions = positions[keep]
+        result.predicted_raw_positions = pred.positions.to(positions)[keep]
+        if result.peak_posterior is not None and len(result.peak_posterior):
+            post = result.peak_posterior.to(positions)[
+                matched.clamp(max=len(result.peak_posterior) - 1)
+            ]
+            result.predicted_peak_posterior = torch.where(
+                snapped, post, torch.full_like(post, float("nan"))
+            )[keep]
+        if result.peak_aux is not None and len(result.peak_aux):
+            pmax = result.peak_aux[:, 0].to(positions)[
+                matched.clamp(max=len(result.peak_aux) - 1)
+            ]
+            result.predicted_peak_max = torch.where(
+                snapped, pmax, torch.full_like(pmax, float("nan"))
+            )[keep]
         result.predicted_intensities = intensity[keep]
         result.predicted_sigmas = sigma[keep]
         result.predicted_peak = peak[keep]
@@ -1540,4 +1736,7 @@ class Indexer:
         result.predicted_n_pixels_total = n_total[keep]
         result.predicted_n_masked = n_masked[keep]
         result._integration_positions = positions
+        result._integration_radius = torch.as_tensor(
+            radii[0], dtype=positions.dtype, device=positions.device
+        ).expand(len(positions))
         result._integration_valid = stored

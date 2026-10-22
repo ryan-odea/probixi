@@ -12,41 +12,45 @@ MIN_ANNULUS_PIXELS = 10
 
 def snap_positions(
     positions: Tensor, observed: Tensor, radius: float
-) -> tuple[Tensor, Tensor]:
-    # Move each prediction onto the nearest observed centroid within radius px
+) -> tuple[Tensor, Tensor, Tensor]:
+    # snap predictions to the nearest centroid within radius px; also that peak's index
     snapped = torch.zeros(len(positions), dtype=torch.bool, device=positions.device)
+    index = torch.zeros(len(positions), dtype=torch.long, device=positions.device)
     if len(positions) and len(observed):
         distance, index = torch.cdist(positions, observed.to(positions)).min(1)
         snapped = distance < radius
         positions = torch.where(
             snapped[:, None], observed.to(positions)[index], positions
         )
-    return positions, snapped
+    return positions, snapped, index
 
 
 @torch.no_grad()
 def disk_overlap_counts(
     positions: Tensor,
-    radius_px: float,
+    radius_px: float | Tensor,
     panels: Tensor | None = None,
 ) -> Tensor:
-    # per centre: disk pixels shared with another centre's disk on the same panel
+    # per centre: disk pixels shared with another disk on its panel; radius per centre
     if positions.ndim != 2 or positions.shape[1] != 2:
         raise ValueError("positions must have shape (N, 2)")
-    if not math.isfinite(radius_px) or radius_px <= 0:
-        raise ValueError("integration radius must be finite and positive")
     device = positions.device
+    radius = torch.as_tensor(radius_px, dtype=torch.float32, device=device)
+    radius = radius.expand(len(positions)) if radius.ndim == 0 else radius
+    if len(radius) and (not bool(torch.isfinite(radius).all()) or radius.min() <= 0):
+        raise ValueError("integration radius must be finite and positive")
     centre = positions.round().long()
-    dr, dc, r2 = _stamp_offsets(math.ceil(radius_px), device)
-    disk = r2 <= radius_px**2
-    pr = centre[:, 0, None] + dr[disk]
-    pc = centre[:, 1, None] + dc[disk]
+    r_max = float(radius.max()) if len(radius) else 1.0
+    dr, dc, r2 = _stamp_offsets(math.ceil(r_max), device)
+    disk = r2[None] <= radius[:, None] ** 2
+    pr = centre[:, 0, None] + dr
+    pc = centre[:, 1, None] + dc
     covered = torch.zeros(pr.shape, dtype=torch.long, device=device)
-    reach = (2 * radius_px) ** 2
     far = 1 << 40
     for start in range(0, len(centre), 512):
         block = centre[start : start + 512]
         d2 = (block[:, None] - centre[None]).square().sum(-1)
+        reach = (radius[start : start + 512, None] + radius[None]) ** 2
         row = torch.arange(len(block), device=device)
         d2[row, start + row] = far  # ignore self-distance
         if panels is not None:
@@ -56,9 +60,9 @@ def disk_overlap_counts(
             i = i + start
             inside = (pr[i] - centre[j, 0, None]) ** 2 + (
                 pc[i] - centre[j, 1, None]
-            ) ** 2 <= radius_px**2
-            covered.index_add_(0, i, inside.long())
-    return (covered > 0).sum(1)
+            ) ** 2 <= radius[j, None] ** 2
+            covered.index_add_(0, i, (inside & disk[i]).long())
+    return ((covered > 0) & disk).sum(1)
 
 
 @torch.no_grad()
@@ -148,6 +152,32 @@ def snr_disk_radius(profile: Tensor, r_max: float) -> float:
     k_max = max(1, min(len(p) - 1, int(math.floor(r_max - 0.5))))
     k = int(torch.argmax(snr[1 : k_max + 1])) + 1
     return k + 0.5
+
+
+def radius_by_shell(
+    sums: Tensor,
+    counts: Tensor,
+    squares: Tensor,
+    base: float,
+    k_max: int = 4,
+    z_min: float = 5.0,
+) -> list[float]:
+    # smallest radius within 2 % of the best stacked S/N (z_min), never shrinking
+    n_ring = _ring_pixel_counts(sums.shape[1] - 1, sums.device)
+    out, r = [], float(base)
+    for s, c, sq in zip(sums.double(), counts.double(), squares.double()):
+        p = s / c.clamp_min(1.0)
+        se2 = (sq / c.clamp_min(1.0) - p * p).clamp_min(0.0) / c.clamp_min(1.0)
+        p = p - p[k_max + 2 :].mean()
+        S = torch.cumsum(p * n_ring, 0)[1 : k_max + 1]
+        V = torch.cumsum(se2 * n_ring * n_ring, 0)[1 : k_max + 1]
+        snr = S / torch.cumsum(n_ring, 0)[1 : k_max + 1].sqrt()
+        if float(snr.max()) > 0:  # no positive stacked signal: keep r
+            k = int(torch.nonzero(snr >= 0.98 * snr.max())[0])
+            if float(S[k]) > z_min * math.sqrt(float(V[k])):
+                r = max(r, k + 1.5)
+        out.append(r)
+    return out
 
 
 def radii_from_profile(
@@ -358,13 +388,18 @@ def integrate_rings(
 ) -> tuple[Tensor, ...]:
     if mean is None:
         raise ValueError("circular integration requires the background mean image")
-    positions, snapped = snap_positions(pred_positions, obs_positions, snap_radius)
+    positions, snapped, _ = snap_positions(pred_positions, obs_positions, snap_radius)
     if not len(positions):
         empty = excess.new_empty(0)
         return (positions, empty, empty, snapped) + (empty,) * 7
     raw = excess + mean
+    # each radius is a scalar or one value per centre
+    r_disk, r_in, r_out = (
+        torch.as_tensor(r, dtype=raw.dtype, device=raw.device).reshape(-1, 1)
+        for r in radii
+    )
     # gather one (2*ceil(outer)+1)^2 stamp per centre
-    dr, dc, radius = _stamp_offsets(math.ceil(radii[2]), raw.device)
+    dr, dc, radius = _stamp_offsets(math.ceil(float(r_out.max())), raw.device)
     center = positions.round().long()
     rr = center[:, 0, None] + dr
     cc = center[:, 1, None] + dc
@@ -374,12 +409,12 @@ def integrate_rings(
         ok &= pixel_valid.flatten()[flat]
     pixels = raw.flatten()[flat]
     # background level and spread from the annulus
-    bgmask = ok & (radius >= radii[1] ** 2) & (radius <= radii[2] ** 2)
+    bgmask = ok & (radius >= r_in**2) & (radius <= r_out**2)
     nb = bgmask.sum(1)
     background = torch.where(bgmask, pixels, 0).sum(1) / nb.clamp_min(1)
     net = pixels - background[:, None]
     bgvariance = torch.where(bgmask, net**2, 0).sum(1) / (nb - 1).clamp_min(1)
-    disk = radius <= radii[0] ** 2
+    disk = (radius <= r_disk**2).expand_as(ok)
     use = ok & disk
     # Sparse nearest-owner reduction prevents double counting overlapping disks.
     unique, inverse = torch.unique(flat.flatten(), return_inverse=True)
@@ -429,7 +464,7 @@ def integrate_rings(
     else:
         bg_model_var = torch.zeros_like(model_var_sum)
     # nominal disk size and the pixels it lost to the mask or the frame edge
-    n_total = torch.full_like(n, int(disk.sum()))
+    n_total = disk.sum(1)
     n_masked = (disk & ~ok).sum(1)
     return (
         positions,
@@ -494,13 +529,22 @@ def falloff_resolution_limit(
         bm.append(sum(iss[lo:hi]) / (hi - lo))  # shell mean I/sigma
     if not bq:
         return None
-    if bm[0] < target:  # even the innermost shell is at/below noise
-        return bq[0]
+    if bm[0] < target:  # no crossing: the peaks decide
+        return None
     for i in range(1, len(bm)):
         if bm[i] < target:  # interpolate the crossing between shell i-1 and i
             f = (bm[i - 1] - target) / (bm[i - 1] - bm[i])
             return bq[i - 1] + f * (bq[i] - bq[i - 1])
     return qs[-1]  # data-limited: never crosses target
+
+
+def unexplained_signal_p(intensity: Tensor, sigma: Tensor, use: Tensor) -> float:
+    # one-sided p of sum(I/sigma)/sqrt(n) over `use`: ~N(0, 1) for a chance lattice
+    n = int(use.sum())
+    if n == 0:
+        return 0.0
+    z = float((intensity[use] / sigma[use]).sum()) / math.sqrt(n)
+    return 0.5 * math.erfc(z / math.sqrt(2.0))
 
 
 @torch.no_grad()
@@ -557,3 +601,57 @@ def spot_enrichment(
             torch.special.gammainc(k, torch.tensor(lam, dtype=torch.float32))
         )
     return n_bright, enrichment, p_value
+
+
+# background bands (A): low > 6, mid 6-4.2, ring 4.2-3.0, high 3.0-2.3, edge < 2.3
+BAND_EDGES_A = (6.0, 4.2, 3.0, 2.3)
+ICE_RINGS_A = (3.90, 3.67, 3.44)
+ICE_HALF_WIDTH_A = 0.04
+ICE_FLANK_A = 0.12
+
+
+def resolution_bands(d_spacing: Tensor) -> tuple[Tensor, Tensor]:
+    # per-pixel d (A) -> band 0..4 and ice code (1 ring window, 2 flank, 0 elsewhere)
+    band = torch.zeros(d_spacing.shape, dtype=torch.long, device=d_spacing.device)
+    for edge in BAND_EDGES_A:
+        band += (d_spacing < edge).long()
+    ice = torch.zeros_like(band)
+    for ring in ICE_RINGS_A:
+        off = (d_spacing - ring).abs()
+        ice = torch.where((off <= ICE_FLANK_A) & (ice == 0), 2, ice)
+        ice = torch.where(off <= ICE_HALF_WIDTH_A, 1, ice)
+    return band, ice
+
+
+@torch.no_grad()
+def frame_background_stats(
+    mean: Tensor,
+    excess: Tensor | None,
+    var: Tensor | None,
+    mask: Tensor | None,
+    band: Tensor,
+    ice: Tensor,
+) -> Tensor:
+    # model background per band and ice-window excess over its flanks (sigma)
+    mean = mean.reshape(band.shape)
+    ok = (
+        torch.ones_like(band, dtype=torch.bool)
+        if mask is None
+        else mask.reshape(band.shape).bool()
+    )
+    b = band[ok]
+    n = torch.bincount(b, minlength=5).to(mean.dtype)
+    bg = torch.bincount(b, weights=mean[ok], minlength=5) / n.clamp_min(1)
+    bg = torch.where(n > 0, bg, torch.full_like(bg, float("nan")))
+    score = torch.full((1,), float("nan"), dtype=mean.dtype, device=mean.device)
+    inner, flank = ok & (ice == 1), ok & (ice == 2)
+    if (
+        excess is not None
+        and var is not None
+        and int(inner.sum()) >= MIN_ANNULUS_PIXELS
+        and int(flank.sum()) >= MIN_ANNULUS_PIXELS
+    ):
+        excess, var = excess.reshape(band.shape), var.reshape(band.shape)
+        sigma = var[inner].sqrt().median().clamp_min(1e-12)
+        score[0] = (excess[inner].median() - excess[flank].median()) / sigma
+    return torch.cat([bg, score])
