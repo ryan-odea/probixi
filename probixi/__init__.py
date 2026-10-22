@@ -18,10 +18,10 @@ _LAZY = {
     "Ambigator": ".ambigator",
     "AmbigatorResult": ".ambigator",
     # multi-GPU
-    "run_data_parallel": ".multigpu",
-    "run_block_from_env": ".multigpu",
-    "merge_streams": ".multigpu",
-    "BlockConfig": ".multigpu",
+    "run_data_parallel": ".tools.multigpu",
+    "run_block_from_env": ".tools.multigpu",
+    "merge_streams": ".tools.multigpu",
+    "BlockConfig": ".tools.multigpu",
     # output writers
     "DataOffloader": ".io",
     "PeakOffloader": ".io",
