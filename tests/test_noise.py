@@ -53,8 +53,7 @@ def test_robust_update_not_inflated_by_bright_peaks():
         shape, n, background=background, noise_sigma=noise_sigma, seed=2
     )
     poisoned = clean.copy()
-    # inject a cluster of very bright counts at a fixed pixel, only after the
-    # background has warmed up so robust clipping has a sigma to clip against
+    # bright 3x3 hits start after warm-up, when the robust clip has a sigma to clip at
     rr, cc = 48, 48
     for i in range(10, n, 5):
         poisoned[i, rr - 1 : rr + 2, cc - 1 : cc + 2] = 50000.0
@@ -69,8 +68,7 @@ def test_robust_update_not_inflated_by_bright_peaks():
     # the naive estimate blows up at the poisoned pixel: mean and var explode
     assert float(npred["mean"][rr, cc]) > background + 100.0 * noise_sigma
     assert float(npred["var"][rr, cc]) > 1e4 * noise_sigma**2
-    # robust clipping keeps the mean near truth and the var orders of magnitude
-    # below the naive value (a single early hit can still leak a little spread)
+    # the clip keeps var orders of magnitude below naive; one early hit leaks a little
     assert float(rp["mean"][rr, cc]) < background + 5.0 * noise_sigma
     assert float(rp["var"][rr, cc]) < 1e-3 * float(npred["var"][rr, cc])
     # an unpoisoned control pixel matches the clean background statistics
@@ -218,14 +216,8 @@ def test_background_fluctuation_ratio_flags_shot_to_shot_level_changes():
     assert ratio(rng.uniform(0.7, 1.3, 32)) > 1.5
 
 
-# --- radial annuli must follow the panel geometry, not the array index -------
-
-
 def _folded_geom(tmp_path):
-    # Two 4x4 panels stacked in ss in the array but placed mirrored about the
-    # beam in the lab frame, so array row distance and lab radius disagree:
-    # array pixel (ss, fs) on panel 0 has the same lab radius as (ss + 4, fs)
-    # on panel 1.
+    # 4x4 panels stacked in ss, mirrored in the lab: (ss, fs) and (ss + 4, fs) share |r|
     lines = [
         "clen = 0.1",
         "photon_energy = 12398.0",
@@ -270,8 +262,7 @@ def test_lab_radius_map_follows_panel_placement_not_array_index(tmp_path):
                 float(R[ss + 4, fs]), abs=1e-4
             ), f"({ss}, {fs}) and ({ss + 4}, {fs}) are mirror pixels"
 
-    # the array radius the old code binned on does NOT have that symmetry, so
-    # the assertion above is a real discriminator
+    # the array radius lacks that symmetry, so the check above discriminates
     rr = torch.arange(8, dtype=torch.float32).view(-1, 1)
     cc = torch.arange(4, dtype=torch.float32).view(1, -1)
     array_r = torch.sqrt((rr - 3.5) ** 2 + (cc - 1.5) ** 2)

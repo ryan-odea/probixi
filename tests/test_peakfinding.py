@@ -76,8 +76,7 @@ def test_recovered_intensity_approximates_injected_intensity():
     )
     peaks = finder.peak_stream([torch.from_numpy(frame)]).collect_peaks()
     assert len(peaks) == 1
-    # box sum over the thresholded core under-counts the gaussian tails; bright
-    # spot recovers most of the injected counts and never over-counts.
+    # the thresholded core misses the Gaussian tails, hence rel=0.15
     assert peaks[0].intensity == pytest.approx(intensity, rel=0.15)
 
 
@@ -236,7 +235,7 @@ def test_gaussian_kernel_2d_is_normalized_odd_and_symmetric():
     assert torch.allclose(k, k.flip(0))
     assert torch.allclose(k, k.flip(1))
     assert torch.allclose(k, k.t())
-    # peak is at the center pixel
+    # peak at the centre pixel
     assert int(k.argmax()) == (7 * 7) // 2
 
 
@@ -256,8 +255,7 @@ def test_gaussian_kernel_1d_is_outer_product_factor():
 
 
 def test_separable_convs_match_dense_conv2d():
-    # The separable (2x 1D) matched filter / smoothing must reproduce the dense
-    # 2D convolution they replaced, including reflect-padded corners.
+    # separable 1-D passes equal the dense 2-D convolution, reflect-padded corners too
     import torch.nn.functional as F
 
     from probixi.peakfinding.peaks.neighborhood import (
@@ -313,9 +311,7 @@ def test_separable_convs_match_dense_conv2d():
 
 
 def test_integral_box_sum_matches_conv_reference():
-    # The summed-area-table box sum must reproduce the zero-padded sliding-window
-    # sum it replaced, including clamped edge boxes, for both single and batched
-    # inputs and across a DC offset (which stresses float32 cumsum precision).
+    # summed-area box sums equal zero-padded sums; the offset tests float32 cumsum
     import torch.nn.functional as F
 
     from probixi.peakfinding.peaks.neighborhood import _box_sum
@@ -367,8 +363,7 @@ def test_blob_stats_centroid_recovers_isolated_spot_position():
 
 
 def test_compute_blob_stats_every_field_matches_per_blob_reference():
-    # Guards the fused (batched-scatter) reductions: each field is checked against a
-    # straightforward per-blob loop, so a mixed-up column would be caught.
+    # each fused scatter reduction against a per-blob loop, so a swapped column fails
     torch.manual_seed(0)
     H = W = 12
     labels = torch.zeros(H, W, dtype=torch.long)
@@ -422,15 +417,12 @@ def test_compute_blob_stats_every_field_matches_per_blob_reference():
         assert int(stats.bbox_c1[i]) == int(idx[:, 1].max()) + 1
 
 
-# --- the beamstop learner is anchored on the geometry's own mask -------------
-
 _BS_BINS = 40
 _BS_QMAX = 0.552
 
 
 def _b2ar_run0061_histogram():
-    # measured on b2ar run0061: bins 0-1 masked out by the geometry, bin 2 a
-    # sliver of surviving pixels, real low-angle reflections in bins 3-8.
+    # b2AR run0061: the geometry masks bins 0-1, bin 2 is a sliver, bins 3-8 hold spots
     ph = [0, 0, 6, 14, 15, 29, 27, 48, 30, 19, 12, 19, 11, 9] + [8] * 26
     pix = [
         0,
@@ -460,18 +452,13 @@ def _bs_edges():
 
 
 def test_beamstop_not_inferred_from_real_low_angle_reflections():
-    # Six real reflections in a bin that is 81% masked divided by almost
-    # nothing, which the old rule read as an artifact ring and answered with a
-    # 9.1 A exclusion -- discarding every peak inside 1/d = 1.1 nm^-1.
+    # Six real reflections in an 81%-masked bin give a high density but no beamstop ring
     ph, pix = _b2ar_run0061_histogram()
     assert _beamstop_qmin_from_histogram(ph, pix, _bs_edges(), _BS_BINS) is None
 
 
 def test_beamstop_decision_does_not_move_with_seed_count():
-    # Scaling every bin together must not change the decision. The old rule
-    # zeroed bins under a peak-count floor before taking its reference median,
-    # so more seed frames admitted sparse outer bins, pulled the median down
-    # and made a spurious spike MORE likely.
+    # more seed frames scale every bin's peak count together
     ph, pix = _b2ar_run0061_histogram()
     edges = _bs_edges()
     base = _beamstop_qmin_from_histogram(ph, pix, edges, _BS_BINS)
@@ -482,8 +469,7 @@ def test_beamstop_decision_does_not_move_with_seed_count():
 
 
 def test_beamstop_still_found_when_the_ring_is_real():
-    # A real beamstop edge: a large pile-up immediately outside the masked
-    # shadow, in a bin with enough pixels to trust.
+    # a real beamstop edge: a big pile-up just outside the shadow, in a well-filled bin
     ph, pix = _b2ar_run0061_histogram()
     ph, pix = ph.clone(), pix.clone()
     ph[2], pix[2] = 4000.0, 15000.0
@@ -494,8 +480,7 @@ def test_beamstop_still_found_when_the_ring_is_real():
 
 
 def test_beamstop_exclusion_is_bounded():
-    # Even with every inner bin elevated, the exclusion may not run away: the
-    # old growth walk went from bin 2 out to bin 8 and swallowed 163 real peaks.
+    # with every inner bin elevated, growth stops after _BEAMSTOP_MAX_EXTEND_BINS bins
     ph, pix = _b2ar_run0061_histogram()
     ph, pix = ph.clone(), pix.clone()
     pix[2] = 15000.0
@@ -507,9 +492,7 @@ def test_beamstop_exclusion_is_bounded():
 
 
 def test_footprint_cap_keeps_a_bright_broad_spot_under_size_max_30():
-    # size_max=30 alone rejects a bright, broad Bragg peak; the brightness-scaled
-    # footprint cap must keep it while an explicit size_max=30 without the cap
-    # still rejects it
+    # size_max=30 alone rejects a bright broad spot; the brightness-scaled cap keeps it
     _, finder = _calibrated(
         matched_filter=True,
         local_background=False,

@@ -9,16 +9,7 @@ from torch import Tensor
 from ..kernels import tensor_key
 from .refine import _axis_angle_to_rotation
 
-# TORO-style seeding over orientation with the cell fixed
-# TORO: https://doi.org/10.1107/S1600576724003182
-#
-# A rotation has 3 DOF:
-# the rotated real a-axis is a known-length vector (2 DOF direction) plus a roll
-# about it (1 DOF)
-# 1. Sample a-axis directions on a Fibonacci hemisphere,
-# 2. score each by the integer-projection fitness sum_i cos(2*pi t.q_i)
-# (maximal when t = La*dir is a true lattice vector)
-# 3. spin the best directions and score each full orientation by induced-hkl inliers.
+# TORO seeding (doi:10.1107/S1600576724003182); see docs/overview/indexing.md
 
 
 @lru_cache(maxsize=None)
@@ -43,7 +34,7 @@ def _target_axis(
     A_direct = torch.linalg.inv(B_target.to(device=device, dtype=dtype)).transpose(
         -1, -2
     )
-    a_real = A_direct[:, 0]
+    a_real = A_direct[:, 0]  # real basis is B^-T; column 0 is the a axis
     La = torch.linalg.vector_norm(a_real).clamp_min(1e-12)
     dirs = _fibonacci_hemisphere(n_directions, device, dtype)
     dirs = torch.cat((dirs, -dirs))
@@ -54,8 +45,7 @@ def _target_axis(
 
 
 def _rotations_mapping(a: Tensor, b: Tensor) -> Tensor:
-    # Batched shortest-arc rotations carrying unit vector a (3,) onto each unit
-    # vector in b (M, 3)- R @ a = b
+    # Rodrigues shortest-arc rotations, R[m] @ a = b[m]; a (3,), b (M, 3) unit
     M = b.shape[0]
     device, dtype = b.device, b.dtype
     a_exp = a.view(1, 3).expand(M, 3)
@@ -73,7 +63,7 @@ def _rotations_mapping(a: Tensor, b: Tensor) -> Tensor:
     eye = torch.eye(3, device=device, dtype=dtype).expand(M, 3, 3)
     coeff = (1.0 / (1.0 + c).clamp_min(1e-12)).view(M, 1, 1)
     R = eye + K + (K @ K) * coeff
-    # antiparallel jic: rotate pi about any axis perpendicular to a
+    # 1 / (1 + c) diverges at c = -1; use a pi turn about any axis perpendicular to a
     anti = c < -1.0 + 1e-6
     if bool(anti.any()):
         perp = torch.linalg.cross(
@@ -99,8 +89,7 @@ def _rotations_mapping(a: Tensor, b: Tensor) -> Tensor:
 def _induced_inlier_counts(
     A: Tensor, q: Tensor, q_tolerance: float, weights: Tensor | None = None
 ) -> Tensor:
-    # Per candidate basis A (C, 3, 3): score observed q whose induced hkl
-    # round(A^-1 q) predicts q back within q_tolerance
+    # A (C, 3, 3), q (N, 3): weight of peaks with |A round(A^-1 q) - q| < q_tolerance
     A_inv = torch.linalg.inv(A)
     hkl = torch.round(torch.einsum("cij,nj->cni", A_inv, q))
     q_pred = torch.einsum("cij,cnj->cni", A, hkl)
@@ -122,10 +111,7 @@ def sphere_seed_candidates(
     top_k: int = 64,
     weights: Tensor | None = None,
 ) -> Tensor:
-    # Seed candidate A = U @ B_target by a Fibonacci-sphere search over the rotated
-    # a-axis direction plus a roll about it.
-    #
-    # weights (N,) are per-peak detection confidences
+    # Returns (<= top_k, 3, 3) candidates U @ B_target; weights are peak posteriors c_i
     if q_obs.ndim != 2 or q_obs.shape[-1] != 3:
         raise ValueError("q_obs must be (N, 3)")
     if B_target.shape != (3, 3):
@@ -142,21 +128,19 @@ def sphere_seed_candidates(
 
     a_hat, La_dirs, dirs = _target_axis(B_target, device, work, n_directions)
 
-    # 1/2 from aboev: score a-axis directions by integer-projection fitness
     proj = La_dirs @ q.T  # (D, N) = t . q over observed peaks
     cos = torch.cos(2.0 * math.pi * proj)
     if w is None:
         fitness = cos.mean(dim=1)
     else:
         fitness = (cos * w.unsqueeze(0)).sum(dim=1) / w.sum().clamp_min(1e-12)
+    # cos is even, so +d and -d tie; 2x keeps both signs of each top direction
     M = min(2 * top_directions, dirs.shape[0])
     top_dirs = dirs[torch.topk(fitness, k=M).indices]
 
-    # 3 from above: land the reference a-axis on each kept direction, then spin through
-    # n_spin rolls; score each full orientation A = U @ B by induced hkls.
     R0 = _rotations_mapping(a_hat, top_dirs)  # R0 @ a_hat = dir
     thetas = torch.arange(n_spin, device=device, dtype=work) * (2.0 * math.pi / n_spin)
-    omega = top_dirs.unsqueeze(1) * thetas.view(1, n_spin, 1)  # (M, S, 3)
+    omega = top_dirs.unsqueeze(1) * thetas.view(1, n_spin, 1)  # (M, S, 3) rolls
     R_spin = _axis_angle_to_rotation(omega)  # (M, S, 3, 3)
     U = R_spin @ R0.unsqueeze(1)
     A_cand = (U @ B).reshape(M * n_spin, 3, 3)

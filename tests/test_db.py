@@ -208,7 +208,7 @@ def test_db_peaks_table(geometry_dict, cell, tmp_path):
         ).fetchone()
         assert n_peaks == 4  # every searched peak, indexed or not
         assert max_res > 0.0
-        # the frame's peak_resolution matches the brightest-shell peak
+        # the frame's peak_resolution is that of its highest-resolution peak
         frame_res = conn.execute(
             "SELECT peak_resolution_nm_inv FROM frames"
         ).fetchone()[0]
@@ -505,7 +505,7 @@ def test_attach_frame_values_joins_on_filename_and_event(geometry_dict, cell, tm
     filename, event = conn.execute("SELECT filename, event FROM frames").fetchone()
     conn.close()
     table = tmp_path / "beam.tsv"
-    # a path under another directory, a //event, an empty cell and a stranger
+    # another directory, a //event, an empty cell, and an event absent from the run
     table.write_text(
         "filename\tevent\tpulse_energy\tbandwidth_eV\n"
         f"/elsewhere/{filename}\t//{event}\t612.5\t\n"

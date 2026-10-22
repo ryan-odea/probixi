@@ -28,6 +28,7 @@ def neighbour(
     H: tl.constexpr,
     W: tl.constexpr,
 ):
+    # node of the (dr, dc) neighbour, or i itself when it is background or off-frame
     ok = live & (r + dr >= 0) & (r + dr < H) & (c + dc >= 0) & (c + dc < W)
     node = tl.load(OUT + fg + (dr * W + dc), ok, 0).to(tl.int32)
     return tl.where(node > 0, node - 1, i)
@@ -57,12 +58,13 @@ def label_nodes(
     ITERS: tl.constexpr,
     HAS_RESP: tl.constexpr,
 ):
+    # one program labels all K foreground pixels by min-label propagation
     i = tl.arange(0, NBLK)
     live = i < K
     fg = tl.load(FG + i, live, 0).to(tl.int32)
     r = fg // W
     c = fg - r * W
-    tl.store(OUT + fg, (i + 1).to(tl.int64), live)
+    tl.store(OUT + fg, (i + 1).to(tl.int64), live)  # node + 1; background stays 0
     tl.debug_barrier()
     n0 = neighbour(OUT, fg, r, c, i, live, -1, 0, H, W)
     n1 = neighbour(OUT, fg, r, c, i, live, 1, 0, H, W)
@@ -90,6 +92,7 @@ def label_nodes(
         lab = new
         it += 1
         going = tl.where(it < ITERS, changed, 0)
+    # blob ids 1..nb follow each blob's first pixel in raster order (fg is raster)
     flag = (tl.histogram(lab, NBLK, mask=live) > 0).to(tl.int32)
     bid = tl.gather(tl.cumsum(flag, 0), lab, 0)
     skey = tl.sort(tl.where(live, (bid << LOGN) | i, 2147483647))
@@ -100,7 +103,7 @@ def label_nodes(
     tl.store(START + nb, K)
     tl.store(OUT + fg, bid.to(tl.int64), live)
     tl.store(META, nb)
-    # per-pixel inputs of the statistics, blob-major in raster order
+    # NV rows: excess, z, log_bf, posterior, var, mean, response; blob-major, raster
     p = tl.gather(fg, skey & (NBLK - 1), 0)
     tl.store(P + i, p, live)
     tl.store(NV + i, tl.load(EXC + p, live, 0.0), live)
@@ -139,13 +142,14 @@ def blob_stats(
     HAS_RESP: tl.constexpr,
     FOOT: tl.constexpr,
 ):
+    # one lane per blob; FOUT and IOUT hold every blob, KFOUT and KIOUT the kept ones
     b = tl.arange(0, NBLK)
     nb = tl.load(META)
     lane = b < nb
     start = tl.load(START + b, lane, 0)
     cnt = tl.load(START + b + 1, lane, 0) - start
     maxsz = tl.minimum(tl.max(cnt, 0), max_size)
-    tl.store(META + 2, tl.max(cnt, 0) > max_size)
+    tl.store(META + 2, tl.max(cnt, 0) > max_size)  # META = [nb, n_keep, oversize]
     zero = tl.zeros([NBLK], tl.float32)
     ninf = tl.full([NBLK], float("-inf"), tl.float32)
     s_w = zero
@@ -202,6 +206,7 @@ def blob_stats(
     size_f = tl.maximum(cnt, 1).to(tl.float32)
     w_safe = tl.maximum(s_w, 1.0e-12, propagate_nan=NAN)
     has_w = s_w > 0
+    # excess-weighted centroid; geometric when no pixel has a positive excess
     rc = tl.where(has_w, tl.div_rn(s_wr, w_safe), tl.div_rn(s_gr, size_f))
     cc = tl.where(has_w, tl.div_rn(s_wc, w_safe), tl.div_rn(s_gc, size_f))
     q_rr = zero
@@ -225,6 +230,7 @@ def blob_stats(
     crr = tl.div_rn(q_rr, w_safe)
     ccc = tl.div_rn(q_cc, w_safe)
     crc = tl.div_rn(q_rc, w_safe)
+    # eigenvalues of the weighted 2 x 2 second-moment matrix
     tr = crr + ccc
     disc = tl.sqrt_rn(
         tl.maximum(
@@ -247,6 +253,7 @@ def blob_stats(
     sigma = tl.sqrt_rn(s_v)
     post_mean = tl.div_rn(s_p, size_f)
     if FOOT:
+        # cap = max(size_cap, 4 * 2 pi s^2 ln(R / T)); see docs/overview/peakfinding.md
         ratio = tl.maximum(r_max * inv_thr, 1.0, propagate_nan=NAN)
         cap = tl.maximum(size_cap, foot_c * libdevice.log(ratio), propagate_nan=NAN)
         size_ok = cnt.to(tl.float32) <= cap
@@ -343,7 +350,7 @@ def extract(finder, binary, scores, frame_index, mask):
     if K == 0:
         return empty()
     if K > KCAP or finder.size_min < 1:
-        return None
+        return None  # None hands the frame to the torch path
     nodes = 256 if K <= 256 else 1024 if K <= 1024 else 4096
     lanes = min(nodes, BCAP)
     warps = 4 if nodes <= 256 else 8 if nodes <= 1024 else 16

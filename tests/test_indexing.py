@@ -11,7 +11,7 @@ from probixi.indexer.indexer import Indexer, RefineConfig, SeedConfig
 from probixi.indexer.lattice import cell_to_B
 from probixi.io.cell import CellParams
 
-# seeding/refinement that sim.py verified as fast and reliable on CPU
+# the reduced search of sim.py's standalone check, fast and reliable on CPU
 SEED = SeedConfig(n_directions=1500, n_spin=60, top_directions=12, max_candidates=32)
 REFINE = RefineConfig(max_iters=150, reassign_every=10)
 ROT_SEED = 0
@@ -58,8 +58,7 @@ def test_indexer_runs_on_mps_end_to_end(geometry_dict, cell):
     U = sim.proper_rotation(ROT_SEED, max_angle_deg=MAX_ANGLE_DEG)
     positions, _ = sim.lattice_peaks(geometry_dict, cell, U)
     idxr = Indexer(geometry_dict, cell, seed=SEED, refine=REFINE, device=dev)
-    # positions come from disk as CPU tensors; the indexer lifts them to its own
-    # (float32-on-MPS) device/dtype internally.
+    # CPU positions; the indexer moves them to its MPS device and float32 itself
     results = idxr.index_frames({0: positions.to(torch.float32)})
     assert results  # solved end-to-end on MPS
     assert results[0].A.device.type == "mps"
@@ -135,9 +134,7 @@ def test_subpixel_jitter_still_indexes_majority_with_bounded_rmsd(geometry_dict,
     noisy = idxr.index_frames({0: noisy_positions})[0]
 
     assert noisy.n_indexed >= int(0.7 * positions.shape[0])
-    # jitter inflates the residual but it stays within tolerance. The two runs
-    # index slightly different peak sets, so the residuals are only comparable
-    # to within a few percent in float32.
+    # Jitter raises the rmsd; the runs index slightly different peaks, hence the 0.95
     assert noisy.rmsd >= clean.rmsd * 0.95
     assert noisy.rmsd < idxr.q_tolerance
 

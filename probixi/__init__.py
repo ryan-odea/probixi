@@ -1,28 +1,23 @@
 from __future__ import annotations
 
+# Imported on first access, so `import probixi` and the CLI's --help skip torch
 _LAZY = {
-    # pipeline
     "Probixi": ".probixi",
     "auto_device": ".probixi",
-    # citation
     "citation": ".probixi",
     "__citation__": ".probixi",
-    # indexer config
     "FrameIndexResult": ".indexer",
     "FrameIndexStream": ".indexer",
     "SeedConfig": ".indexer",
     "RefineConfig": ".indexer",
     "CellMatchConfig": ".indexer",
     "IntegrateConfig": ".indexer",
-    # indexing ambiguity
     "Ambigator": ".ambigator",
     "AmbigatorResult": ".ambigator",
-    # multi-GPU
     "run_data_parallel": ".tools.multigpu",
     "run_block_from_env": ".tools.multigpu",
     "merge_streams": ".tools.multigpu",
     "BlockConfig": ".tools.multigpu",
-    # output writers
     "DataOffloader": ".io",
     "PeakOffloader": ".io",
     "DuckDBOffloader": ".io",

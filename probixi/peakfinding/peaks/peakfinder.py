@@ -41,29 +41,31 @@ class Peak:
     Parameters
     ----------
     row, col : float
-        Intensity-weighted centroid row and column.
+        Centroid row and column in pixels, weighted by the positive excess.
     intensity : float
-        Sum of background-subtracted intensity (excess) over the peak blob.
+        Summed excess over the background, in detector units.
     sigma : float
-        1-sigma uncertainty on ``intensity``, ``sqrt(sum per-pixel variance)``.
+        Standard uncertainty of ``intensity``, the root of the summed pixel variance.
     max_intensity : float
-        Peak (maximum) excess within the peak blob.
+        Largest pixel excess.
     z_max : float
-        Largest per-pixel z-score in the peak blob.
+        Largest whitened residual.
     log_bf_sum : float
-        Sum of per-pixel log Bayes factors over the peak blob.
+        Summed per-pixel log Bayes factor.
     posterior_mean : float
-        Mean peak posterior probability over the peak blob.
+        Mean peak posterior over the pixels.
     size : int
-        Pixel count of the peak blob.
+        Pixels in the blob.
     bbox : tuple of int
         Bounding box ``(r0, r1, c0, c1)``, half-open on the upper bounds.
     eccentricity : float
-        Ratio of larger to smaller second-moment eigenvalue (>= 1).
+        Ratio of the larger to the smaller second-moment eigenvalue, >= 1.
     peakedness : float
-        ``max_intensity / mean_intensity``; how 'spiky' the peak blob is.
+        ``max_intensity`` over the mean pixel excess.
     frame_index : int, optional
         Index of the source frame, if known.
+    label_id : int, optional
+        Component label in :attr:`PeakResult.labels`.
     """
 
     row: float
@@ -91,23 +93,21 @@ class PeakResult:
     frame_index : int, optional
         Index of the source frame, if known.
     scores : dict of str to Tensor
-        The (H,W) score maps (excess, z, log_bf, posterior, ...).
+        ``(H, W)`` maps from :meth:`PeakFinder.score`; empty after
+        :meth:`drop_scores`.
     labels : Tensor
-        (H,W) connected-component label image (0 = background).
+        ``(H, W)`` connected-component labels, 0 on background.
     stats : BlobStats
-        Per peak-blob statistics for every labelled component.
+        Statistics of every labelled component, kept or not.
     keep : Tensor
-        Bool mask over ``stats`` rows selecting blobs that passed the filter.
+        Boolean mask over ``stats`` rows that passed the shape filter.
     var : Tensor, optional
-        (H,W) per-pixel noise variance used for scoring, carried so a downstream
-        integrator can propagate sigma at predicted positions. Held outside
-        ``scores`` because it is frame-independent and must not be sliced when a
-        batched score dict is split per frame.
+        ``(H, W)`` variance the frame was whitened against; integration propagates
+        uncertainties from it.
     valid_mask : Tensor, optional
-        (H,W) detector validity mask used for this frame.
+        ``(H, W)`` validity mask of this frame, including its value flags.
     mean : Tensor, optional
-        (H,W) per-pixel background level subtracted to form ``excess``, carried
-        alongside ``var`` so an integrator can report the local background.
+        ``(H, W)`` background subtracted to form ``excess``.
     """
 
     frame_index: Optional[int]
@@ -124,11 +124,11 @@ class PeakResult:
         return select_blobs(self.stats, self.keep)
 
     def to_peaks(self) -> list[Peak]:
-        """Materialize ``Peak`` dataclasses; forces host sync via ``.tolist()``."""
+        """Return the kept blobs as host-side ``Peak`` objects; syncs the device."""
         return _stats_to_peaks(self.kept_stats, frame_index=self.frame_index)
 
     def drop_scores(self) -> "PeakResult":
-        """Return a copy with the (H,W) score maps released; keeps stats/labels."""
+        """Return a copy without the ``(H, W)`` score maps."""
         return replace(self, scores={})
 
     def __len__(self) -> int:
@@ -136,11 +136,11 @@ class PeakResult:
 
 
 class PeakStream:
-    """Lazy, composable stream of per-frame ``PeakResult``s
+    """Lazy, single-use stream of per-frame :class:`PeakResult` objects.
 
-    Wraps an iterator and exposes functional operators (``map``, ``filter``,
-    ``tap``, ``drop_scores``) plus terminal sinks (``collect_peaks``, ``count``,
-    ``for_each``). Nothing is consumed until a terminal operator pulls.
+    ``map``, ``filter``, ``tap``, and ``drop_scores`` return new streams;
+    ``collect_peaks``, ``count``, ``for_each``, and iteration consume it. No frame is
+    scored until a result is pulled.
 
     Parameters
     ----------
@@ -152,7 +152,7 @@ class PeakStream:
         self._source: Iterator[PeakResult] = iter(source)
 
     def map(self, fn: Callable[[PeakResult], PeakResult]) -> "PeakStream":
-        """Transform each result with ``fn``, yielding a new stream."""
+        """Return a stream of ``fn`` applied to each result."""
         return PeakStream(fn(r) for r in self._source)
 
     def filter(self, predicate: Callable[[PeakResult], bool]) -> "PeakStream":
@@ -170,11 +170,11 @@ class PeakStream:
         return PeakStream(_gen())
 
     def drop_scores(self) -> "PeakStream":
-        """Release each result's (H,W) score maps; keeps stats/labels."""
+        """Return a stream whose results carry no ``(H, W)`` score maps."""
         return self.map(lambda r: r.drop_scores())
 
     def collect_peaks(self) -> list[Peak]:
-        """Materialize all peaks across every frame into a flat list."""
+        """Consume the stream and return every kept peak in one list."""
         return [p for r in self._source for p in r.to_peaks()]
 
     def count(self) -> int:
@@ -191,62 +191,65 @@ class PeakStream:
 
 
 class PeakFinder:
-    """Bayesian peak finder over a fitted NoiseModel.
+    """Bayesian peak finder over a calibrated :class:`NoiseModel`.
 
-    Primary Peak finding API point: general workflow is:
-    1. Per-pixel log-Bayes-factor under N(mu,sigma^2) vs
-    N(mu, (kappa*sigma)^2) (positive excursions only)
-    2. matched-filter smooth
-    3. threshold posterior
-    4. determine connected components
-    5. filter peak shape.
-    When ``local_background`` is set, the running-model mean is corrected per frame by
-    a local annulus background so the statistic is robust to frame-to-frame
-    background changes and smooth spatial gradients the static model cannot track.
+    Each frame is whitened against the model and scored by the per-pixel log Bayes
+    factor of ``N(mu, (kappa sigma)^2)`` against ``N(mu, sigma^2)`` on upward
+    excursions. The Gaussian-smoothed log odds give a posterior per pixel. Pixels
+    above the threshold, on the posterior or on the matched-filter maximum ``T``,
+    are labelled into connected components and filtered on shape. See
+    docs/overview/peakfinding.md.
 
     Parameters
     ----------
     noise_model : NoiseModel
-        Fitted (frozen) noise model providing per-pixel ``mean``/``var``/``mask``.
+        Model whose prediction each frame is whitened against.
     kappa : float, default 10.0
-        Std inflation of the peak hypothesis; must be > 1.
+        Peak contrast, the standard-deviation inflation of the peak hypothesis; > 1.
     prior_peak : float, default 1e-3
-        Prior probability a pixel is a peak; must be in (0, 1).
+        Prior probability that a pixel carries peak signal; in (0, 1).
     kernel_size : int, default 5
-        Side of the Gaussian smoothing kernel (odd).
+        Side, in pixels, of the Gaussian kernel that smooths the log odds; odd.
     kernel_sigma : float, default 1.0
-        Sigma of the Gaussian smoothing kernel.
+        Width of that kernel in pixels.
     posterior_threshold : float, default 0.5
-        Posterior probability above which a pixel is a candidate; in (0, 1).
+        Posterior above which a pixel is a candidate; in (0, 1).
     candidate_threshold : float, optional
-        Lower emit threshold to surface weak spots; in (0, posterior_threshold].
+        Replaces ``posterior_threshold`` when set, to admit weaker spots; in
+        ``(0, posterior_threshold]``.
     matched_filter : bool, default False
-        Use the multi-scale matched-filter detector instead of the posterior.
+        Threshold the matched-filter maximum ``T`` instead of the posterior.
     mf_scales : tuple of float, default (1.0, 1.6, 2.4)
-        Gaussian sigmas of the matched-filter kernel bank; positive.
+        Gaussian template widths in pixels.
     mf_threshold : float, default 5.0
-        Sigma threshold on the scale-space matched-filter statistic.
+        Threshold on ``T``, normally set by :func:`calibrate_threshold`.
     size_min, size_max : int, default 2, 30
-        Pixel-count bounds on a blob
+        Bounds on the pixels per blob. With the matched filter, a bright blob may
+        exceed ``size_max`` up to its footprint cap.
     eccentricity_max : float, default 5.0
-        Max allowed second-moment eigenvalue ratio.
+        Largest second-moment eigenvalue ratio, which rejects streaks.
     peakedness_min : float, default 1.2
-        Min allowed max/mean excess ratio.
+        Smallest ratio of maximum to mean excess, which rejects flat regions.
     connectivity : int, default 2
-        1 = 4-neighbourhood, 2 = 8-neighbourhood for labelling.
-    combination : {'pixel','rotational','panel','shrinkage','calibrated'}, default 'shrinkage'
-        Noise-model prediction combination preset.
+        1 for the 4-neighbourhood, 2 for the 8-neighbourhood.
+    combination : str, default 'shrinkage'
+        Preset passed to :meth:`NoiseModel.predict`; :meth:`CalibrationResult.apply`
+        sets ``calibrated``.
     local_background : bool, default True
-        Correct the model mean by a per-frame local annulus background.
+        Correct the background mean and variance per frame from a square annulus
+        around each pixel, which follows pedestal shifts and smooth gradients.
     local_inner_radius, local_outer_radius : int, default 4, 9
-        Annulus radii; require 1 <= inner < outer.
+        Inner and outer half-widths of the annulus in pixels;
+        ``1 <= inner < outer``.
     flux_variance : bool, default False
-        Replace the frozen variance with a per-frame photon-transfer noise floor.
+        Whiten against ``read_var + gain * level`` at each frame's own level; takes
+        effect once :func:`fit_photon_transfer` has run.
     flux_var_floor : float, default 0.15
-        Sub-photon hard floor as a fraction of the running variance.
+        Lower bound on the flux-scaled variance, as a fraction of the running
+        variance.
     max_peaks : int, optional
-        Blow-up guard; frames with more candidate blobs yield no peaks. Defaults
-        to one per 1000 frame pixels, and at least 1000.
+        A frame with more components yields no peaks, since its background model
+        has failed. Defaults to one per 1000 pixels, at least 1000.
     compile : bool, default False
         ``torch.compile`` the batched scorer when available.
     """
@@ -353,9 +356,7 @@ class PeakFinder:
         self._annulus_count: Optional[Tensor] = None
 
     def background_annulus_pixels(self) -> Optional[float]:
-        # Nominal pixel count of the local-background annulus (outer box minus
-        # inner box), used to inflate integrated sigma(I) by 1 + n_peak/n_bg for
-        # the shared background subtraction. None when no local background is used.
+        """Nominal pixel count of the local annulus; None without local background."""
         if not self.local_background:
             return None
         outer = 2 * self.local_outer_radius + 1
@@ -363,7 +364,7 @@ class PeakFinder:
         return float(outer * outer - inner * inner)
 
     def _pred(self) -> dict[str, Tensor]:
-        # prediction cache keyed on model updates
+        # prediction cached per model update
         key = self.noise._n_host
         cache = self._pred_cache
         if self._pred_key != key or cache is None:
@@ -393,6 +394,7 @@ class PeakFinder:
     def _eigen_correction(
         self, residual: Tensor, var0: Tensor, modes: Tensor, mask: Tensor
     ) -> Tensor:
+        # project the clipped residual onto the orthonormal eigen modes
         cap = 5.0 * var0.sqrt()
         clipped = torch.minimum(residual, cap) * mask
         if residual.ndim == 2:
@@ -405,7 +407,7 @@ class PeakFinder:
     def _effective_background(
         self, frame: Tensor, pred: dict[str, Tensor]
     ) -> tuple[Tensor, Tensor]:
-        # Per-frame (mu, sigma)
+        # Per-frame (mean, var) after the eigen, local-annulus, and flux corrections
         mean0 = pred["mean"]
         var0 = pred["var"].clamp_min(1e-12)
         modes = getattr(self.noise, "eigen_modes", None)
@@ -455,23 +457,22 @@ class PeakFinder:
 
     @torch.no_grad()
     def score(self, frame: Tensor) -> dict[str, Tensor]:
-        """Scores one frame
+        """Return the score maps of one frame.
 
-        Runs the full chain: excess and z standardisation, log Bayes factor,
-        posterior log-odds (``log BF + log prior odds``), matched-filter smoothing
-        of the logits, and a logistic squash to a posterior probability in [0, 1].
+        ``log_bf`` is zero wherever the excess is not positive, and ``posterior`` is
+        the logistic function of the Gaussian-smoothed log odds, ``log_bf`` plus the
+        log prior odds.
 
         Parameters
         ----------
         frame : Tensor
-            A single (H,W) frame.
+            One ``(H, W)`` frame.
 
         Returns
         -------
         dict of str to Tensor
-            Score maps: ``excess``, ``z``, ``log_bf``, ``posterior``,
-            ``mean_eff``, ``var_eff``, and ``mf_max`` when the matched filter is
-            enabled. Each is (H,W).
+            ``(H, W)`` maps ``excess``, ``z``, ``log_bf``, ``posterior``,
+            ``mean_eff``, ``var_eff``, and ``mf_max`` with the matched filter.
         """
         supported = (
             frame.is_cuda
@@ -525,7 +526,7 @@ class PeakFinder:
 
     @torch.no_grad()
     def score_batch(self, batch: Tensor) -> dict[str, Tensor]:
-        # Batched twin of score; batch (B,H,W) -> dict of (B,H,W)
+        # score over a (B, H, W) batch
         pred = self._pred()
         mask = pred["mask"].unsqueeze(0)
         batch = batch.to(pred["mean"])
@@ -560,16 +561,15 @@ class PeakFinder:
         frames: Iterable[Tensor],
         start_index: int = 0,
     ) -> PeakStream:
-        """Lazy stream of per-frame ``PeakResult``s.
+        """Return a lazy stream of one :class:`PeakResult` per frame.
 
-        Compose with ``.map``/``.filter``/``.tap`` and terminate with
-        ``.collect_peaks``/``.count``/``.for_each``. Frames may be (H,W) singles
-        or (B,H,W) batches; batches are scored together and split per frame.
+        A ``(B, H, W)`` batch is scored together and split per frame. A pixel that
+        fails a geometry value flag on a frame is masked for that frame.
 
         Parameters
         ----------
         frames : iterable of Tensor
-            Source frames, each (H,W) or (B,H,W).
+            ``(H, W)`` frames or ``(B, H, W)`` batches.
         start_index : int, default 0
             Frame index assigned to the first emitted result.
 
@@ -614,10 +614,9 @@ class PeakFinder:
         device = mask.device
         dtype = scores["excess"].dtype
         if self.matched_filter and "mf_max" in scores:
-            # Threshold the scale-space MF max (per-scale ~N(0,1)) at mf_threshold.
+            # T is the maximum over unit-variance responses T_s of the template bank
             binary = (scores["mf_max"] > self.mf_threshold) & mask
         else:
-            # candidate_threshold (when set) lowers the emit bar for weak spots.
             thr = (
                 self.candidate_threshold
                 if self.candidate_threshold is not None
@@ -650,8 +649,7 @@ class PeakFinder:
         labels, n_blobs = label_connected_components(
             binary, connectivity=self.connectivity
         )
-        # Blow-up guard: means the background model failed;  better to
-        # drop all rather than flood the indexer and wait a million years
+        # beyond max_peaks components the background model has failed: emit none
         if n_blobs == 0 or (self.max_peaks > 0 and n_blobs > self.max_peaks):
             return PeakResult(
                 frame_index=frame_index,

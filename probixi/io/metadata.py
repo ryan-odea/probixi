@@ -17,31 +17,31 @@ PathLike = Union[str, Path]
 
 @dataclass
 class H5Info:
-    """Locator and shape for the frame stack inside one HDF5 file.
+    """Frame stack of one HDF5 file, or a contiguous selection of its events.
 
     Parameters
     ----------
     filename : str
-        Path to the HDF5 file.
+        HDF5 file.
     dataset : str
-        Internal path to the frame dataset within the file.
+        Frame dataset; holds ``%`` for a per-event path such as ``/%/data``.
     n_frames : int
-        Number of frames (size of the event axis).
+        Frames this entry selects.
     frame_shape : tuple[int, ...]
-        Shape of a single assembled frame ``(ss, fs)`` in data space.
+        Assembled frame shape ``(ss, fs)`` in data space.
     raw_shape : tuple[int, ...]
-        Full shape of the source HDF5 array (before assembly).
-    source_n_frames : int, optional
-        Original stack length when this entry selects only some source events.
-    event_start : int, default 0
-        First source event for a contiguous selection from an event list.
+        Shape of the stored array before assembly.
     placements : list[PanelPlacement], optional
-        Panel placement records for the assembly path; ``None`` selects the fast
-        contiguous-slice path for a plain ``(N, ss, fs)`` stack.
+        Panel placements when frames are assembled from the stored array;
+        ``None`` for a plain ``(N, ss, fs)`` stack, which is read by slicing.
+    event_start : int, default 0
+        First selected source event.
+    source_n_frames : int, optional
+        Length of the source stack when the entry selects some of its events.
     events : list[str], optional
-        Names ``%`` stands for in a per-event data path (``/%/data``), one frame each.
+        Names that ``%`` stands for, one frame each.
     photon_energy_eV : list[float], optional
-        Per-event energies from a ``photon_energy = /%/...`` geometry path.
+        Per-event photon energies in eV from a ``photon_energy = /%/...`` path.
     """
 
     filename: str
@@ -58,23 +58,23 @@ class H5Info:
 
 @dataclass
 class CbfInfo:
-    """Locator and shape for the single image in one CBF file.
+    """Single image of one CBF file.
 
     Parameters
     ----------
     filename : str
-        Path to the ``.cbf``, ``.cbf.gz`` or ``.cbf.bz2`` file.
+        ``.cbf``, ``.cbf.gz`` or ``.cbf.bz2`` file.
     frame_shape : tuple[int, ...]
-        Shape of the image ``(ss, fs)``.
+        Image shape ``(ss, fs)``.
     dtype : str
-        Pixel type of the decoded image, e.g. ``"int32"``.
+        Decoded pixel type, for example ``"int32"``.
     n_frames : int, default 1
-        Number of frames; a CBF file holds one image.
+        Always 1.
     event_start : int, default 0
-        Source event of the selection (only ``//0`` exists).
+        Always 0; ``//0`` is the only event.
     source_n_frames : int, optional
-        Set when the list entry names the event ``//0``; ``None`` for an entry
-        without an event, which CrystFEL writes as the empty event ``//``.
+        Set when the list entry names ``//0``. ``None`` for an entry without an
+        event, which the stream writes as the empty event ``//``, as CrystFEL does.
     """
 
     filename: str
@@ -91,25 +91,24 @@ class CbfInfo:
 
 @dataclass
 class Metadata:
-    """Everything the loader resolved up front about a run.
+    """Files, geometry and cell that :class:`DataLoader` resolved for a run.
 
     Parameters
     ----------
     files : dict
-        Map from filename to its :class:`H5Info` (dataset path, counts, shape) or
-        :class:`CbfInfo`.
+        List entry to :class:`H5Info` or :class:`CbfInfo`, in processing order.
     geometry : Geometry, optional
-        Parsed detector geometry, or None if no geometry file was given.
+        Parsed geometry; ``None`` without a geometry file.
     cell : CellParams, optional
-        Parsed target unit cell, or None if no cell file was given.
+        Target cell; ``None`` without a cell file.
     frame_size : tuple, optional
-        Detector frame shape ``(rows, cols)``, or None if no files.
+        Frame shape ``(ss, fs)``.
     n_files : int
-        Number of source files.
+        Distinct source files.
     n_frames : int
-        Total frame count summed across all files.
+        Frames over all entries.
     entry_point : int, optional
-        Optional starting frame offset for the run.
+        Starting frame offset; :class:`DataLoader` does not set it.
     """
 
     files: dict = field(default_factory=dict)
@@ -126,6 +125,7 @@ class Metadata:
 
 
 def scan_cbf(path: PathLike) -> CbfInfo:
+    """Describe the image of one CBF file from its header alone."""
     header = read_cbf_header(path)
     return CbfInfo(
         filename=str(Path(path)),
@@ -135,6 +135,10 @@ def scan_cbf(path: PathLike) -> CbfInfo:
 
 
 def scan_h5(path: PathLike, geometry: Optional[Geometry] = None) -> H5Info:
+    """Locate the frames of one HDF5 file by the geometry's ``data`` and ``dimN``.
+
+    Without a ``data`` path the first 3-D dataset in the file is the frame stack.
+    """
     path = Path(path)
     layout = geometry.data_layout if geometry is not None else None
     if layout is None or layout.data_path is None:
@@ -237,7 +241,7 @@ def _explicit_nonstandard(layout) -> bool:
 def _validate_placements(
     placements: list[PanelPlacement], scanned_path: str, raw_shape: tuple[int, ...]
 ) -> None:
-    # Fail fast at load so assembly never trips inside the prefetch worker.
+    # Fail at load, not later inside the prefetch worker
     nd = len(raw_shape)
     for p in placements:
         if p.data_path != scanned_path:
@@ -264,7 +268,7 @@ def _validate_placements(
 
 
 def _find_frame_dataset(h5file: h5py.File) -> tuple[str, tuple]:
-    # First dataset encountered in the tree is the frame stack.
+    # The first 3-D dataset in visit order is the frame stack
     found: dict = {}
 
     def visitor(name, obj):

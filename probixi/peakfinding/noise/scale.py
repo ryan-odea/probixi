@@ -20,16 +20,13 @@ class FrameScale:
     frame_index : int or None
         Index of the source frame.
     scale : float
-        Multiplicative scale ``g`` of this frame's background relative to the
-        live model's current background (1.0 = same fluence as the model's
-        running mean). Robust WLS slope of ``frame ~ offset + g * background``
-        over peak-free pixels.
+        Slope ``g`` of ``frame ~ offset + g * background``, fitted by weighted least
+        squares over pixels without Bragg signal; 1.0 is the fluence of the model's
+        running mean.
     sigma : float
-        1-sigma uncertainty on ``scale`` from the WLS covariance and the
-        per-pixel variance model.
+        Standard uncertainty of ``scale`` from the weighted least-squares covariance.
     offset : float
-        Fitted additive pedestal ``a`` (absorbs any constant offset; ~0 for a
-        photon-counting detector).
+        Fitted additive pedestal, near 0 on a photon-counting detector.
     """
 
     frame_index: Optional[int]
@@ -39,6 +36,7 @@ class FrameScale:
 
 
 class PendingScale:
+    # FrameScale proxy; the fit runs on the first public attribute access
     def __init__(self, ref, frame_index, sample):
         self._ref, self._frame_index, self._sample = ref, frame_index, sample
         self._done = None
@@ -58,30 +56,24 @@ class PendingScale:
 class ScaleReference:
     """Live background reference for per-frame scale inference.
 
-    Wraps a (typically online) ``NoiseModel`` and, on each :meth:`estimate`,
-    regresses the frame against the model's *current* background. Because the
-    reference follows the live model, the per-frame scale is always measured
-    relative to the latest drift-tracked background instead of a snapshot frozen
-    at calibration.
-
-    A fixed random subsample of valid pixels is chosen on the first estimate
-    (reproducible, for speed); the background mean/variance over those pixels are
-    re-read from the live model every call.
+    Each :meth:`estimate` regresses the frame against the model's current
+    background, so the scale follows the drift that the running model tracks. The
+    pixel subsample is drawn once, on the first call, and the background over it is
+    read from the model on every call.
 
     Parameters
     ----------
     noise_model : NoiseModel
         The live model whose background each frame is regressed against.
     combination : str, optional
-        Background blend passed to ``noise_model.predict``. ``None`` (default)
-        auto-selects ``"calibrated"`` once the model is calibrated, else
-        ``"shrinkage"``.
+        Blend passed to ``noise_model.predict``; by default ``calibrated`` once the
+        model is calibrated, else ``shrinkage``.
     robust_k : float, default 5.0
-        Upper-clip level (in background sigma) to exclude Bragg peaks from the fit.
+        Pixels above ``mean + robust_k * sigma`` are excluded from the fit.
     subsample : int, default 40000
-        Number of valid pixels the fit uses (random, fixed locations).
+        Valid pixels drawn at random for the fit.
     rng_seed : int, default 0
-        Seed for the pixel subsample (reproducible).
+        Seed for the pixel subsample.
     """
 
     def __init__(
@@ -101,11 +93,12 @@ class ScaleReference:
         self._idx: Optional[Tensor] = None
 
     def __getstate__(self):
+        # the weakrefs in _pending cannot be pickled
         return {k: v for k, v in self.__dict__.items() if k != "_pending"}
 
     @classmethod
     def from_noise_model(cls, noise_model, **kwargs) -> "ScaleReference":
-        """Bind a live reference to ``noise_model`` (kept for call-site clarity)."""
+        """Return a reference bound to ``noise_model``, as the constructor does."""
         return cls(noise_model, **kwargs)
 
     def _combination(self) -> str:
@@ -151,7 +144,7 @@ class ScaleReference:
     def estimate_later(
         self, frame: Tensor, frame_index: Optional[int] = None, pred=None
     ) -> PendingScale:
-        # Defer the regression until a result is read
+        # Fit deferred until read; past _MAX_PENDING fits the oldest resolves now
         if pred is None:
             pred = self.noise_model.predict(combination=self._combination())
         pending = PendingScale(self, frame_index, self._sample(frame, pred))
@@ -185,6 +178,7 @@ class ScaleReference:
         swtt = (w * t * t).sum()
         swy = (w * y).sum()
         swty = (w * t * y).sum()
+        # closed-form weighted least squares for y = a + g t with weights 1 / v
         det = (sw * swtt - swt * swt).clamp_min(1e-12)
         g = (sw * swty - swt * swy) / det
         a = (swtt * swy - swt * swty) / det

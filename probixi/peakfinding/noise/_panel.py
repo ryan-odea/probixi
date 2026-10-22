@@ -14,8 +14,7 @@ PanelSpec = Union[
 
 
 class PanelNoise(NoiseStats):
-    # Panel-level running mean/variance: panel id per pixel (-1 = no panel),
-    # pixels per panel, and a valid mask of pixels belonging to some panel.
+    # Panel-mean estimator, frame-wide for one panel; panel_map is -1 outside panels
 
     panel_map: Tensor
     pixels_per_panel: Tensor
@@ -75,7 +74,7 @@ class PanelNoise(NoiseStats):
         return panel_map
 
     def _project(self, frame: Tensor, mask: Optional[Tensor]) -> Tensor:
-        # Mean over each panel's valid pixels: xbar_p = sum_p mask*x / sum_p mask.
+        # Observation per panel: the mean of its valid pixels
         supported = (
             self.n_panels > 0
             and frame.is_cuda
@@ -127,5 +126,6 @@ class PanelNoise(NoiseStats):
     def var(self) -> Tensor:
         safe = self.panel_map.clamp_min(0)
         z = torch.zeros((), dtype=self.M2_.dtype, device=self.M2_.device)
+        # a panel mean has variance sigma^2 / n; scale back to the per-pixel variance
         per_pixel = super().var()[safe] * self.pixels_per_panel[safe]
         return torch.where(self.valid_mask, per_pixel, z)

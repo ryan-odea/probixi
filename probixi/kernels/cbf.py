@@ -2,6 +2,7 @@ import torch
 import triton
 import triton.language as tl
 
+# wrap the int32 sums to each pixel type; uint16 and uint32 widen to signed types
 _FINISH = {
     "int8": lambda x: x.to(torch.int8),
     "uint8": lambda x: x.to(torch.uint8),
@@ -14,7 +15,7 @@ _FINISH = {
 
 @triton.jit
 def width(D, c, mask):
-    # Byte width of the escape token starting at the 0x80 byte at c
+    # byte width of the escape token opening at the 0x80 byte at c: 3, 7, or 15
     b1 = tl.load(D + c + 1, mask, 1)
     b2 = tl.load(D + c + 2, mask, 0)
     b3 = tl.load(D + c + 3, mask, 0)
@@ -28,16 +29,12 @@ def width(D, c, mask):
 
 @triton.jit
 def walk(D, C, W, ERR, LENS, n, STRIDE, BLOCK: tl.constexpr):
-    """Mark the escape tokens among the 0x80 candidates C in W (their width).
-
-    A candidate 15 or more bytes behind its predecessor, or opening a frame, is
-    surely a token. The others are resolved sequentially from there, one chain
-    per lane: a candidate is a token when no earlier token reaches it.
-    """
+    # W[c] = width of each true token among the 0x80 candidates C; ERR flags overruns
     i = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
     inb = i < n
     c = tl.load(C + i, inb, 0)
     last = tl.load(C + i - 1, inb & (i > 0), 0)
+    # tokens span at most 15 bytes, so a candidate 15+ bytes past the last opens one
     head = inb & ((i == 0) | (c - last >= 15) | (c // STRIDE != last // STRIDE))
     w = width(D, c, head)
     tl.store(W + c, w.to(tl.int8), head)
@@ -48,6 +45,7 @@ def walk(D, C, W, ERR, LENS, n, STRIDE, BLOCK: tl.constexpr):
     last = c
     cur = i
     active = head
+    # each head lane walks its chain; a candidate is a token unless one covers it
     while tl.max(active.to(tl.int32), 0) > 0:
         j = cur + 1
         valid = active & (j < n)
@@ -67,7 +65,7 @@ def walk(D, C, W, ERR, LENS, n, STRIDE, BLOCK: tl.constexpr):
 
 @triton.jit
 def keep(W, LENS, KEEP, STRIDE, total, BLOCK: tl.constexpr):
-    """KEEP: byte inside its frame's data and not inside an escape token."""
+    # KEEP marks the first byte of each delta within its frame's data
     b = tl.program_id(0).to(tl.int64) * BLOCK + tl.arange(0, BLOCK)
     inb = b < total
     frame = b // STRIDE
@@ -80,7 +78,7 @@ def keep(W, LENS, KEEP, STRIDE, total, BLOCK: tl.constexpr):
 
 @triton.jit
 def gather(D, W, KEEP, CS, FIRST, OUT, STRIDE, N, total, BLOCK: tl.constexpr):
-    """OUT: the difference carried by each pixel's token, at its pixel index."""
+    # OUT[frame, pixel] = the delta whose first byte is b; CS counts kept bytes
     b = tl.program_id(0).to(tl.int64) * BLOCK + tl.arange(0, BLOCK)
     inb = b < total
     kept = tl.load(KEEP + b, inb, 0) != 0
@@ -94,39 +92,16 @@ def gather(D, W, KEEP, CS, FIRST, OUT, STRIDE, N, total, BLOCK: tl.constexpr):
     x1 = tl.load(D + b + start + 1, escape, 0).to(tl.int32)
     x2 = tl.load(D + b + start + 2, escape & (w > 3), 0).to(tl.int32)
     x3 = tl.load(D + b + start + 3, escape & (w > 3), 0).to(tl.int32)
+    # the top byte loads sign-extended, so both values are signed
     short = (x0 & 255) | (x1 << 8)
+    # a 64-bit delta keeps its low 32 bits; the int32 prefix sum wraps the same way
     long = (x0 & 255) | ((x1 & 255) << 8) | ((x2 & 255) << 16) | (x3 << 24)
     value = tl.where(w == 0, plain, tl.where(w == 3, short, long))
     tl.store(OUT + frame * N + pixel, value, kept & (pixel < N))
 
 
 def decode(stage, lens, count, dtype, names):
-    """Decode byte-offset CBF data on the device.
-
-    Parameters
-    ----------
-    stage : torch.Tensor
-        ``(frames, stride)`` uint8 on the device; frame ``i`` holds its data in
-        the first ``lens[i]`` bytes and zeros after, at least 16 of them.
-    lens : torch.Tensor
-        Data bytes of each frame, int32 on the device.
-    count : int
-        Pixels per frame.
-    dtype : numpy.dtype
-        Pixel type; the sum wraps at its width.
-    names : sequence of str
-        Frame names for error messages.
-
-    Returns
-    -------
-    torch.Tensor
-        ``(frames, count)`` with the pixel values (unsigned types widened).
-
-    Raises
-    ------
-    ValueError
-        If a frame ends inside a value or does not hold ``count`` pixels.
-    """
+    # stage (frames, stride) uint8: lens[i] data bytes then >= 16 zeros per row
     frames, stride = stage.shape
     total = frames * stride
     d = stage.view(-1).view(torch.int8)

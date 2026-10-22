@@ -7,7 +7,7 @@ from .model import NoiseStats
 
 
 class PixelNoise(NoiseStats):
-    # Per-pixel running mean/variance over the full frame.
+    # Pixel estimator of the blend; also owns the dead-pixel mask
 
     valid_mask: Tensor
 

@@ -102,13 +102,13 @@ def _cell_basis(p, cols):
 
 
 def _gram(ext):
+    # ext = [f; J^T] gives Z[0, 0] = f.f, Z[1:, 0] = J^T f, and Z[1:, 1:] = J^T J
     ext = ext.astype(np.float32)
     return ext @ ext.T
 
 
 def _evaluator(U0, p0, cols, T, prior_width, hkl, q, khat, s_perp, s_par):
-    # x -> (A, [f; J^T]) in float64 for f = [(1 - k k^T)(h A^T - q) / s_perp,
-    # k.(h A^T - q) / s_par, T r / prior_width] and J = df/dx
+    # x -> (A, [f; J^T]): residuals A h - q across and along k, then the cell prior
     n, d = len(hkl), len(cols)
     W = np.empty((n, 4, 3))
     W[:, :3] = (np.eye(3) - khat[:, :, None] * khat[:, None, :]) / s_perp
@@ -184,7 +184,7 @@ def refine_analytic(
     p0 = p0.tolist()
     T = T.double().numpy()
     m = 3 + len(cols)
-    if int(indexed.sum()) * 3 <= m:
+    if int(indexed.sum()) * 3 <= m:  # 3 residuals per peak must outnumber parameters
         return None
     A64 = A_d.double().numpy()
     q64 = q_d.double().numpy()
@@ -192,6 +192,7 @@ def refine_analytic(
         U0 = A64 @ np.linalg.inv(np.array(_cell_basis(p0, cols)[0]).reshape(3, 3))
     except (ArithmeticError, ValueError, np.linalg.LinAlgError):
         return None
+    # Gaussian prior of a third of the acceptance window on each cell parameter
     prior_width = (
         np.array(
             [edge_tolerance * c0.a, edge_tolerance * c0.b, edge_tolerance * c0.c]
@@ -199,6 +200,7 @@ def refine_analytic(
         )
         / 3.0
     )
+    # khat = scattered-beam direction; no wavelength leaves all residual perpendicular
     khat = np.zeros_like(q64)
     has_k = wavelength is not None and wavelength > 0
     if has_k:
@@ -252,8 +254,8 @@ def refine_analytic(
         loss = float(Z[0, 0])
         for _ in range(iters):
             Hm = Z[1:, 1:].copy()
-            diag = np.einsum("ii->i", Hm)
-            diag += lam * diag + np.float32(1e-18)
+            diag = np.einsum("ii->i", Hm)  # writable view of the diagonal
+            diag += lam * diag + np.float32(1e-18)  # Marquardt: damping scales J^T J
             try:
                 step = np.linalg.solve(Hm, -Z[1:, 0])
             except Exception:

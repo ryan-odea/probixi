@@ -26,7 +26,7 @@ def _make_index_result(cell) -> IndexResult:
     sigmas = torch.tensor([35.0, 28.0, 21.0, 7.0], dtype=torch.float32)
     indexed_mask = torch.tensor([True, True, True, False])
     hkl = torch.tensor([[1, 0, 0], [0, 1, -1], [2, -1, 3], [0, 0, 0]], dtype=torch.long)
-    # A = U @ B; use identity-ish reciprocal basis, distinct columns so a*/b*/c* differ
+    # A = U @ B, near-diagonal with distinct columns so a*, b*, c* differ
     A = torch.tensor(
         [[0.016, 0.001, 0.000], [0.000, 0.016, 0.002], [0.001, 0.000, 0.009]],
         dtype=torch.float32,
@@ -269,13 +269,8 @@ def test_peak_offloader_write_before_context_manager_raises(tmp_path):
         off.write(_make_peak_result())
 
 
-# --- peak resolution must come from the panel geometry -----------------------
-
-
 def _folded_geom_file(tmp_path):
-    # Two 4x4 panels stacked in ss in the array, mirrored about the beam in the
-    # lab frame: array pixel (ss, fs) on panel 0 and (ss + 4, fs) on panel 1 are
-    # at the same scattering angle.
+    # 4x4 panels stacked in ss, mirrored in the lab: (ss, fs), (ss + 4, fs) share 2theta
     lines = [
         "clen = 0.1",
         "photon_energy = 12398.0",
@@ -335,8 +330,7 @@ def test_peak_resolution_uses_panel_geometry(tmp_path):
 
 
 def test_peak_resolution_is_not_array_radius(tmp_path):
-    # the pre-fix formula measured the radius in array coordinates about the
-    # beam centre; on a tiled detector that is a different number
+    # the array-coordinate radius about the beam centre differs on a tiled detector
     geom = read_geometry(_folded_geom_file(tmp_path))
     g = geom.to_dict()
     w = _writer_for(g)

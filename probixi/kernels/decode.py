@@ -8,7 +8,7 @@ import triton.language as tl
 
 
 class Options(ct.Structure):
-    # All supported option structs are 64 bytes; only CUDA backend is selected.
+    # nvCOMP option structs are 64 bytes; only the backend field is set
     _fields_ = [("backend", ct.c_int), ("reserved", ct.c_char * 60)]
 
 
@@ -43,7 +43,7 @@ def unshuffle(
     BLOCK_BYTES: tl.constexpr,
     BYTE_SHUFFLE: tl.constexpr,
 ):
-    """META per frame: bitshuffle block bytes (0 = none), byte-shuffle flag."""
+    # META (frames, 2): bitshuffle block bytes (0 = none) and byte-shuffle flag
     frame = tl.program_id(1)
     j = tl.program_id(0) * B + tl.arange(0, B)
     block_bytes = (
@@ -56,7 +56,7 @@ def unshuffle(
         if BYTE_SHUFFLE is not None
         else tl.load(META + frame * 2 + 1).to(tl.int32)
     )
-    # Assemble one native element. Bitcast only after all its bytes are restored.
+    # assemble each element as unsigned bits; bitcast once all its bytes are in
     value = tl.full((B,), 0, tl.uint64 if E == 8 else tl.uint32)
     if block_bytes > 0:
         ne = block_bytes // E
@@ -73,7 +73,7 @@ def unshuffle(
             value |= (((v >> (within % 8).to(value.dtype)) & 1) << plane).to(
                 value.dtype
             )
-        # Last <8 elements are stored verbatim, outside the bitshuffle blocks.
+        # the final < 8 elements are stored verbatim, outside any bitshuffle block
         for byte in tl.static_range(E):
             v = tl.load(
                 SRC + frame * STRIDE + j * E + byte, (j < N) & (within >= count), 0
@@ -84,7 +84,7 @@ def unshuffle(
             offset = tl.where(byte_shuffle != 0, byte * N + j, j * E + byte)
             v = tl.load(SRC + frame * STRIDE + offset, j < N, 0).to(value.dtype)
             value |= v << (byte * 8)
-    # DST has original storage dtype; caller performs the requested output cast.
+    # DST has the storage dtype; the caller casts to the requested dtype
     typ = DST.dtype.element_ty
     unsigned = (
         tl.uint8
@@ -142,7 +142,7 @@ class Decoder:
             ]
 
     def decode(self, packed, metadata, copies, shuffle, checksums, dtype, shape):
-        """Decode one bounded batch; metadata is CPU framing, never decoded pixels."""
+        # metadata rows (in_offset, in_bytes, out_offset, out_bytes) on the CPU
         batch = len(shuffle)
         compressed = packed.to(self.device, non_blocking=True)
         size = batch * self.stride
@@ -184,7 +184,7 @@ class Decoder:
             )
             if not bool(((statuses == 0) & (actual == capacities)).all()):
                 raise RuntimeError("nvCOMP decoded length or status mismatch")
-        for source, target, length in copies:
+        for source, target, length in copies:  # chunks stored without compression
             self.scratch[target : target + length].copy_(
                 compressed[source : source + length]
             )
@@ -198,6 +198,7 @@ class Decoder:
                 self.scratch, pieces, self.frame_bytes, self.stride, B=4096
             )
             sums = pieces.sum(1)
+            # Adler-32: A = 1 + sum d_j, B = n + sum (n - j) d_j, both mod 65521
             got = (((sums[:, 1] + self.frame_bytes) % 65521) << 16) | (
                 (sums[:, 0] + 1) % 65521
             )
@@ -215,6 +216,7 @@ class Decoder:
             self.stride,
             original.element_size(),
             B=256,
+            # uniform framing compiles as constants; a mixed batch reads META per frame
             BLOCK_BYTES=(
                 shuffle[0][0] if all(s == shuffle[0] for s in shuffle) else None
             ),

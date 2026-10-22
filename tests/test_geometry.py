@@ -75,8 +75,7 @@ def test_clen_given_as_hdf5_path_is_not_a_distance(tmp_path):
 
 
 def test_multi_panel_beam_center_is_shared_data_space_center(tmp_path):
-    # Two side-by-side panels sharing one beam at data-space (row=5, col=15):
-    # beam = (min_ss - corner_y, min_fs - corner_x) for each panel.
+    # Both panels put the beam at (min_ss - corner_y, min_fs - corner_x) = (5, 15)
     path = tmp_path / "p.geom"
     path.write_text(
         "res = 13333.3\nwavelength = 1.0\nclen = 0.1\n"
@@ -92,7 +91,7 @@ def test_multi_panel_beam_center_is_shared_data_space_center(tmp_path):
     row, col = geom.beam_center
     assert row == pytest.approx(5.0)
     assert col == pytest.approx(15.0)
-    # the whole point: a multi-panel geom can now build the indexer dict
+    # a multi-panel geometry builds the indexer dict
     assert geom.to_dict()["beam_center"] == (pytest.approx(5.0), pytest.approx(15.0))
 
 
@@ -129,7 +128,7 @@ def test_multipanel_layout_has_fixed_panel_selectors(multipanel_geom_file):
     assert geom.panel_layouts["1"].fixed == {1: 1}
     assert geom.panel_layouts["0"].dims == ["%", 0, "ss", "fs"]
     assert geom.panel_layouts["1"].event_axis == 0
-    # a multi-panel geometry now builds the indexer dict
+    # a multi-panel geometry builds the indexer dict
     assert geom.beam_center is not None
     assert geom.to_dict()["beam_center"] is not None
 
@@ -161,7 +160,7 @@ def test_lab_frame_bad_region_parsed(tmp_path):
 
 
 def test_unparseable_bad_region_warns(tmp_path):
-    # Silently dropping a region is how a geometry's masking goes missing.
+    # A dropped region would leave its pixels unmasked without notice
     path = tmp_path / "partial.geom"
     path.write_text(
         "clen = 0.1\nphoton_energy = 12398.0\nres = 13333.3\n"

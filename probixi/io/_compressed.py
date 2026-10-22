@@ -18,7 +18,8 @@ from .assemble import assemble_batch
 
 
 class Unsupported(ValueError):
-    """A valid format that this accelerator cannot decode."""
+    # A valid format the GPU decoder cannot handle; non-strict callers fall back to h5py
+    ...
 
 
 @dataclass(frozen=True)
@@ -46,12 +47,14 @@ class Layout:
         ids = [fid for fid, _ in filters]
         if not ids:
             raise Unsupported("uncompressed input uses the ordinary transfer path")
-        if ids[0] == 2:
+        if ids[0] == 2:  # HDF5 byte shuffle
             ids = ids[1:]
+        # HDF5 filter IDs: 1 deflate, 32000 LZF, 32004 LZ4, 32008 bitshuffle, 32015 Zstd
         if len(ids) != 1 or ids[0] not in (1, 32000, 32004, 32008, 32015):
             raise Unsupported("unsupported HDF5 filter pipeline")
         fid, cd = filters[-1]
         if fid == 32008:
+            # bitshuffle cd_values: [2] element size, [3] block size, [4] compressor
             if len(filters) != 1 or len(cd) < 3 or cd[2] != dt.itemsize:
                 raise Unsupported("unsupported bitshuffle parameters")
             codec = {0: None, 2: "LZ4", 3: "Zstd"}.get(
@@ -71,9 +74,9 @@ class Layout:
         return int(np.prod(self.shape)) * self.dtype.itemsize
 
     def blocks(self, raw, mask):
-        """Return compressed blocks (array or list), verbatim copies, shuffle settings
-        and checksum."""
+        # -> blocks, verbatim copies, (bitshuffle block, byte-shuffle flag), adler32
         size = self.frame_bytes
+        # mask is the HDF5 chunk filter mask: bit i set means filter i was skipped
         active = [
             (fid, cd) for i, (fid, cd) in enumerate(self.filters) if not mask & (1 << i)
         ]
@@ -88,6 +91,7 @@ class Layout:
             return [], [(0, 0, size)], (0, byte_shuffle), None
         fid, cd = active[0]
         if fid == 1:
+            # RFC 1950: 2-byte header, raw deflate, big-endian Adler-32 trailer
             if (
                 len(raw) < 6
                 or raw[0] & 15 != 8
@@ -107,6 +111,7 @@ class Layout:
             self._zstd(raw)
             return [(0, len(raw), 0, size)], [], (0, byte_shuffle), None
         if fid == 32008 and self.codec is None:
+            # bitshuffle default block: 8192 B target, multiple of 8 elements, >= 128
             block = (cd[3] if len(cd) > 3 else 0) or max(
                 128, (8192 // self.dtype.itemsize) // 8 * 8
             )
@@ -115,12 +120,14 @@ class Layout:
             return [], [(0, 0, size)], (block * self.dtype.itemsize, 0), None
         if len(raw) < 12:
             raise ValueError("truncated HDF5 compressed header")
+        # Header: big-endian u64 decoded size, u32 block bytes; each block u32 length
         n, block = struct.unpack_from(">QI", raw)
         if n != size or block == 0:
             raise ValueError("invalid HDF5 compressed size/block header")
         is_bit = fid == 32008
         if is_bit and block % (8 * self.dtype.itemsize):
             raise ValueError("invalid bitshuffle block size")
+        # bitshuffle stores the bytes past the last multiple of 8 elements verbatim
         shuffled = size - size % (8 * self.dtype.itemsize) if is_bit else size
         unpack = struct.Struct(">I").unpack_from
         zstd = self._zstd if self.codec == "Zstd" else None
@@ -138,6 +145,7 @@ class Layout:
             raise ValueError("truncated compressed block header") from None
         headers = np.array(headers, dtype=np.int64)
         dest = np.arange(len(headers), dtype=np.int64) * block
+        # rows: source offset, compressed length, output offset, output length
         blocks = np.stack(
             [
                 headers + 4,
@@ -149,6 +157,7 @@ class Layout:
         )
         copies = []
         if not is_bit:
+            # H5Z-LZ4 stores a block raw when compression would not shrink it
             plain = blocks[:, 1] == blocks[:, 3]
             copies = [(s, d, n) for s, n, d, _ in blocks[plain].tolist()]
             blocks = blocks[~plain]
@@ -163,20 +172,20 @@ class Layout:
     def _zstd(raw):
         if len(raw) < 5 or raw[:4] != b"\x28\xb5\x2f\xfd":
             raise ValueError("invalid Zstd frame")
+        # Frame header descriptor bits 0-1: dictionary ID, bit 2: content checksum
         if raw[4] & 7:
-            # Dictionary IDs and optional frame checksums need additional handling.
             raise Unsupported("Zstd dictionary/checksummed frame")
 
 
 def pack(chunks, parsed, decoder):
-    """Pack stored bytes, aligning compressed blocks as required by each codec."""
+    # Pinned host bytes plus a block table for one batched decoder launch
     records, copies, shuffle, checksums, parts = [], [], [], [], []
     position = 0
     for frame, ((_, raw), (blocks, plain, shuf, checksum)) in enumerate(
         zip(chunks, parsed)
     ):
         base = frame * decoder.stride
-        # One host copy per frame when arbitrary compressed-pointer alignment is allowed.
+        # Whole chunk once; blocks misaligned for the decoder are copied again aligned
         start = position
         parts.append((start, raw))
         position += len(raw)
@@ -213,7 +222,7 @@ def _frame_sources(d, lo, hi, open_dataset):
     result = {}
     for mapping in d.virtual_sources():
         filename = mapping.file_name
-        if filename == ".":
+        if filename == ".":  # HDF5 VDS: source lives in the virtual dataset's own file
             filename = d.file.filename
         elif not Path(filename).is_absolute():
             filename = str(Path(d.file.filename).parent / filename)
@@ -258,7 +267,7 @@ def _frame_sources(d, lo, hi, open_dataset):
 
 
 def _stage(d, start, end):
-    """Read a batch into pinned memory so its device copy can be asynchronous."""
+    # Pinned staging lets the copy run non_blocking; dtypes torch lacks stay numpy
     try:
         dtype = torch.from_numpy(np.empty(0, dtype=d.dtype)).dtype
     except (TypeError, ValueError):
@@ -276,6 +285,7 @@ def _cpu_chunks(sources, layouts, fds):
     if len(kinds) != 1 or not codecs <= {"Deflate", "LZF"}:
         return None
     layout = kinds.pop()
+    # A mask with every filter bit set means HDF5 stored the chunk unfiltered
     skipped, shuffled = (1 << len(layout.filters)) - 1, int(layout.filters[0][0] == 2)
     chunks = []
     for source, i in sources:
@@ -327,11 +337,12 @@ def _load_batches(pool, chunks, size, stride, ahead=3):
         n = len(batch)
         copies = [(k * stride, k * stride, size) for k in range(n)]
         empty = torch.empty((0, 4), dtype=torch.int64)
+        # Same payload as pack(): host bytes, block table, copies, shuffle, checksums
         yield host.view(-1), empty, copies, [c[4] for c in batch], [None] * n
 
 
 def _read_batches(entries, chosen, lo, hi, strict, decoder_for):
-    """CPU producer owns all HDF5 handles and pinned staging; it launches no kernels."""
+    # Producer thread: owns every HDF5 handle and pinned buffer, launches no kernels
     with ExitStack() as stack:
         opened, fds = {}, {}
         pool = stack.enter_context(ThreadPoolExecutor(len(os.sched_getaffinity(0))))
@@ -435,7 +446,7 @@ def _read_batches(entries, chosen, lo, hi, strict, decoder_for):
 def iter_gpu_frames(
     loader, chosen, lo, hi, device, dtype, batch_size, prefetch, kernel, strict
 ):
-    """Preserve logical batching/order while transporting compressed batches."""
+    # Decoded frames are re-batched to batch_size in input order
     q, stop = queue.Queue(max(1, prefetch)), threading.Event()
     sentinel = object()
     decoders = {}

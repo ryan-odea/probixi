@@ -26,7 +26,7 @@ PIXEL_SIZE = 150e-6
 WAVELENGTH = 1.3
 N_NOISE = 8  # seed/calibration frames (indices 0..N_NOISE-1)
 N_PLANTED = 2  # planted indexable frames following the noise frames
-# planted spots are dim + compact so blobs stay under the finder's size_max
+# planted spots are dim and compact so blobs stay under the finder's size_max
 PEAK_INTENSITY = 350.0
 PSF_SIGMA = 1.0
 CELL_FIXTURE = Path(__file__).parent / "fixtures" / "bR.cell"
@@ -37,8 +37,7 @@ REFINE = RefineConfig(max_iters=150, reassign_every=10)
 
 
 def _geom_text() -> str:
-    # corner_{x,y} put the beam at the frame center: read_geometry derives
-    # beam_center=(-corner_y,-corner_x); res=1/pixel_size; wl from photon_energy.
+    # corner_x = corner_y = -bc puts the beam at the frame centre; res = 1 / pixel_size
     bc = (DET - 1) / 2.0
     return (
         f"clen = {CLEN}\n"
@@ -194,7 +193,7 @@ def test_index_stream_yields_index_results_recovering_cell(
         # the recovered cell matches the planted bR target (sorted edges)
         edges = sorted([r.cell.a, r.cell.b, r.cell.c])
         assert all(abs(o - t) / t < 0.02 for o, t in zip(edges, tgt_edges))
-        # merge-ready stream predicts + integrates the full lattice
+        # merge-ready stream predicts and integrates the full lattice
         assert r.predicted_hkl is not None
         assert r.predicted_positions.shape[0] == r.predicted_hkl.shape[0]
 
@@ -478,8 +477,7 @@ def test_cli_missing_cell_without_peaks_only_fails(tmp_path, run_files, geom_pat
 
 
 def test_pipeline_resolves_a_concrete_device_by_default(run_files, geom_path):
-    # device=None must not reach torch as None: .to(None) is a silent no-op and
-    # the run would sit on CPU while reporting "auto"
+    # .to(None) is a silent no-op, so device=None would leave the run on CPU
     from probixi.probixi import auto_device
 
     lst_path, _, _ = run_files
@@ -501,9 +499,7 @@ def test_pipeline_normalises_a_string_device(run_files, geom_path):
 
 
 def _run_with_diffraction(tmp_path, geom_path, pipeline_cell, planted_U, n_planted):
-    # N_NOISE blank frames plus n_planted frames that actually diffract, which
-    # is what the radius measurement needs. Calibration draws its frames at
-    # random, so the diffracting frames have to outnumber the blanks.
+    # Calibration samples frames at random, so diffracting frames must outnumber blanks
     geom = read_geometry(geom_path).to_dict()
     frame, _ = sim.simulate_indexable_frame(
         geom,
@@ -522,8 +518,7 @@ def _run_with_diffraction(tmp_path, geom_path, pipeline_cell, planted_U, n_plant
 def test_calibrate_measures_the_integration_radii(
     tmp_path, geom_path, pipeline_cell, planted_U
 ):
-    # Measured on the frames carrying diffraction, disjoint from the ones
-    # calibration consumed, and ordered so IntegrateConfig accepts them.
+    # measured on diffracting frames outside the seed set, in increasing order
     lst_path = _run_with_diffraction(
         tmp_path, geom_path, pipeline_cell, planted_U, n_planted=20
     )
@@ -538,9 +533,7 @@ def test_calibrate_measures_the_integration_radii(
 
 
 def test_too_few_diffraction_frames_leave_the_radii_unmeasured(tmp_path, geom_path):
-    # Nothing to measure a profile on: the radii stay None and integration
-    # falls back to the documented default rather than inventing a size off a
-    # handful of blobs.
+    # blank frames give no profile, so integration keeps FALLBACK_RADII
     from probixi.indexer.indexer import FALLBACK_RADII
 
     noise = sim.simulate_noise_frames((DET, DET), N_NOISE + 8, seed=101)

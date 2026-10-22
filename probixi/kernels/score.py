@@ -9,6 +9,7 @@ from probixi.peakfinding.peaks.neighborhood import _separable_1d
 
 @triton.jit
 def prepare(F, MEAN, VAR, MASK, RM, RM2, N: tl.constexpr, B: tl.constexpr):
+    # residual r = min(x - mu, 5 sigma), and r^2, over valid pixels
     x = tl.program_id(0) * B + tl.arange(0, B)
     f = tl.load(F + x, x < N, 0).to(tl.float32)
     m = tl.load(MEAN + x, x < N, 0)
@@ -34,6 +35,7 @@ def background_vertical(
     OUTER: tl.constexpr,
     B: tl.constexpr,
 ):
+    # separable box sums: vertical here, horizontal in background_score; annulus = O - I
     i = tl.program_id(0) * B + tl.arange(0, B)
     row = i // W
     so = tl.full((B,), 0, tl.float32)
@@ -107,6 +109,7 @@ def background_score(
     var0 = tl.maximum(tl.load(VAR + i, i < H * W, 0), 1.0e-12)
     var = tl.maximum(var0, lv)
     if FLUX:
+        # flux model read + g mu, floored at FLOOR times the running variance
         base = READ + GAIN * tl.maximum(mean, 0.0)
         base = tl.maximum(tl.maximum(base, FLOOR * var0), 1.0e-12)
         var = tl.maximum(base, lv)
@@ -114,6 +117,7 @@ def background_score(
     mask = tl.load(MASK + i, i < H * W, 0)
     excess = f - mean
     z = tl.div_rn(excess, tl.sqrt(var))
+    # log BF of N(0, kappa^2) against N(0, 1), on valid upward pixels only
     raw = -LOGK + ((0.5 * z) * z) * BF_FACTOR
     bf = tl.where(mask & (f > mean), raw, 0.0)
     tl.store(MEAN_EFF + i, mean, i < H * W)
@@ -213,10 +217,11 @@ def filter_horizontal(
         c = col + d
         c = tl.where(c < 0, -c, tl.where(c >= W, 2 * W - 2 - c, c))
         sp += tl.load(TP + (i // W) * W + c, i < H * W, 0) * tl.load(AP + d + RP)
+    # T_s = sum u m z / sqrt(sum u^2 m) has unit variance whatever the mask hides
     z0 = tl.div_rn(s0, tl.sqrt(tl.maximum(tl.load(D0 + i, i < H * W, 1), 1.0e-12)))
     z1 = tl.div_rn(s1, tl.sqrt(tl.maximum(tl.load(D1 + i, i < H * W, 1), 1.0e-12)))
     z2 = tl.div_rn(s2, tl.sqrt(tl.maximum(tl.load(D2 + i, i < H * W, 1), 1.0e-12)))
-    logit = tl.div_rn(sp, tl.load(DP + i, i < H * W, 1))
+    logit = tl.div_rn(sp, tl.load(DP + i, i < H * W, 1))  # mask-weighted average
     post = tl.div_rn(1.0, 1.0 + tl.exp(-logit))
     mask = tl.load(MASK + i, i < H * W, 0)
     tl.store(MF + i, tl.maximum(tl.maximum(z0, z1), z2), i < H * W)
@@ -224,6 +229,7 @@ def filter_horizontal(
 
 
 class FusedScorer:
+    # local background, Bayes factor, matched-filter bank, and posterior in 5 passes
     def __init__(self, finder):
         self.finder = finder
         assert finder.local_background and finder.matched_filter
@@ -235,7 +241,7 @@ class FusedScorer:
         ]
         self.ap = _separable_1d(finder._kernel)
         self.r = [a.numel() // 2 for a in self.a]
-        assert self.r == sorted(self.r)
+        assert self.r == sorted(self.r)  # the filter loops span R2, the widest
 
     @torch.no_grad()
     def __call__(self, frame):

@@ -18,8 +18,7 @@ def _fake_mps(available: bool):
 
 
 def _fake_usable(monkeypatch, usable: bool):
-    # auto_device looks the probe up as a module global, so patching the name
-    # sidesteps its lru_cache and keeps these tests host-independent
+    # auto_device reads the probe as a module global; patching it bypasses the lru_cache
     monkeypatch.setattr(probixi_mod, "mps_is_usable", lambda: usable)
 
 
@@ -50,10 +49,7 @@ def test_auto_device_falls_back_to_cpu_without_an_accelerator(monkeypatch):
 
 
 def test_auto_device_tolerates_a_torch_build_without_mps(monkeypatch):
-    # torch.backends.mps is absent on some builds; that must not raise. Deleting
-    # the attribute cannot simulate it: torch.backends defines a module-level
-    # __getattr__ that re-imports the submodule, so getattr always finds it
-    # again. Swap the whole namespace for one that never had mps.
+    # torch.backends.__getattr__ re-imports a deleted mps, so replace the namespace
     monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
     monkeypatch.setattr(torch, "backends", types.SimpleNamespace())
     assert auto_device().type == "cpu"
@@ -87,8 +83,7 @@ def test_cli_named_device_is_honoured():
 
 
 def test_auto_device_skips_mps_when_its_shaders_do_not_compile(monkeypatch):
-    # Some Metal builds report a device but cannot compile the shaders behind
-    # torch.linalg, so a usable-looking MPS still has to be refused.
+    # Some Metal builds report MPS available but cannot compile torch.linalg shaders
     monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
     monkeypatch.setattr(torch.backends, "mps", _fake_mps(True), raising=False)
     _fake_usable(monkeypatch, False)

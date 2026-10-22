@@ -29,7 +29,7 @@ def test_known_cell_candidate_preserves_basis(geometry_dict, device, angles):
     cell = CellParams(14.97, 18.85, 18.89, *map(math.radians, angles))
     idx = Indexer(geometry_dict, cell, device=torch.device(device))
     B = cell_to_B(cell, device=device, dtype=idx.dtype)
-    # float32 round-trips through B_to_cell carry ~1e-7; a basis mix-up is O(1e-2)
+    # float32 B_to_cell followed by cell_to_B errs by ~1e-7; a basis mix-up by O(1e-2)
     atol = 1e-5
     U = _axis_angle_to_rotation(B.new_tensor([0.4, -0.7, 1.2]))
     A = U @ B

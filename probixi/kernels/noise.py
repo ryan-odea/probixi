@@ -11,6 +11,7 @@ NAN = tl.constexpr(tl.PropagateNan.ALL)
 def pixel_update(
     F, MEAN, M2, N, CLIP, n_elem, robust_k, ROBUST: tl.constexpr, B: tl.constexpr
 ):
+    # Welford update with N frames before x; ROBUST clips x at mean + k sigma first
     i = tl.program_id(0) * B + tl.arange(0, B)
     live = i < n_elem
     x = tl.load(F + i, live, 0.0)
@@ -30,6 +31,7 @@ def pixel_update(
 
 @triton.jit
 def welford(X, MEAN, M2, N, n_elem, B: tl.constexpr):
+    # N already counts x, unlike pixel_update
     i = tl.program_id(0) * B + tl.arange(0, B)
     live = i < n_elem
     x = tl.load(X + i, live, 0.0)
@@ -92,6 +94,7 @@ def predict(
     SCALE: tl.constexpr,
     B: tl.constexpr,
 ):
+    # mean = sum_k w_k mu_k (code -1: unused slot); var = pixel var, x s^2 if SCALE
     i = tl.program_id(0) * B + tl.arange(0, B)
     live = i < n_elem
     mean = source_mean(C0, w0, i, live, PM, RM, BIN, AM, AVALID, APID, SINGLE)
@@ -141,6 +144,7 @@ def update_stat(stat, x):
 
 
 def cached(owner, name, tensor):
+    # int32 copy of tensor, cached on owner until tensor_key(tensor) changes
     key = tensor_key(tensor)
     hit = getattr(owner, "_i32_cache", {}).get(name)
     if hit is None or hit[0] != key:
