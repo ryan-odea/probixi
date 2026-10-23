@@ -17,6 +17,7 @@ from ..peaks.neighborhood import (
     local_mean_var,
     matched_filter_z,
 )
+TAIL_RATIO_TOL = 1.5
 
 
 @dataclass
@@ -370,6 +371,10 @@ class ThresholdCalibration:
         The max(T) cutoff separating quiet from active frames.
     mf_scales : tuple[float, ...]
         Matched-filter kernel scales used (passed to the finder).
+    tail_ratio : float
+        Median over seed frames of the positive-tail blob count over the mirrored
+        one at the grid minimum: 1 for symmetric noise, larger for low-count
+        (Poisson) noise.
     """
 
     mu0: float
@@ -380,6 +385,7 @@ class ThresholdCalibration:
     n_quiet_frames: int
     quiet_max_T: float
     mf_scales: tuple[float, ...]
+    tail_ratio: float = 1.0
 
     def apply(self, finder) -> "ThresholdCalibration":
         """Install the matched-filter bank and threshold on ``finder``.
@@ -418,6 +424,7 @@ def calibrate_threshold(
     *,
     target_noise_peaks: float = 10.0,
     quiet_quantile: float = 0.5,
+    tail_ratio_tol: float = TAIL_RATIO_TOL,
     mf_scales: tuple[float, ...] = (1.0, 1.6, 2.4),
     local_inner_radius: int = 4,
     local_outer_radius: int = 9,
@@ -451,6 +458,10 @@ def calibrate_threshold(
         The seed frames, read one at a time.
     target_noise_peaks : float
         Target median blobs per quiet frame above the chosen threshold.
+    tail_ratio_tol : float
+        Largest positive-over-mirrored blob-count ratio at the grid minimum for
+        which the mirrored tail still stands in for the positive one; above it
+        the quietest ``quiet_quantile`` of frames are used instead.
     quiet_quantile : float
         Last-resort fraction of lowest-max(T) frames used as the quiet set, when the
         null-based cut (mu0 + sigma0*sqrt(2 ln N)) finds fewer than 4 quiet frames
@@ -576,6 +587,9 @@ def calibrate_threshold(
 
     t_body = torch.cat(body_pieces)
     mu0, sigma0 = _empirical_null_central_matching(t_body)
+    pos0 = torch.tensor([c[0] for c in counts], dtype=torch.float32)
+    neg0 = torch.tensor([m[0] for m in mirrored], dtype=torch.float32)
+    tail_ratio = float((pos0 / neg0.clamp_min(1.0)).median())
 
     tmax_t = torch.tensor(t_max_per_frame)
     # quiet frames: max(T) below the null extreme mu0 + sigma0*sqrt(2 ln N)
@@ -583,18 +597,31 @@ def calibrate_threshold(
     z_extreme = math.sqrt(2.0 * math.log(max(n_valid, 2)))
     quiet_max_T = mu0 + sigma0 * z_extreme
     quiet_idx = [i for i, m in enumerate(t_max_per_frame) if m <= quiet_max_T]
-    if len(quiet_idx) < 4:
-        # no quiet frames: count noise on the mirrored tail
+    n_rank = max(4, int(round(quiet_quantile * n_frames)))
+    counts_t: Optional[Tensor] = None
+    if len(quiet_idx) < 4 and tail_ratio > tail_ratio_tol:
+        warnings.warn(
+            f"no signal-free seed frame by the null extreme and the noise is skewed "
+            f"(positive/mirrored tail {tail_ratio:.1f}); using the {n_rank} quietest frames",
+            stacklevel=2,
+        )
+        order = torch.argsort(tmax_t).tolist()
+        quiet_idx = order[:n_rank]
+        quiet_max_T = float(tmax_t[quiet_idx[-1]])
+        c = torch.tensor(counts, dtype=torch.float32)[quiet_idx]
+        counts_t = (c - c[:, -1:]).median(dim=0).values
+    elif len(quiet_idx) < 4:
         counts_t = torch.tensor(mirrored, dtype=torch.float32).median(dim=0).values
         quiet_idx = []
         if float(counts_t[0]) <= float(target_noise_peaks):  # tail too sparse to use
             order = torch.argsort(tmax_t).tolist()
-            quiet_idx = order[: max(4, int(round(quiet_quantile * n_frames)))]
+            quiet_idx = order[:n_rank]
             quiet_max_T = float(tmax_t[quiet_idx[-1]])
-    if quiet_idx:
+    if quiet_idx and counts_t is None:
         counts_t = (
             torch.tensor(counts, dtype=torch.float32)[quiet_idx].median(dim=0).values
         )
+    assert counts_t is not None
 
     ok = counts_t <= float(target_noise_peaks)
     if bool(ok.any()):
@@ -619,6 +646,7 @@ def calibrate_threshold(
         n_quiet_frames=len(quiet_idx),
         quiet_max_T=quiet_max_T,
         mf_scales=tuple(float(s) for s in mf_scales),
+        tail_ratio=tail_ratio,
     )
     if finder is not None:
         result.apply(finder)

@@ -33,9 +33,9 @@ pip install git+https://github.com/ryan-odea/probixi.git
 
 ## Using `probixi`
 
-The command line goes from raw frames to integrated reflections in one call. The Python API returns lazy streams whose results remain on the GPU until collected, and any stage can feed further torch processing.
+The command line interface is intended to be a streamlined approach for using `probixi`, whereas the python API provides more granularity and fine-tuning (if required). Potentially of interest for other developers, the Python API returns lazy streams whose results remain on the GPU until collected, and any stage can feed further torch processing.
 
-`probixi` calibrates on a set of seed frames before detection. `--gif` writes an animation of the noise model over those frames.
+`probixi` calibrates on a set of seed frames before detection. If you would like to inspect your noise model, `--gif` writes an animation over these seed frames.
 
 Via the CLI:
 
@@ -80,7 +80,7 @@ with DataOffloader(
 
 ### DuckDB output
 
-The `.stream` format is convenient for interop with `partialator`, but querying a
+The `.stream` format is convenient for use with the CrystFEL suite (i.e. with `partialator`), but querying a
 run means re-parsing a large text file. `probixi` can instead write a
 [DuckDB](https://duckdb.org) database. Please note this may be the default in the future.
 
@@ -138,7 +138,7 @@ amb.reindex(result, output="detwinned.duckdb")
 
 ### Using `probixi` as only a peakfinder
 
-If you prefer your own indexer, use `probixi` as a peakfinder only, through the CLI's `--peaks-only` flag or the Python API's `peak_stream`. The exported peaks also improve conventional indexers on strong data (see the [vignettes](https://probixi.readthedocs.io)).
+If you prefer your own indexer, you can use `probixi` as a peakfinder only, through the CLI's `--peaks-only` flag or the Python API's `peak_stream`. The exported peaks also improve conventional indexers on strong data (see the [vignettes](https://probixi.readthedocs.io)).
 
 Via the CLI:
 
@@ -194,4 +194,4 @@ If you would like to contribute actively by merging code, please open a PR with 
 
 1. Code is formatted with `isort`, then `black`, followed by a `ruff --check`. This will initiate on PR, so it might be best to check beforehand.
 2. Docstrings are minimally on user-facing functions in [`numpy` style](https://numpydoc.readthedocs.io/en/latest/format.html). 
-3. Comments, or some explanation (in PR) for the additions, limited to the scope of the project. For a bug fix, the explanation belongs in the PR rather than in the code.
+3. Comments, or some explanation (in PR) for the additions, limited to the scope of the project. For a bug fix, please explain your approach to resolving an issue in the PR.

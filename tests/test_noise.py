@@ -342,3 +342,34 @@ def test_value_flagged_pixels_stay_out_of_the_stats_and_the_peak_mask():
     assert abs(float(nm.pixel.mean_[20, 30] - mean[20, 30])) < 1e-3
     (res,) = list(PeakFinder(nm).peak_stream([frame]))
     assert not bool(res.valid_mask[20, 30]) and bool(res.valid_mask[20, 31])
+
+
+def _poisson_frames(shape, n, lam=0.3, seed=0):
+    g = torch.Generator().manual_seed(seed)
+    return [
+        torch.poisson(torch.full(shape, float(lam)), generator=g).to(DTYPE)
+        for _ in range(n)
+    ]
+
+
+def test_calibrate_threshold_uses_the_quietest_frames_on_skewed_low_count_noise():
+    """Poisson noise at a fraction of a count: no frame passes the Gaussian extreme and
+    the mirrored tail under-counts, so the quietest frames set the threshold; the
+    noise-blob target then holds on the positive tail, with or without spots."""
+    shape = (192, 192)
+    quiet = _poisson_frames(shape, 32, lam=0.3, seed=7)
+    nm = NoiseModel(shape, mode="online", dtype=DTYPE)
+    calibrate_noise(nm, quiet, rng_seed=0).apply(nm)
+    tc = calibrate_threshold(nm, quiet, target_noise_peaks=5.0, rng_seed=0)
+    assert tc.tail_ratio > 1.5 and tc.n_quiet_frames >= 4
+    assert tc.achieved_noise_peaks <= 5.0
+    rng = np.random.default_rng(1)
+    yy, xx = np.mgrid[: shape[0], : shape[1]]
+    hits = []
+    for f in quiet:
+        spots = np.zeros(shape, dtype=np.float32)
+        for r, c in rng.uniform(10, 182, size=(10, 2)):
+            spots += 30.0 * np.exp(-((yy - r) ** 2 + (xx - c) ** 2) / 2.0)
+        hits.append(f + torch.from_numpy(spots))
+    th = calibrate_threshold(nm, hits, target_noise_peaks=5.0, rng_seed=0)
+    assert abs(th.threshold - tc.threshold) <= 0.5
