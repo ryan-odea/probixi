@@ -14,12 +14,12 @@ from .cbf import is_cbf
 
 PathLike = Union[str, Path]
 
-# CrystFEL fs/ss axis spec, e.g. "+0.003976x +0.999992y" (exponents allowed).
+# CrystFEL fs/ss axis spec, e.g. "+0.003976x +0.999992y" (exponents allowed)
 _AXIS_RE = re.compile(r"([+-]?[0-9]*\.?[0-9]+(?:[eE][+-]?[0-9]+)?)\s*([xy])")
 
 
 def parse_axis_vector(spec: object) -> Optional[tuple[float, float]]:
-    # Parse a CrystFEL ``fs``/``ss`` axis spec into an ``(x, y)`` tuple.
+    # z components are ignored; None when the spec has neither x nor y
     if not isinstance(spec, str):
         return None
     comps = {axis: float(val) for val, axis in _AXIS_RE.findall(spec)}
@@ -28,8 +28,8 @@ def parse_axis_vector(spec: object) -> Optional[tuple[float, float]]:
     return (comps.get("x", 0.0), comps.get("y", 0.0))
 
 
-EV_ANGSTROM = 12398.419843320026
-_CLEN_MM_THRESHOLD_M = 2.0
+EV_ANGSTROM = 12398.419843320026  # hc in eV Å
+_CLEN_MM_THRESHOLD_M = 2.0  # an HDF5 clen above this is in mm
 
 DETECTOR_KEYS = ("detector", "detector_type", "type")
 FLAG_KEYS = ("flag_lessthan", "flag_morethan", "flag_equal")
@@ -51,9 +51,7 @@ class DataLayout:
 
 @dataclass
 class MaskSpec:
-    # CrystFEL bad-pixel mask reference (mask/mask_file + bit flags): a pixel is GOOD
-    # iff (value & mask_good) == mask_good and (value & mask_bad) == 0.
-
+    # CrystFEL rule: good iff (v & mask_good) == mask_good and (v & mask_bad) == 0
     mask_file: Optional[str]
     mask_path: Optional[str]
     mask_good: int = 0
@@ -85,29 +83,40 @@ class Geometry:
     Parameters
     ----------
     parameters : dict
-        Top-level scalar/string parameters (e.g. ``clen``, ``res``).
+        Top-level parameters, numbers coerced, for example ``clen`` and ``res``.
     panels : dict[str, dict]
-        Per-panel definitions, keyed by panel name.
+        Panel definitions by name: every section with bounds and a corner.
     bad_regions : list[BadRegion]
-        Masked-out detector regions.
+        Masked regions, in data space (``min_fs`` ...) or the lab frame
+        (``min_x`` ...).
     detector_type : str, optional
-        Detector type, if declared.
+        Declared detector type.
     distance : float, optional
-        Detector/Camera length ``clen`` in meters, or None if given as an HDF5 path.
+        Detector distance in m, ``clen`` plus the mean ``coffset``. ``None`` until
+        an HDF5-path ``clen`` is read from the data.
     beam_center : tuple[float, float], optional
-        Beam center ``(row, col)``, only when a single panel is defined.
+        Beam position ``(row, col)`` in data-space pixels: the panel mean of
+        ``min_ss - corner_y`` and ``min_fs - corner_x``, which assumes
+        ``fs = +x`` and ``ss = +y``.
     wavelength : float, optional
-        Wavelength in angstroms.
+        Wavelength in Å, from ``wavelength`` or ``photon_energy``. ``None`` until
+        an HDF5-path photon energy is read from the data.
     pixel_size : float, optional
-        Pixel size in meters.
+        Pixel size in m, ``1 / res``.
     adu_per_photon : float, optional
-        Detector gain (ADU per photon), from ``adu_per_photon`` or
-        ``adu_per_eV * photon_energy`` when both are given numerically.
+        Gain in ADU per photon, from ``adu_per_photon`` or
+        ``adu_per_eV * photon_energy`` when both are numbers.
+    data_layout : DataLayout, optional
+        The ``data`` path and the ``dimN`` axis roles.
+    mask_spec : MaskSpec, optional
+        Top-level ``mask``, ``mask_file``, ``mask_good`` and ``mask_bad``.
+    panel_layouts, panel_masks : dict
+        Per-panel overrides of ``data_layout`` and ``mask_spec``.
     panel_flags : dict, optional
-        Per panel, the ``(key, value)`` pixel-value flags (``flag_lessthan``,
-        ``flag_morethan``, ``flag_equal``, in file order, with integer values as
-        in CrystFEL). A flag outside a panel section applies to the panels first
-        mentioned after it; ``None`` when the file has none.
+        Per panel, the ``flag_lessthan``, ``flag_morethan`` and ``flag_equal``
+        entries as ``(key, value)`` in file order, with integer values as in
+        CrystFEL. A flag outside a panel section applies to the panels that first
+        appear after it. ``None`` when the file has none.
     """
 
     parameters: dict
@@ -126,6 +135,7 @@ class Geometry:
     panel_flags: Optional[dict[str, list[tuple[str, int]]]] = None
 
     def to_dict(self) -> dict:
+        """Return the indexer geometry; ValueError if a required field is unset."""
         missing = [
             name
             for name, value in (
@@ -159,7 +169,9 @@ def read_geometry(path: PathLike) -> Geometry:
     Returns
     -------
     Geometry
-        Parsed geometry with panels, bad regions, and derived beam/optics fields.
+        Panels, bad regions, and the derived beam and optics fields. An HDF5-path
+        ``clen`` or ``photon_energy`` stays unresolved until :class:`DataLoader`
+        reads the first data file.
 
     Raises
     ------
@@ -183,6 +195,7 @@ def read_geometry(path: PathLike) -> Geometry:
             if "/" in key:
                 name, sub = key.split("/", 1)
                 per_name.setdefault(name, {})[sub] = _coerce(value)
+                # A panel inherits the top-level flags that precede its first line
                 found = panel_flags.setdefault(name, list(flags))
             else:
                 sub = key
@@ -260,6 +273,7 @@ def read_geometry(path: PathLike) -> Geometry:
 
 
 def _beam_center(panels: dict[str, dict]) -> Optional[tuple[float, float]]:
+    # Data-space (row, col) of lab (0, 0), assuming fs = +x and ss = +y per panel
     rows: list[float] = []
     cols: list[float] = []
     for p in panels.values():
@@ -286,6 +300,7 @@ def _build_data_layout(
 ) -> Optional[DataLayout]:
     if data_path is None and not dim_map:
         return None
+    # dimN roles: "%" the event axis, "ss"/"fs" the panel axes, an integer fixed
     ndim = (max(dim_map) + 1) if dim_map else 0
     dims: list = [dim_map.get(i) for i in range(ndim)]
     event_axis = ss_axis = fs_axis = None
@@ -326,7 +341,7 @@ def _parse_mask_bits(value: object, default: int = 0) -> int:
         return int(value)
     if isinstance(value, int):
         return value
-    return int(str(value).strip(), 0)
+    return int(str(value).strip(), 0)  # base 0 accepts 0x... hex
 
 
 def _build_mask_spec(d: dict) -> Optional[MaskSpec]:
@@ -393,7 +408,7 @@ def _photon_energy(parameters: dict) -> Optional[float]:
 
 
 def _pixel_size(parameters: dict) -> Optional[float]:
-    res = parameters.get("res")
+    res = parameters.get("res")  # pixels per metre
     if isinstance(res, (int, float)) and res > 0:
         return 1.0 / float(res)
     return None
@@ -431,7 +446,7 @@ def _flag_value(value: str) -> Optional[int]:
 
 
 def resolve_dynamic_fields(geometry: Geometry, data_file: PathLike) -> Geometry:
-    # Fill in HDF5-path-valued clen/photon_energy from the data file.
+    # Fill in HDF5-path-valued clen/photon_energy from the data file
     clen_path = geometry.parameters.get("clen")
     pe_path = geometry.parameters.get("photon_energy")
     need_clen = geometry.distance is None and isinstance(clen_path, str)
@@ -458,6 +473,7 @@ def resolve_dynamic_fields(geometry: Geometry, data_file: PathLike) -> Geometry:
 
 
 def match_events(f: h5py.File, pattern: str) -> list[str]:
+    # Natural-sorted names n under the "%" parent that hold a dataset at n + rest
     parent, _, rest = pattern.partition("%")
     if "%" in rest:
         raise ValueError(f"more than one '%' in {pattern!r} is not supported")
@@ -472,6 +488,7 @@ def match_events(f: h5py.File, pattern: str) -> list[str]:
 
 
 def _dataset_mean(f: h5py.File, path: str) -> Optional[float]:
+    # A per-event ("%") path is averaged over every event
     paths = [path]
     if "%" in path:
         paths = [path.replace("%", n) for n in match_events(f, path)]

@@ -41,26 +41,25 @@ def render_frame(
     cmap: str = "gray",
     dpi: int = 150,
 ) -> Path:
-    """Render a detector frame with peak/reflection overlays to an image file.
+    """Draw a frame with its peaks and reflections and save it as an image.
 
     Parameters
     ----------
     image : array-like
-        ``(H, W)`` detector frame (torch tensor or numpy array).
+        ``(H, W)`` frame, a torch tensor or numpy array.
     path : str or Path
-        Output image path (extension picks the format, e.g. ``.png``).
+        Output file; the extension sets the format.
     peaks : array-like, optional
-        ``(N, 2)`` detected peak ``(row, col)`` positions, drawn as open circles.
+        ``(N, 2)`` detected peak positions ``(row, col)``, drawn as open circles.
     reflections : array-like, optional
-        ``(M, 2)`` predicted/indexed reflection ``(row, col)`` positions, drawn
-        as crosses.
+        ``(M, 2)`` predicted or indexed positions ``(row, col)``, drawn as crosses.
     mask : array-like, optional
-        ``(H, W)`` bool array of valid pixels; invalid pixels are excluded from
-        the intensity scaling.
+        ``(H, W)`` boolean map of valid pixels. Only valid, finite pixels set the
+        display range; without a mask, every finite pixel does.
     title : str, optional
-        Title drawn above the frame.
-    vmin_pct, vmax_pct : float
-        Percentiles of the valid pixels used as the display intensity range.
+        Title above the frame.
+    vmin_pct, vmax_pct : float, default 1.0 and 99.5
+        Percentiles of those pixels that bound the display range.
     cmap : str, default "gray"
         Matplotlib colormap.
     dpi : int, default 150
@@ -69,7 +68,7 @@ def render_frame(
     Returns
     -------
     Path
-        The written image path.
+        The written file.
     """
     img = _to_numpy(image).astype(np.float32)
     valid = _to_numpy(mask).astype(bool) if mask is not None else np.isfinite(img)

@@ -192,9 +192,7 @@ def test_integrate_rings_does_not_double_count_overlapping_disks():
 
 
 def test_integrate_rings_falls_back_to_model_variance_on_a_thin_annulus():
-    # At a panel edge the annulus has too few samples to estimate its own
-    # variance. Rather than zeroing sigma -- which would drop the reflection at
-    # write time -- fall back to the calibrated per-pixel variance.
+    # A thin edge annulus uses the model variance; sigma 0 would drop the reflection
     excess, var, mean = _flat_frame(1.0)
     excess[0, 0] = 20.0
     _, intensity, sigma, _, _, _, *_ = integrate_rings(
@@ -210,8 +208,7 @@ def test_integrate_rings_falls_back_to_model_variance_on_a_thin_annulus():
 
 
 def test_integrate_rings_prefers_the_annulus_variance_when_it_has_samples():
-    # With a wide annulus the measured spread wins over the model variance, so a
-    # noisy background raises sigma even when the model variance is tiny.
+    # A wide annulus measures its own spread, which overrides the tiny model variance
     excess, var, mean = _flat_frame(5.0)
     var = torch.full(SHAPE, 1e-6, dtype=torch.float32)
     torch.manual_seed(0)
@@ -273,8 +270,7 @@ def test_flag_overlaps_counts_shared_pixels_across_lattices_and_clears_scratch(
 ):
     idxr = Indexer(geometry_dict, cell)
     idxr._measured_radii = (4.0, 6.0, 8.0)
-    # one crystal per lattice; their single centres are 4 px apart, so the
-    # radius-4 disks share pixels even though neither conflicts alone
+    # one centre per lattice, 4 px apart: their radius-4 disks share pixels
     keep = torch.ones(1, dtype=torch.bool)
     a = _result(cell, torch.tensor([[20.0, 20.0]]), keep)
     b = _result(cell, torch.tensor([[20.0, 24.0]]), keep)
@@ -327,8 +323,7 @@ def test_valid_multi_lattice_configs_are_accepted():
 
 
 def test_index_lattices_recovers_two_overlaid_lattices(geometry_dict, cell):
-    # superpose the peaks of two distinct orientations on one frame; peeling
-    # must find both, and neither twice
+    # two orientations on one frame; peeling must find each exactly once
     seed = SeedConfig(
         n_directions=1500,
         n_spin=60,
@@ -410,8 +405,7 @@ def test_learned_signal_radius_matches_the_analytic_gaussian_radius(psf):
 
 
 def test_learned_radius_is_not_widened_by_neighbouring_reflections():
-    # A dense lattice puts neighbours just outside the spot. A threshold
-    # crossing would be pushed out by their flux; the fit must not be.
+    # A dense lattice adds neighbour flux just outside each spot; the fit ignores it
     psf = 2.0
     axis = torch.arange(20, 300, 15).float()
     gy, gx = torch.meshgrid(axis, axis, indexing="ij")
@@ -504,9 +498,7 @@ def _ring_data(
     extra=None,
     amplitude=2000.0,
 ):
-    # spots of per-centre width psf and amplitude (scalar or (N,)) on Gaussian
-    # noise over a background (a per-spot local offset the annulus must remove);
-    # |q| is the distance from the frame centre
+    # Spots on Gaussian noise plus a linear ramp the annulus removes; |q| from centre
     g = torch.Generator().manual_seed(seed)
     yy, xx = torch.meshgrid(
         torch.arange(shape[0]).float(), torch.arange(shape[1]).float(), indexing="ij"
@@ -572,8 +564,7 @@ def test_auto_aperture_absorbs_a_resolution_trend_common_to_all_crystals():
 
 
 def test_auto_aperture_falls_back_to_flux_when_crystals_broaden_differently():
-    # mosaicity differing between crystals: the |q| slope of the captured
-    # fraction is crystal-specific and no scale or B removes it
+    # mosaicity differs between crystals, so no scale or B removes the |q| slope
     centres, frame, u = _crystals(seed=5)
     eta = 1.6 * (frame.float() / frame.max())
     choice, diag = _decide(0.9 + eta * u, centres, frame)
@@ -583,8 +574,7 @@ def test_auto_aperture_falls_back_to_flux_when_crystals_broaden_differently():
 
 
 def test_auto_aperture_keeps_snr_when_the_flux_disk_noise_costs_more():
-    # crystal-specific broadening again, but narrow spots fading into the noise
-    # at high |q|: the flux disk's extra background outweighs the bias
+    # crystal-specific broadening with faint high-|q| spots: flux-disk noise dominates
     centres, frame, u = _crystals(n_cryst=20, per=20, seed=2)
     eta = frame.float() / frame.max()
     amp = 3000.0 * torch.exp(-4 * u * u)

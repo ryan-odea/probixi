@@ -53,9 +53,6 @@ def _lcls_geom(
     return path
 
 
-# --- resolving HDF5-path clen / photon_energy against the data file ----------
-
-
 def test_resolves_hdf5_clen_and_wavelength_from_data_file(tmp_path):
     geom = _lcls_geom(tmp_path, coffset=0.583)
     # encoder in mm (|value| > 2 m -> read as mm); energy chosen so lambda == 1 A
@@ -71,7 +68,7 @@ def test_resolves_hdf5_clen_and_wavelength_from_data_file(tmp_path):
     # clen = mean(encoder) mm -> m + coffset = -0.5 + 0.583
     assert g.distance == pytest.approx(0.083)
     assert g.wavelength == pytest.approx(1.0)
-    # the whole point: the geometry dict is now complete for the indexer
+    # the resolved geometry supplies every field the indexer needs
     d = g.to_dict()
     assert d["clen"] == pytest.approx(0.083)
     assert d["wavelength"] == pytest.approx(1.0)
@@ -103,7 +100,6 @@ def test_missing_clen_dataset_warns_and_leaves_unresolved(tmp_path):
 
 
 def test_clen_path_naming_a_group_warns_not_crashes(tmp_path):
-    # a clen path pointing at a group (not a dataset) must warn, not crash
     geom = _lcls_geom(tmp_path, clen="/entry/data", photon_energy=ENERGY_PATH)
     _, lst = sim.write_cxi_run(
         tmp_path,
@@ -116,9 +112,6 @@ def test_clen_path_naming_a_group_warns_not_crashes(tmp_path):
     assert g.wavelength == pytest.approx(
         EV_ANGSTROM / 12398.0
     )  # the valid one still resolves
-
-
-# --- honoring the geom data= path over the first-3-D fallback ----------------
 
 
 def test_scan_h5_honors_geom_data_path_over_decoy(tmp_path, geom_file):
@@ -141,9 +134,6 @@ def test_iter_frames_reads_real_data_not_decoy(tmp_path, geom_file):
     assert torch.equal(out, torch.as_tensor(frames, dtype=torch.float32))
 
 
-# --- fast-path invariance for plain stacks -----------------------------------
-
-
 def test_plain_stack_keeps_fast_path_with_and_without_geom(tmp_path, geom_file):
     h5, _ = sim.write_run(tmp_path, _frames(5, 8, 6, seed=7))
     info_no = scan_h5(h5)
@@ -151,9 +141,6 @@ def test_plain_stack_keeps_fast_path_with_and_without_geom(tmp_path, geom_file):
     assert info_no.placements is None and info_geo.placements is None
     assert info_no.frame_shape == info_geo.frame_shape == (8, 6)
     assert info_geo.dataset == "/entry/data/data"
-
-
-# --- multi-panel / 4-D assembly ----------------------------------------------
 
 
 def test_multipanel_assembly_recovers_dataspace_image(tmp_path, multipanel_geom_file):
@@ -189,9 +176,6 @@ def test_multipanel_layout_mismatch_fails_fast(tmp_path, multipanel_geom_file):
     _, lst = sim.write_multipanel_run(tmp_path, bad)
     with pytest.raises(ValueError, match="panel"):
         DataLoader(lst, multipanel_geom_file)
-
-
-# --- end-to-end smoke over a multi-panel run ---------------------------------
 
 
 def test_probixi_builds_and_runs_on_multipanel(

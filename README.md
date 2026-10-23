@@ -17,33 +17,33 @@ experimental](https://img.shields.io/badge/lifecycle-experimental-orange.svg)](h
 
 ![image](https://raw.githubusercontent.com/ryan-odea/Probixi/main/docs/assets/br_fel.gif)
 
-## Installing the Package
-
-You can install via Pypi with pip:
+## Installation
 
 ```bash
 pip install probixi
 ```
 
-Or the latest development version with
+On Linux with CUDA, the `gpu` extra adds the Triton kernels and nvCOMP decompression. Without it, `probixi` runs its reference implementations on the same device.
+
+```bash
+pip install "probixi[gpu]"
+```
+
+The development version:
 
 ```bash
 pip install git+https://github.com/ryan-odea/probixi.git
 ```
 
-## Using `probixi`
+## Usage
 
-The command line interface is intended to be a streamlined approach for using `probixi`, whereas the python API provides more granularity and fine-tuning (if required). Potentially of interest for other developers, the Python API returns lazy streams whose results remain on the GPU until collected, and any stage can feed further torch processing.
-
-`probixi` calibrates on a set of seed frames before detection. If you would like to inspect your noise model, `--gif` writes an animation over these seed frames.
-
-Via the CLI:
+The command line goes from raw frames to integrated reflections in one call. The Python API returns lazy streams whose results stay on the GPU until collected, and any stage can feed further torch processing. `probixi` calibrates on a set of seed frames before detection, and `--gif` writes an animation of the noise model over the first frames of the run.
 
 ```bash
 probixi -i files.lst -g myGeometry.geom -p myCell.cell -o stream.stream --device cuda --gif myNoiseModel.gif
 ```
 
-Or with python:
+The same run in Python:
 
 ```python
 import torch
@@ -62,9 +62,6 @@ cal = pipeline.calibrate(n_seed=1636)
 print(f"kappa={cal.kappa:.2f}  prior_peak={cal.prior_peak:.4f}  "
       f"threshold={pipeline.threshold_calibration.threshold:.2f}")
 
-# Stream every frame through detect -> index -> predict + integrate. The stream
-# is lazy and each result stays on the GPU until you touch it, so you can branch
-# off any downstream processing with torch
 with DataOffloader(
     "stream.stream",
     geometry=pipeline.geometry,
@@ -74,21 +71,18 @@ with DataOffloader(
 ) as off:
     for result in pipeline.index_stream(pipeline.frames(), batch_size=8):
         off.write(result)  # or: pipeline.index_stream(...).to_stream(off)
-        print(f"frame {result.frame_index}: "
-              f"{result.n_indexed}/{result.n_peaks} indexed (rmsd {result.rmsd:.4f})")
+        for crystal in result.crystals:
+            print(f"frame {result.frame_index}: "
+                  f"{crystal.n_indexed}/{crystal.n_peaks} indexed (rmsd {crystal.rmsd:.4f})")
 ```
 
 ### DuckDB output
 
-The `.stream` format is convenient for use with the CrystFEL suite (i.e. with `partialator`), but querying a
-run means re-parsing a large text file. `probixi` can instead write a
-[DuckDB](https://duckdb.org) database. Please note this may be the default in the future.
+A `.stream` file suits `partialator`, but querying it means parsing a large text file. An output ending in `.duckdb` or `.db` is written as a [DuckDB](https://duckdb.org) database instead, which may become the default.
 
 ```bash
 probixi -i files.lst -g myGeometry.geom -p myCell.cell -o run.duckdb --device cuda
 ```
-
-Or with python:
 
 ```python
 stream = pipeline.index_stream(pipeline.frames(), batch_size=8)
@@ -101,30 +95,17 @@ stream.to_db(
 )
 ```
 
-The database holds run metadata as small tables (`geometry`, `panels`, `cell`) plus:
+The database holds the run metadata (`geometry`, `panels`, `cell`, `integration`) and four result tables joined on `frame_id`: `frames`, `crystals`, `reflections`, and `peaks`. The [schema](https://probixi.readthedocs.io/en/latest/overview/io.html#database) lists their columns.
 
-- **`frames`**, keyed by `frame_id` (a hash of `filename//event`) with additional per-frame information
-- **`crystals`**, one row per accepted lattice, with its cell, orientation, and fit statistics
-- **`reflections`**, the integrated Miller indices (`h k l`, `I`, `sigma`, `peak`,
-  `background`, `fs/ss`, panel, resolution, the pixels integrated and the noise model's
-  background under them, and the predicted position before snapping)
-- **`peaks`**, the peak-search results per frame
+### Indexing ambiguity
 
-
-### Resolving indexing ambiguity
-
-When the lattice symmetry is higher than the structure's point group, each crystal can
-be indexed in more than one way. `probixi-resolve` clusters the crystals in a database
-into the two choices and reindexes the ones on the wrong side. It is a torch/Triton implementation of
-CrystFEL's `ambigator`, by Thomas White.
+When the lattice symmetry is higher than the structure's point group, each crystal can be indexed in more than one way. `probixi-resolve` clusters the crystals in a database into the two choices and reindexes those on the wrong side. It is a torch and Triton implementation of CrystFEL's `ambigator`, by Thomas White.
 
 ```bash
 probixi-resolve -i run.duckdb -y 3 -w 321 -o detwinned.duckdb
 ```
 
-Without `-o` the database is rewritten in place. Reindexing transforms `reflections`
-`h k l` along with the matching `crystals` reciprocal axes and cell parameters, and
-records every assignment in an `ambiguity` table. The same thing from python:
+Without `-o` the database is rewritten in place. Reindexing transforms `h k l` in `reflections` together with the reciprocal axes and cell of each crystal in `crystals`, and records every assignment in an `ambiguity` table. In Python:
 
 ```python
 from probixi import Ambigator
@@ -135,18 +116,13 @@ print(f"{result.n_reindexed}/{len(result)} crystals reindexed")
 amb.reindex(result, output="detwinned.duckdb")
 ```
 
+### Peak export for other indexers
 
-### Using `probixi` as only a peakfinder
-
-If you prefer your own indexer, you can use `probixi` as a peakfinder only, through the CLI's `--peaks-only` flag or the Python API's `peak_stream`. The exported peaks also improve conventional indexers on strong data (see the [vignettes](https://probixi.readthedocs.io)).
-
-Via the CLI:
+To use another indexer, run `probixi` as a peakfinder with the CLI's `--peaks-only` flag or the Python API's `peak_stream`. The output directory receives one CXI file per input file, a `peaks.lst`, and a geometry for `indexamajig --peaks=cxi`. The exported peaks also improve conventional indexers on strong data (see the [vignettes](https://probixi.readthedocs.io)).
 
 ```bash
-probixi -i files.lst -g myGeometry.geom -o peaks.stream --peaks-only --device cuda
+probixi -i files.lst -g myGeometry.geom -o peaks/ --peaks-only --device cuda
 ```
-
-Or with python:
 
 ```python
 import torch
@@ -158,40 +134,37 @@ pipeline = Probixi(
     geometry_file="myGeometry.geom",
     device=torch.device("cuda"),
 )
-
-# Calibrate the noise model + detection threshold on the seed frames, as usual.
 pipeline.calibrate(n_seed=1636)
 
 peaks = pipeline.peak_stream(pipeline.frames(), estimate_scale=False)
 with PeakOffloader(
-    "peaks.stream",
-    geometry=pipeline.geometry,
+    "peaks/",
     geometry_file="myGeometry.geom",
     files=pipeline.metadata.files,
 ) as off:
     for result in peaks:
-        if len(result):       # skip blanks; export only frames with peaks
+        if len(result):  # frames without peaks are not exported
             off.write(result)
 ```
 
 ## Dependencies
 
-- python >= 3.9
+- python >= 3.10
   - click
+  - deflate
+  - duckdb
   - h5py
   - hdf5plugin
-  - numpy
-  - torch
   - matplotlib
+  - numpy
   - pillow
-  - duckdb
+  - torch
+- optional (`gpu`): triton >= 3.5, nvidia-libnvcomp-cu12
 
 ## Contributing
 
-There are many different ways to contribute to further development of this tool. If you experience a bug or would like an additional feature, please open up a [ticket](https://github.com/ryan-odea/probixi/issues). 
+Report bugs and request features on the [issue tracker](https://github.com/ryan-odea/probixi/issues). A pull request should meet the following conventions:
 
-If you would like to contribute actively by merging code, please open a PR with the following:
-
-1. Code is formatted with `isort`, then `black`, followed by a `ruff --check`. This will initiate on PR, so it might be best to check beforehand.
-2. Docstrings are minimally on user-facing functions in [`numpy` style](https://numpydoc.readthedocs.io/en/latest/format.html). 
-3. Comments, or some explanation (in PR) for the additions, limited to the scope of the project. For a bug fix, please explain your approach to resolving an issue in the PR.
+1. Code is formatted with `isort`, then `black`, and passes `ruff check`. The same checks run on every PR.
+2. Only user-facing objects carry docstrings, in [`numpy` style](https://numpydoc.readthedocs.io/en/latest/format.html).
+3. Comments are single lines that state what the code does not show: a reason, a unit, a convention, or a source. The explanation of a bug fix belongs in the PR, not in the code.

@@ -74,9 +74,6 @@ def _single_panel_geom(
     return path
 
 
-# --- the CrystFEL two-clause bit rule ----------------------------------------
-
-
 def test_mask_bits_all_ones_bad_only_zero_is_good():
     raw = np.array([[0, 1, 0xFF]], dtype=np.uint32)
     good = _apply_mask_bits(raw, mask_good=0x0, mask_bad=0xFFFFFFFF)
@@ -94,9 +91,6 @@ def test_mask_bits_handles_signed_input():
     raw = np.array([0, 1, 2], dtype=np.int32)
     good = _apply_mask_bits(raw, mask_good=0x0, mask_bad=0xFFFFFFFF)
     assert good.tolist() == [True, False, False]
-
-
-# --- read_mask: external file, missing file, multi-panel assembly ------------
 
 
 def test_read_mask_external_file_2d(tmp_path):
@@ -165,8 +159,7 @@ def test_read_mask_override_raises_instead_of_skipping(tmp_path):
 
 
 def test_read_mask_override_reads_master_pixel_mask(tmp_path):
-    # a geometry with no mask, pointed at an Eiger master file: NeXus flags,
-    # any set bit (1 gap, 16 noisy, ...) is bad
+    # no geometry mask, an Eiger master file: any set NeXus bit (1 gap, 16 noisy) is bad
     mask = np.zeros((8, 6), dtype=np.uint32)
     mask[2, 3] = 1
     mask[5, 1] = 16
@@ -226,9 +219,6 @@ def test_read_mask_assembles_multipanel(tmp_path, multipanel_geom_file):
     assert not bool(good[1, 1])
     assert not bool(good[2, 32 + 2])
     assert bool(good[0, 0])
-
-
-# --- folding into the pipeline valid mask ------------------------------------
 
 
 def test_static_mask_combines_hdf5_mask_maxadu_and_bad_region(tmp_path, cell_file):
@@ -291,12 +281,8 @@ def test_static_mask_without_mask_spec_is_unaffected(tmp_path, cell_file):
     assert bool(px.noise.valid_mask.all())
 
 
-# --- mask_edge_pixels and lab-frame bad regions -------------------------------
-
-
 def test_mask_edge_pixels_masks_panel_border(tmp_path, cell_file):
-    # ASIC borders carry charge-sharing artefacts; CrystFEL masks them via
-    # mask_edge_pixels and probixi must do the same or edge blobs dominate.
+    # CrystFEL masks charge-sharing artefacts at ASIC borders with mask_edge_pixels
     h, w = 8, 6
     geom_path = _single_panel_geom(tmp_path, h=h, w=w, mask_edge_pixels=1)
     frames = np.full((4, h, w), 100.0, dtype=np.float32)
@@ -318,9 +304,7 @@ def test_mask_edge_pixels_masks_panel_border(tmp_path, cell_file):
 
 
 def test_lab_frame_bad_region_masks_expected_pixels(tmp_path, cell_file):
-    # badregion/min_x..max_y are lab-frame pixel units about the beam centre.
-    # This panel maps (ss, fs) -> (x, y) = (fs - 2.5, ss - 3.5), so the box
-    # [-0.6, 0.6]^2 covers fs in {2, 3} and ss in {3, 4}.
+    # Lab (x, y) = (fs - 2.5, ss - 3.5) px, so [-0.6, 0.6]^2 covers fs 2-3 and ss 3-4
     h, w = 8, 6
     geom_path = _single_panel_geom(
         tmp_path, h=h, w=w, lab_bad_region=(-0.6, 0.6, -0.6, 0.6)

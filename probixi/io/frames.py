@@ -39,26 +39,32 @@ _BSHUF_LZ4 = 2
 
 
 class DataLoader:
-    """Resolve HDF5 or CBF files, geometry, and cell up front for frame loading.
+    """Resolve the listed files, geometry and cell before frames are read.
 
     Parameters
     ----------
     list_file : str or Path
-        Text file listing HDF5 or CBF paths or ``path //event`` entries in
-        processing order (``#``/``;`` comments allowed). Consecutive events share
-        batched IO. A CBF file (``.cbf``, ``.cbf.gz``, ``.cbf.bz2``) holds one
-        image, so ``//0`` is its only event; unreadable files are skipped with a
-        warning, but a CBF variant the reader does not decode raises
-        :class:`~probixi.io.cbf.UnsupportedCbf`. Per-event paths take ``path tag-N//``.
+        CrystFEL list of HDF5 or CBF files in processing order. An entry is
+        ``path``, ``path //N`` for event ``N``, or ``path tag-N//`` for a named
+        event; lines starting with ``#`` or ``;`` are comments. Consecutive events
+        of one file are read as one block. A CBF file (``.cbf``, ``.cbf.gz``,
+        ``.cbf.bz2``) holds one image. Unreadable files are skipped with a warning.
     geometry_file : str or Path, optional
-        CrystFEL ``.geom`` file to parse.
+        CrystFEL ``.geom`` file.
     cell_file : str or Path, optional
-        CrystFEL ``.cell`` file to parse.
+        CrystFEL ``.cell`` file.
 
     Attributes
     ----------
     metadata : Metadata
-        Resolved files, geometry, cell, and frame counts.
+        Resolved files, geometry, cell and frame counts.
+
+    Raises
+    ------
+    UnsupportedCbf
+        For a CBF variant the reader does not decode.
+    ValueError
+        If no listed file is readable or an event lies outside its file.
     """
 
     def __init__(
@@ -200,8 +206,7 @@ def _split_entry(entry: str) -> tuple[str, Optional[str], Optional[int]]:
 
 
 def _scan_cbf_files(paths: Sequence[str]) -> dict:
-    # Header reads of thousands of files wait on the filesystem, so they overlap.
-    # A failed scan is kept as the exception for the caller to report per entry.
+    # Threaded header reads overlap filesystem waits; a failed scan returns its error
     paths = [path for path in dict.fromkeys(paths) if is_cbf(path)]
 
     def scan(path):
@@ -214,7 +219,6 @@ def _scan_cbf_files(paths: Sequence[str]) -> dict:
         return dict(zip(paths, pool.map(scan, paths)))
 
 
-# Prefetch - hides io behind (hopefully) useful work
 _PREFETCH_SENTINEL = object()
 
 
@@ -237,6 +241,7 @@ def _bshuf_lz4_decoder(dset: h5py.Dataset, frame_shape):
 
     def decode(raw) -> np.ndarray:
         assert bitshuffle is not None
+        # Chunk header: u64 size, u32 block bytes; bitshuffle takes block elements
         blk = struct.unpack(">i", raw[8:12])[0]
         comp = np.frombuffer(raw[12:], dtype=np.uint8)
         return bitshuffle.decompress_lz4(comp, shape, dt, blk // itemsize if blk else 0)
@@ -259,6 +264,7 @@ def _iter_file_frames(info, f_lo, f_hi, pool, window, stop, fast_state):
             dset = node
             decoder = _bshuf_lz4_decoder(dset, info.frame_shape)
             if decoder is not None:
+                # The direct-chunk decoder is checked once per run against h5py
                 if not fast_state["checked"]:
                     raw0 = dset.id.read_direct_chunk((f_lo, 0, 0))[1]
                     fast_state["ok"] = bool(
@@ -291,7 +297,7 @@ def _iter_file_frames(info, f_lo, f_hi, pool, window, stop, fast_state):
 
 
 def _read_cbf_raw(path):
-    # Checked data bytes of a byte-offset file for the device; other files decoded
+    # Byte-offset files stay encoded for the device decoder; others decode here
     header, data = read_cbf_data(path)
     if header.compression == "byte_offset":
         return header, data, path
@@ -303,6 +309,7 @@ def _stage(buf, pin):
     raws = [e for e in buf if isinstance(e, tuple)]
     if not raws:
         return buf, None, None
+    # Rows of 16-byte multiples with >= 16 trailing zeros, as kernels/cbf expects
     stride = (max(len(e[1]) for e in raws) + 31) // 16 * 16
     with torch.cuda.device(pin):
         stage = torch.empty((len(raws), stride), dtype=torch.uint8, pin_memory=True)
@@ -331,6 +338,7 @@ def _device_frames(item, kernel, device, dtype):
             continue
         header = buf[i][0]
         j = i
+        # One kernel launch per run of CBF entries with equal shape and dtype
         while (
             j < len(buf)
             and isinstance(buf[j], tuple)
@@ -460,44 +468,41 @@ def iter_frames(
     prefetch: int = 2,
     decode_workers: int = 8,
 ) -> Iterator[Tensor]:
-    """Stream frames from a loader as tensors, prefetching reads off-thread.
-
-    A background worker reads into a bounded queue to overlap IO and compute.
-    When CUDA, Triton and nvCOMP are available, supported full-frame chunks are
-    transferred compressed and decoded on device, including simple whole-frame
-    VDS mappings. Other formats retain HDF5 decoding. GPU input uses internal
-    batches of eight without changing the yielded batch shape. The reference
-    path optionally decodes bitshuffle/LZ4 across ``decode_workers`` threads.
-    CBF files are read several files ahead across twice ``decode_workers``
-    threads; byte-offset data are decoded on the device, other CBF data and
-    CPU devices on the CPU, then moved to ``device`` from pinned memory. A list
-    that selects any CBF file takes this path for all of its files.
-    Use ``probixi.kernels.use_engine`` to force a backend for comparisons.
+    """Yield frames from a loader as tensors, read ahead on a worker thread.
 
     Parameters
     ----------
     loader : DataLoader
-        Source loader whose ``metadata.files`` are read.
+        Source of ``metadata.files``.
     files : sequence of str, optional
-        Subset of filenames to stream; defaults to all files in the loader.
+        Keys of ``loader.files`` to read; all by default.
     start, stop : int, optional
-        Global frame index range ``[start, stop)``; defaults to the full run.
+        Global frame range ``[start, stop)``; the full run by default.
     device : torch.device, optional
-        Target device; frames are cast to ``dtype`` after transfer.
+        Target device; frames are cast to ``dtype`` after the transfer.
     dtype : torch.dtype, default torch.float32
-        Output tensor dtype.
+        Output dtype.
     batch_size : int, default 1
         Frames per yielded tensor.
     prefetch : int, default 2
-        Max batches the worker reads ahead.
+        Batches the worker may read ahead.
     decode_workers : int, default 8
-        Threads used to decode bitshuffle-LZ4 chunks or CBF files in parallel.
+        CPU threads that decode bitshuffle-LZ4 chunks, doubled to read CBF files.
 
     Yields
     ------
     torch.Tensor
-        A single frame ``(H, W)`` when ``batch_size == 1``, else a stacked
-        batch ``(B, H, W)``.
+        One frame ``(H, W)`` when ``batch_size == 1``, else a batch ``(B, H, W)``;
+        the last batch may be shorter.
+
+    Notes
+    -----
+    On CUDA with Triton and nvCOMP, chunks that hold one whole frame, including
+    whole-frame VDS mappings, are copied compressed and decoded on the device;
+    other layouts are decoded by HDF5. CBF byte-offset data are decoded on the
+    device and other CBF data on the CPU. A selection that includes a CBF file
+    reads its HDF5 files without the compressed transfer.
+    :func:`probixi.kernels.use_engine` forces a backend.
     """
     metadata = loader.metadata
     entries = metadata.files
@@ -556,7 +561,7 @@ def iter_frames(
             lo,
             hi,
             q,
-            8 if cbf_kernel else batch_size,
+            8 if cbf_kernel else batch_size,  # CBF files per device decode
             stop_event,
             pool,
             window,

@@ -203,9 +203,7 @@ def test_integrate_with_no_observed_peaks_keeps_predicted_positions():
 
 
 def test_integrate_deblend_owns_shared_pixel_by_nearest_then_lowest_index():
-    # M>1 nearest-owner deblend: a pixel in the overlap of two disks is assigned
-    # to exactly one centre (nearest, ties broken by lowest index), never
-    # double-counted.
+    # a pixel in two disks goes to the nearest centre, ties to the lowest index
     shape = (48, 48)
     positions = torch.tensor([[24.0, 22.0], [24.0, 26.0]], dtype=torch.float32)
     excess = torch.zeros(shape, dtype=torch.float32)
@@ -227,8 +225,7 @@ def test_integrate_deblend_owns_shared_pixel_by_nearest_then_lowest_index():
 
 @pytest.mark.mps
 def test_integrate_deblend_runs_on_mps_and_matches_cpu():
-    # The M>1 deblend tie-break uses an int64 scatter_reduce, which has no MPS
-    # kernel in some builds; guard that it runs and agrees with CPU.
+    # the tie-break's int64 scatter_reduce lacks an MPS kernel in some torch builds
     if not torch.backends.mps.is_available():
         pytest.skip("MPS device not available")
     shape = (48, 48)
@@ -330,8 +327,7 @@ def test_integrate_reports_disk_pixels_and_model_background():
 
 
 def test_detector_q_max_uses_panel_corners_not_raw_array_corners(cell):
-    # Two panels stacked in the raw array; the second sits far off-axis physically,
-    # so the raw array's corners are not the detector's physical extremes.
+    # the second panel sits far off-axis, beyond what the raw array's corners imply
     n = SHAPE[0]
     geom = dict(_synthetic_geometry())
     near = dict(

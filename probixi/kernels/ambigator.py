@@ -20,6 +20,7 @@ def correlate(
     STEPS: tl.constexpr,
     B: tl.constexpr,
 ):
+    # one program per (crystal, partner): shell-averaged CC over shared ASU slots
     pid = tl.program_id(0)
     i = pid // C
     j = tl.load(J + pid)

@@ -241,9 +241,6 @@ def test_axis_angle_rejects_bad_last_dim():
         _axis_angle_to_rotation(torch.zeros(2, dtype=DT))
 
 
-# --- per-crystal cell refinement -------------------------------------------------
-
-
 def _monoclinic(a, b, c, beta_deg):
     return CellParams(
         a,
@@ -274,7 +271,7 @@ def _refine_from_target(target, truth, seed=0, max_index=3, noise=0.0):
 
 
 def test_refine_cell_recovers_a_uniformly_scaled_cell():
-    # a 0.5% larger true cell (the b2ar case) must be recovered from the target
+    # a true cell 0.5% larger than the target, as in the b2AR data
     target = _monoclinic(111.94, 172.23, 41.23, 106.20)
     truth = _monoclinic(112.50, 173.09, 41.44, 106.20)
     out, _ = _refine_from_target(target, truth)

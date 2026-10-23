@@ -6,7 +6,7 @@ import torch
 import torch.nn.functional as F
 from torch import Tensor
 
-# Local-background annulus one-sided clip level (sigma): residuals above this are signal.
+# Upper clip, in sigma, on residuals entering the local-background annulus
 LOCAL_BG_CLIP_K = 5.0
 
 
@@ -114,11 +114,7 @@ def local_mean_var(
     count: Optional[Tensor] = None,
     clip_hi: Optional[Tensor] = None,
 ) -> tuple[Tensor, Tensor]:
-    # Per-pixel mean and variance of residual over the masked annulus
-    # inner_radius < |offset|_inf <= outer_radius (outer box minus inner box)
-    # Excluding the inner box keeps a peak from biasing its own background.
-    # ``count`` (annulus valid-pixel count) may be supplied precomputed, else None.
-    # ``clip_hi`` one-sided-caps the residual so annulus signal does not bias mean/var.
+    # Masked mean, var of min(residual, clip_hi) over inner < |offset|_inf <= outer
     m = mask.to(residual.dtype)
     if clip_hi is not None:
         residual = torch.minimum(residual, clip_hi.to(residual.dtype))
@@ -162,6 +158,7 @@ def matched_filter_z(
         pad = (kW // 2, kW // 2, kH // 2, kH // 2)
         m = mask.to(z).view(1, 1, *mask.shape)
         den = F.conv2d(F.pad(m, pad), (u * u).view(1, 1, kH, kW)).reshape(mask.shape)
+    # den = sum(u^2 m): unit variance under H0 however much of u is masked
     return num.reshape(z.shape) / den.clamp_min(1e-12).sqrt()
 
 
@@ -177,7 +174,7 @@ def matched_filter_denominator(mask: Tensor, kernel: Tensor) -> Tensor:
 
 @torch.no_grad()
 def mask_denominator(mask: Tensor, kernel: Tensor) -> Tensor:
-    # Per-pixel normaliser for smoothing
+    # Per-pixel kernel weight on valid pixels, the normaliser of smooth_logits
     if kernel.ndim != 2:
         raise ValueError("kernel must be 2D")
     kH, kW = kernel.shape

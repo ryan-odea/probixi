@@ -1,25 +1,3 @@
-"""Resolve indexing ambiguities in a probixi DuckDB run.
-
-The algorithm is ``ambigator``, created by Thomas White as part of CrystFEL,
-which implements the method of W. Brehm and K. Diederichs, "Breaking the
-indexing ambiguity in serial crystallography", Acta Cryst. D70 (2014) 101-109.
-This module reads the database :class:`~probixi.io.db.DuckDBOffloader` writes.
-
-Differences from the CrystFEL program:
-
-* Assignments are updated simultaneously rather than in place during a pass,
-  because the pass is a single vectorised reduction.
-* ``ncorr`` partners per crystal are drawn once and those with fewer than four
-  reflections in common are dropped, rather than drawing until ``ncorr``
-  usable partners are found.
-* A pair is usable when four reflections are shared across all resolution
-  groups, not when four are shared in the last group alone.
-* The correlation matrix, f/g graph and assignment files are not written; the
-  per-pass means are returned in :attr:`AmbigatorResult.history` instead.
-* Reflections the database flags as masked or overlapping are left out, as
-  they are left out of the stream.
-"""
-
 from __future__ import annotations
 
 import math
@@ -40,10 +18,10 @@ PathLike = Union[str, Path]
 
 _RADIX = 1 << 21
 _HALF = _RADIX // 2
-_PAD = 0x7FFFFFFF
+_PAD = 0x7FFFFFFF  # int32 max: pads the end of every sorted run
 _MIN_COMMON = 4
 
-# CC shells as 1/d in nm^-1
+# CC shells as 1/d in nm^-1; 1 to 2 nm^-1 (10 to 5 A) is not correlated
 _GROUPS = ((None, 1.0), (2.0, 4.0), (4.0, None))
 
 _AXES = {"h": 0, "k": 1, "l": 2}
@@ -51,7 +29,7 @@ _TERM = re.compile(r"([+-]?)(\d*)([hkl])")
 _IDENTITY = ((1, 0, 0), (0, 1, 0), (0, 0, 1))
 _INVERSION = "-h,-k,-l"
 
-# Generators of the point groups
+# generators of the rotation point groups; a Laue group adds the inversion
 _GENERATORS = {
     "1": (),
     "2_uaa": ("h,-k,-l",),
@@ -85,7 +63,16 @@ _LAUE = {
 
 
 def parse_operator(text: str) -> tuple[tuple[int, ...], ...]:
-    """Parse ``"k,h,-l"`` into M with (h', k', l') = M @ (h, k, l)."""
+    """Parse an operator such as ``"k,h,-l"`` into M with (h', k', l') = M (h, k, l).
+
+    Components may carry integer coefficients (``"2h-k"``). Spaces and ``*`` are
+    ignored.
+
+    Raises
+    ------
+    ValueError
+        If ``text`` does not have three parsable components.
+    """
     parts = text.strip().lower().replace(" ", "").replace("*", "").split(",")
     if len(parts) != 3:
         raise ValueError(f"operator needs three components: {text!r}")
@@ -108,7 +95,20 @@ def _multiply(a, b):
 
 
 def point_group_ops(name: str) -> list[tuple[tuple[int, ...], ...]]:
-    """Operations of a Hermann-Mauguin point group"""
+    """Return the operations of a point group as integer matrices on (h, k, l).
+
+    Parameters
+    ----------
+    name : str
+        Hermann-Mauguin symbol of a rotation group, such as ``"321"``, or of a
+        Laue group, such as ``"-3m1"``, which adds the inversion. ``"2"`` and
+        ``"2/m"`` take a unique axis as ``"2_uab"``; the default axis is c.
+
+    Returns
+    -------
+    list of tuple
+        Sorted matrices M with (h', k', l') = M (h, k, l).
+    """
     base, _, axis = name.strip().replace(" ", "").partition("_ua")
     centric = base in _LAUE
     base = _LAUE.get(base, base)
@@ -139,7 +139,25 @@ def point_group_ops(name: str) -> list[tuple[tuple[int, ...], ...]]:
 
 
 def ambiguity_operator(symmetry: str, apparent: str):
-    """The operation relating the two indexing choices of ``symmetry``."""
+    """Return the operator that relates the two indexing choices.
+
+    Parameters
+    ----------
+    symmetry : str
+        Point group of the structure, such as ``"3"``.
+    apparent : str
+        Point group of the lattice, such as ``"321"``.
+
+    Returns
+    -------
+    tuple
+        The first operation of ``apparent``, in sorted order, not in ``symmetry``.
+
+    Raises
+    ------
+    ValueError
+        If ``symmetry`` is not a subgroup of index 2 in ``apparent``.
+    """
     target = set(point_group_ops(symmetry))
     lattice = point_group_ops(apparent)
     if not target.issubset(lattice):
@@ -181,7 +199,7 @@ class AmbigatorResult:
 
     @property
     def n_reindexed(self) -> int:
-        """Crystals assigned to the reindexed side."""
+        """Number of crystals assigned to the reindexed side."""
         return int(self.assignments.sum())
 
 
@@ -192,20 +210,38 @@ class Ambigator:
     ----------
     path : str or Path
         A ``.duckdb`` file written by :class:`~probixi.io.db.DuckDBOffloader`.
-        Only ``reflections`` is read; :meth:`reindex` also writes ``crystals``.
+        :meth:`resolve` reads ``reflections``; :meth:`reindex` also writes
+        ``reflections``, ``crystals``, and ``ambiguity``.
     symmetry : str
-        Actual point group of the structure, e.g. ``"3"``.
+        Point group of the structure, such as ``"3"``.
     apparent : str, optional
-        Apparent (lattice) point group, e.g. ``"321"``. The ambiguity operator
-        is derived from it and ``symmetry``.
+        Point group of the lattice, such as ``"321"``, from which the ambiguity
+        operator is derived.
     operator : str, optional
-        The ambiguity operator given directly, e.g. ``"k,h,-l"``. Mutually
-        exclusive with ``apparent``; one of the two is required.
+        Ambiguity operator, such as ``"k,h,-l"``. Give exactly one of
+        ``apparent`` and ``operator``.
     lowres, highres : float, optional
         Resolution limits in Angstrom. Setting either replaces the three
-        automatic resolution shells with a single one over the given range.
+        default shells, d > 10, 5 to 2.5, and d < 2.5 Angstrom, with one shell
+        over the given range.
     device : torch.device, optional
         Defaults to CUDA when available, else CPU.
+
+    Notes
+    -----
+    The method is that of Brehm and Diederichs (2014), Acta Cryst. D70,
+    101-109, as implemented in CrystFEL's ``ambigator`` by Thomas White.
+    Differences from ``ambigator``:
+
+    * A pass updates every assignment at once, as one vectorised reduction.
+    * The ``ncorr`` partners of each crystal are drawn once, and partners with
+      fewer than four common reflections are dropped rather than redrawn.
+    * A pair is usable when it shares four reflections over all shells, not
+      four in the last shell.
+    * No correlation matrix, f/g graph, or assignment file is written;
+      :attr:`AmbigatorResult.history` holds the per-pass means.
+    * Reflections the database flags as masked or overlapping are excluded,
+      as they are from the stream.
     """
 
     def __init__(
@@ -228,7 +264,7 @@ class Ambigator:
             if operator is not None
             else ambiguity_operator(symmetry, apparent)
         )
-        # database holds 1/d in nm^-1 NOT A
+        # lowres and highres are d in A; the database holds 1/d in nm^-1
         self._rmin = 0.0 if lowres is None else 10.0 / float(lowres)
         self._rmax = math.inf if highres is None else 10.0 / float(highres)
         self._auto_res = lowres is None and highres is None
@@ -257,6 +293,11 @@ class Ambigator:
         Returns
         -------
         AmbigatorResult
+
+        Raises
+        ------
+        ValueError
+            If the database holds fewer than two crystals with usable reflections.
         """
         ids, offsets, plain, reindexed, n_groups = self._load()
         n = len(ids)
@@ -267,7 +308,7 @@ class Ambigator:
         gen = torch.Generator().manual_seed(int(seed))
 
         partners = torch.randint(0, n - 1, (n, ncorr), generator=gen)
-        partners += partners >= torch.arange(n).unsqueeze(1)
+        partners += partners >= torch.arange(n).unsqueeze(1)  # skip self, stay uniform
         partners = partners.to(self.device, torch.int32)
         assignments = (torch.rand(n, generator=gen) > 0.5).to(self.device)
 
@@ -295,19 +336,21 @@ class Ambigator:
     def reindex(
         self, result: AmbigatorResult, output: Optional[PathLike] = None
     ) -> Path:
-        """Apply ``result`` to the database, in place.
+        """Write ``result`` to the database, or to a copy at ``output``.
 
-        Every assignment lands in an ``ambiguity`` table; the reindexed side
-        also has its ``reflections`` hkl and its ``crystals`` reciprocal axes
-        and cell parameters transformed. Not idempotent.
+        Every assignment is written to an ``ambiguity`` table. For the
+        reindexed crystals, ``reflections`` h, k, l and the ``crystals``
+        reciprocal axes and cell parameters are transformed. The update is one
+        transaction, rolled back on error. A second call transforms the same
+        crystals again.
 
         Parameters
         ----------
         result : AmbigatorResult
             From :meth:`resolve` on this same database.
         output : str or Path, optional
-            Reindex a copy written here instead, leaving the original alone.
-            Overwritten if it exists.
+            Path of a copy to reindex, leaving ``path`` unchanged. An existing
+            file is overwritten.
 
         Returns
         -------
@@ -330,7 +373,7 @@ class Ambigator:
                 "CREATE OR REPLACE TABLE ambiguity "
                 "(crystal_id VARCHAR PRIMARY KEY, assignment UTINYINT)"
             )
-            # registered rather than executemany'd: the latter is orders slower
+            # register() inserts in bulk; executemany is orders of magnitude slower
             conn.register("_assignments", assignments)
             conn.execute("INSERT INTO ambiguity SELECT * FROM _assignments")
             conn.execute(
@@ -362,7 +405,7 @@ class Ambigator:
         return target
 
     def _destination(self, output) -> Path:
-        # Copy the database
+        # file to write: path itself, or a copy at output with its .wal sidecar
         if output is None:
             return self.path
         target = Path(output)
@@ -374,14 +417,12 @@ class Ambigator:
         if source_wal.exists():
             shutil.copyfile(source_wal, target_wal)
         else:
-            # a stale sidecar of whatever used to be there would get replayed
+            # DuckDB would replay a stale .wal left at the target into the copy
             target_wal.unlink(missing_ok=True)
         return target
 
-    # LOADING =========================
-
     def _load(self):
-        # Merge each crystal's reflections into sorted CSR runs of ASU slots.
+        # CSR runs per crystal of (ASU slot, mean I, shell), by plain and twin slot
         clauses = ["intensity IS NOT NULL", "isfinite(intensity)", "sigma > 0"]
         clauses += ["COALESCE(n_masked, 0) = 0", "COALESCE(n_overlap, 0) = 0"]
         if self._rmin > 0.0:
@@ -421,6 +462,7 @@ class Ambigator:
         asu = _to_asu(hkl, ops)
         twin = _to_asu(_apply(asu, self.operator), ops)
 
+        # a reflection whose twin is its own ASU slot cannot tell the choices apart
         keep = (group >= 0) & (asu != twin).any(dim=1)
         if not int(keep.sum()):
             raise ValueError(
@@ -436,6 +478,7 @@ class Ambigator:
         slot, twin_slot = inverse
         n_slots = max(1, slots.numel())
 
+        # symmetry equivalents within one crystal merge to their mean intensity
         merged, where_merged = torch.unique(
             crystal * n_slots + slot, return_inverse=True
         )
@@ -458,7 +501,7 @@ class Ambigator:
         return ids, offsets, plain, reindexed, n_groups
 
     def _groups(self, resolution: Tensor):
-        # Resolution shell per reflection
+        # shell index per reflection; -1 outside every shell
         if not self._auto_res:
             return torch.zeros_like(resolution, dtype=torch.int32), 1
         group = torch.full_like(resolution, -1, dtype=torch.int32)
@@ -472,7 +515,7 @@ class Ambigator:
         return group, len(_GROUPS)
 
     def _refresh_cells(self, conn, flipped: str) -> None:
-        # Recompute cell parameters from the reindexed reciprocal axes.
+        # recompute cell parameters from the reindexed reciprocal axes
         stars = [f"{s}star_{x}" for s in "abc" for x in "xyz"]
         fetched = conn.execute(
             f"SELECT crystal_id, {', '.join(stars)} FROM crystals WHERE {flipped} "
@@ -495,7 +538,7 @@ class Ambigator:
             )
             for i, j in ((1, 2), (0, 2), (0, 1))
         ]
-        edges = edges * 10.0
+        edges = edges * 10.0  # nm to A
         cells = {
             "crystal_id": fetched["crystal_id"],
             **{f"cell_{n}_A": edges[:, i].numpy() for i, n in enumerate("abc")},
@@ -512,8 +555,6 @@ class Ambigator:
             + " FROM refreshed WHERE crystals.crystal_id = refreshed.crystal_id"
         )
 
-    # CORRELATION =========================
-
     def _correlate(self, offsets, left, right, partners, n_groups):
         keys_a, vals_a, groups_a = left
         keys_b, vals_b, _ = right
@@ -525,7 +566,7 @@ class Ambigator:
 
 
 def _format_operator(op) -> str:
-    # 3x3 matrix back to the "k,h,-l"
+    # inverse of parse_operator: matrix to "k,h,-l" text
     terms = []
     for row in op:
         text = "".join(
@@ -548,7 +589,7 @@ def _apply(hkl: Tensor, op) -> Tensor:
 
 
 def _encode(hkl: Tensor) -> Tensor:
-    # Pack Miller indices into one int64
+    # pack hkl into one int64, 21 bits per index
     if hkl.numel() and int(hkl.abs().max()) >= _HALF:
         raise ValueError("Miller indices exceed the packing range")
     shifted = hkl + _HALF
@@ -561,6 +602,7 @@ def _decode(code: Tensor) -> Tensor:
 
 
 def _to_asu(hkl: Tensor, ops) -> Tensor:
+    # representative of each hkl: the equivalent with the largest packed code
     unique, inverse = torch.unique(_encode(hkl), return_inverse=True)
     distinct = _decode(unique)
     best = best_key = None
@@ -577,7 +619,7 @@ def _to_asu(hkl: Tensor, ops) -> Tensor:
 
 
 def _cc_from_sums(sxy, sx, sy, sx2, sy2, count, n_groups):
-    # Pearson CC per resolution group
+    # Pearson CC per shell, averaged over all n_groups shells; an empty shell adds 0
     safe = count.clamp(min=1.0)
     t1 = sx2 - sx * sx / safe
     t2 = sy2 - sy * sy / safe
@@ -587,7 +629,7 @@ def _cc_from_sums(sxy, sx, sy, sx2, sy2, count, n_groups):
 
 
 def _gather_rows(offsets, keys, vals, groups, index, width):
-    # Ragged CSR runs for index as dense (len(index), width) padded blocks.
+    # CSR runs of index as dense (len(index), width) blocks padded with _PAD
     start = offsets[index].long()
     length = (offsets[index + 1] - offsets[index]).long()
     column = torch.arange(width, device=keys.device)
@@ -613,7 +655,7 @@ def _pair_cc_reference(
 ):
     n, ncorr = partners.shape
     width = max(1, int((offsets[1:] - offsets[:-1]).max()))
-    rows = max(1, budget // (ncorr * width))
+    rows = max(1, budget // (ncorr * width))  # crystals per chunk, ~budget elements
     cc = torch.empty((n, ncorr), dtype=torch.float32, device=keys_a.device)
     novl = torch.empty((n, ncorr), dtype=torch.int32, device=keys_a.device)
     source = torch.arange(n, device=keys_a.device)
@@ -625,6 +667,7 @@ def _pair_cc_reference(
         kb, vb, _ = _gather_rows(
             offsets, keys_b, vals_b, None, partners[lo:hi].reshape(-1).long(), width
         )
+        # runs are sorted and _PAD sorts last, so searchsorted finds shared slots
         at = torch.searchsorted(kb.contiguous(), ka.contiguous()).clamp_(max=width - 1)
         hit = (kb.gather(1, at) == ka) & (ka != _PAD)
         bv = vb.gather(1, at)
@@ -652,7 +695,7 @@ def _pair_cc_reference(
 
 
 def _pass(cc, cc_r, valid, valid_r, partners, assignments):
-    # One refinement pass over every crystal at once
+    # f: mean CC consistent with the current assignment, g: with the flipped one
     same = assignments.unsqueeze(1) == assignments[partners.long()]
     f_mask = valid & same
     g_mask = valid & ~same
@@ -673,9 +716,6 @@ def _pass(cc, cc_r, valid, valid_r, partners, assignments):
         float(g[usable].mean()) if bool(usable.any()) else math.nan,
         int((~usable).sum()),
     )
-
-
-# CLI =====================================
 
 
 from .cli.resolve import main  # noqa: E402

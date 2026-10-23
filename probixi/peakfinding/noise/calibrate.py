@@ -17,30 +17,31 @@ from ..peaks.neighborhood import (
     local_mean_var,
     matched_filter_z,
 )
+
 TAIL_RATIO_TOL = 1.5
 
 
 @dataclass
 class CalibrationResult:
-    """Learned noise/detection parameters from :func:`calibrate_noise`.
+    """Blend, variance scale, and peak mixture learned by :func:`calibrate_noise`.
 
     Attributes
     ----------
     weights : dict
-        Convex blend over background-mean sources (keys among
-        ``pixel``/``rotational``/``panel``; zero-weight sources dropped).
+        Convex weights over the background means, keyed by ``pixel``,
+        ``rotational``, and ``panel``; zero weights are omitted.
     var_scale : float
-        Multiplier on the per-pixel std so the background ``z`` has unit
-        variance (``var`` is scaled by ``var_scale**2``).
+        Scale ``s`` on the per-pixel standard deviation that gives the background
+        ``z`` unit variance.
     kappa : float
-        Learned peak/noise std inflation factor (> 1).
+        Peak contrast, the standard deviation of the peak component of ``z``; > 1.
     prior_peak : float
-        Learned prior probability that a pixel is peak.
+        Prior probability that a pixel carries peak signal.
     background_var : float
-        Background variance of ``z`` before ``var_scale`` was applied; ``1.0``
-        means the chosen blend was already perfectly calibrated.
+        Variance of the background ``z`` under the chosen blend before scaling;
+        ``var_scale = sqrt(background_var)``.
     n_pixels : int
-        Number of subsampled pixels the fit used.
+        Pixels in the random subsample.
     """
 
     weights: dict
@@ -51,8 +52,11 @@ class CalibrationResult:
     n_pixels: int
 
     def apply(self, noise_model, finder=None) -> "CalibrationResult":
-        """Push learned parameters onto a noise model (blend + var scale) and,
-        optionally, a peak finder (kappa + peak prior)."""
+        """Install the learned parameters and return ``self``.
+
+        ``noise_model`` receives the blend and variance scale; ``finder``, if given,
+        receives ``kappa``, ``prior_peak``, and the ``calibrated`` combination.
+        """
         noise_model.calibrated_weights = dict(self.weights)
         noise_model.var_scale = float(self.var_scale)
         if finder is not None:
@@ -104,31 +108,35 @@ def calibrate_noise(
     kurtosis_weight: float = 0.5,
     rng_seed: int = 0,
 ) -> CalibrationResult:
-    """Calibrate ``noise_model`` on ``seed_frames`` (see module docstring).
+    """Fit the background blend, variance scale, and peak mixture on seed frames.
+
+    A simplex grid of blend weights is searched for the background ``z`` closest to
+    N(0, 1) in location, scale, and excess kurtosis, and EM then fits
+    ``(1 - prior_peak) N(0, 1) + prior_peak N(0, kappa^2)`` to the calibrated ``z``.
+    See docs/overview/peakfinding.md.
 
     Parameters
     ----------
     noise_model : NoiseModel
-        A built model whose sources already cover the frame (warmed here when
-        ``warm`` is set).
+        Built model; warmed on ``seed_frames`` when ``warm`` is set.
     seed_frames : Iterable[Tensor]
-        Calibration frames. Anything with a length, such as a list or a
-        stacked tensor, is read one frame at a time. A generator is copied
-        into a list first.
+        A sequence of ``(H, W)`` frames or a stacked ``(F, H, W)`` tensor; any other
+        iterable is first copied into a list.
     warm : bool
         Update the running model on the seed frames first.
     subsample : int
-        Number of valid pixels to fit on (random, fixed locations).
+        Valid pixels drawn at random, the same locations on every frame.
     weight_step : float
-        Grid spacing for the background-mean blend search.
+        Spacing of the simplex grid of blend weights.
     em_iters : int
-        EM iterations for the peak/noise mixture.
+        EM iterations for the peak mixture.
     robust_z : float
-        Pixels with ``|z| < robust_z`` define the background set scoring a blend.
+        Half-width of the background set ``|z| < robust_z``, with ``z`` taken from
+        the pixel mean alone.
     kurtosis_weight : float
-        Weight on background non-Gaussianity in the blend loss.
+        Weight on the squared excess kurtosis in the blend loss.
     rng_seed : int
-        Seed for the pixel subsample (reproducible).
+        Seed for the pixel subsample.
 
     Returns
     -------
@@ -167,7 +175,7 @@ def calibrate_noise(
     sig_s = sigma.flatten()[idx]  # (S,)
     X = torch.stack([f.to(dtype).flatten()[idx] for f in frames])  # (F, S)
 
-    # background pixels
+    # background set from the pixel mean alone, so it is the same for every blend
     z_pix = (X - M[0][None, :]) / sig_s[None, :]
     bg = z_pix.abs() < robust_z
 
@@ -215,30 +223,28 @@ def fit_photon_transfer(
 ) -> tuple[float, float]:
     """Fit the photon-transfer curve ``var = read_var + gain * level``.
 
-    The running model freezes one per-pixel variance, measured at the full-dose
-    background level; whitening a genuinely low-flux frame against that frozen
-    variance over-suppresses its real spots. A solution is a variance scaling with
-    each frame's own background level, ``var = read_var + gain*signal``. The fit
-    runs on binned medians of var vs mean (raw-pixel OLS near the origin is
-    ill-conditioned); a negative intercept triggers a non-negative
-    through-origin fallback ``var = gain*level`` (pure photon counter).
-
-    Sets ``noise_model.read_var`` and ``noise_model.gain``. Run after
-    :func:`calibrate_noise` ``.apply`` so (mean, var) are calibrated.
+    The running variance is measured at the run's typical level, and the flux model
+    whitens each frame against this curve at its own level instead
+    (docs/vignettes/variable_flux.md). The fit is least squares on the medians of
+    variance and mean in quantile bins of the calibrated mean, since a fit on raw
+    pixels is ill-conditioned near the origin. A negative intercept or non-positive
+    slope falls back to ``read_var = 0`` and the median ratio of variance to mean.
+    Sets ``noise_model.read_var`` and ``noise_model.gain``.
 
     Parameters
     ----------
     noise_model : NoiseModel
-        A calibrated model.
+        Model calibrated by :meth:`CalibrationResult.apply`.
     n_bins : int
-        Number of mean-quantile bins.
+        Quantile bins of the background mean.
     min_bin_pixels : int
-        Minimum pixels per bin to include it.
+        Bins with fewer pixels are skipped.
 
     Returns
     -------
     tuple[float, float]
-        ``(read_var, gain)``.
+        ``(read_var, gain)``; ``gain`` is in detector units per photon under
+        Poisson statistics.
     """
     pred = noise_model.predict(combination="calibrated")
     mask = pred["mask"]
@@ -287,9 +293,12 @@ def background_fluctuation_ratio(
     max_frames: int = 16,
     level_quantile: float = 0.75,
 ) -> float:
-    """Across-frame over within-frame variance of the brightest background.
+    """Return the ratio of across-frame to within-frame background variance.
 
-    ~1 for steady exposures, well above 1 where the level changes between shots.
+    The ratio is near 1 for steady exposures and well above 1 when the background
+    level changes between shots. Per frame, it is the median, over pixels above the
+    ``level_quantile`` of the background level, of the running variance over the
+    local annulus variance; the result is the median over frames.
 
     Parameters
     ----------
@@ -298,9 +307,9 @@ def background_fluctuation_ratio(
     frames : iterable of torch.Tensor
         Seed frames; the first ``max_frames`` are read.
     local_inner_radius, local_outer_radius : int
-        Annulus of the local variance.
+        Inner and outer half-widths, in pixels, of the square local annulus.
     max_frames : int
-        Frames measured.
+        Frames read from ``frames``.
     level_quantile : float
         Background-level quantile above which pixels count.
 
@@ -339,6 +348,7 @@ def flux_variance_floor(
     var0: Tensor,
     floor_coef: float = 0.15,
 ) -> Tensor:
+    # max(read_var + gain * level, floor_coef * var0, local_var), the first if fitted
     rv, g = noise_model.read_var, noise_model.gain
     floor = (float(floor_coef) * var0).clamp_min(1e-12)
     if rv is None or g is None:
@@ -349,28 +359,30 @@ def flux_variance_floor(
 
 @dataclass
 class ThresholdCalibration:
-    """Learned matched-filter threshold from the meta-T distribution.
+    """Matched-filter detection threshold learned by :func:`calibrate_threshold`.
 
     Attributes
     ----------
     mu0 : float
-        Empirical-null mean of the matched-filter T body (scale-max biases it
-        slightly positive).
+        Empirical-null location of ``T``, the median of the pooled seed values;
+        above 0 because ``T`` is a maximum over template widths.
     sigma0 : float
-        Empirical-null std of the T body (mildly compressed below 1).
+        Empirical-null scale of ``T``, from the values below ``mu0`` reflected
+        about it.
     threshold : float
-        Raw matched-filter T cutoff: smallest T* whose median quiet-frame blob
-        count is at or below ``target_noise_peaks``.
+        Detection threshold on ``T``: the smallest grid value whose median count of
+        noise peaks per quiet frame is at most ``target_noise_peaks``.
     target_noise_peaks : float
-        Tail-rate target the threshold was solved for (blobs/quiet frame).
+        Noise budget the threshold was solved for, in detections per quiet frame.
     achieved_noise_peaks : float
-        Median blob count above ``threshold`` across the quiet seed frames.
+        Median count of noise peaks above ``threshold`` per quiet frame.
     n_quiet_frames : int
-        Seed frames classified as quiet (signal-free).
+        Seed frames counted as quiet; 0 when the noise was counted on the
+        mirrored tail.
     quiet_max_T : float
-        The max(T) cutoff separating quiet from active frames.
+        Largest ``max(T)`` of a quiet frame, nominally ``mu0 + sigma0 sqrt(2 ln N)``.
     mf_scales : tuple[float, ...]
-        Matched-filter kernel scales used (passed to the finder).
+        Gaussian template widths in pixels.
     tail_ratio : float
         Median over seed frames of the positive-tail blob count over the mirrored
         one at the grid minimum: 1 for symmetric noise, larger for low-count
@@ -388,10 +400,7 @@ class ThresholdCalibration:
     tail_ratio: float = 1.0
 
     def apply(self, finder) -> "ThresholdCalibration":
-        """Install the matched-filter bank and threshold on ``finder``.
-
-        Enables ``matched_filter``, sets ``mf_scales``/``mf_threshold``, rebuilds
-        the kernel bank, and invalidates the cached MF denominator."""
+        """Install the template bank and threshold on ``finder`` and return ``self``."""
         finder.matched_filter = True
         finder.mf_scales = tuple(float(s) for s in self.mf_scales)
         finder.mf_threshold = float(self.threshold)
@@ -408,6 +417,7 @@ class ThresholdCalibration:
 
 
 def _empirical_null_central_matching(t_body: Tensor) -> tuple[float, float]:
+    # median and reflected lower half: peaks in the right tail enter neither
     mu0 = float(torch.median(t_body))
     left = t_body[t_body < mu0]
     if left.numel() == 0:
@@ -438,52 +448,52 @@ def calibrate_threshold(
     rng_seed: int = 0,
     finder=None,
 ) -> ThresholdCalibration:
-    """Learn the matched-filter detection threshold from the meta-T distribution.
+    """Learn the matched-filter detection threshold from a noise budget.
 
-    The per-pixel z is N(0,1) under background after :func:`calibrate_noise`, but
-    the multi-scale statistic ``T = max_k MF(z; PSF_k)`` is not: the scale-max
-    biases the body's location/scale and spatial correlation fattens the right
-    tail. This learns both from the seed frames, then picks the smallest T* whose
-    median quiet-frame noise-blob count is at or below ``target_noise_peaks`` which
-    yields a tail-rate target rather than a hand-set sigma cut.
-
-    Pre-req: ``noise_model`` is already calibrated (run :func:`calibrate_noise`
-    + ``.apply`` first).
+    After :func:`calibrate_noise` the background ``z`` is standard normal, but
+    ``T = max_s T_s`` is not: the maximum over widths raises its location and the
+    template correlation fattens its right tail. The null of ``T`` is therefore
+    measured on the seed frames, and the threshold is the smallest grid value whose
+    median count of noise peaks per quiet frame is at most ``target_noise_peaks``.
+    See docs/overview/peakfinding.md.
 
     Parameters
     ----------
     noise_model : NoiseModel
-        A calibrated model (post ``calibrate_noise.apply``).
+        Model calibrated by :meth:`CalibrationResult.apply`.
     seed_frames : Iterable[Tensor]
-        The seed frames, read one at a time.
+        A sequence of ``(H, W)`` frames; any other iterable is copied into a list.
     target_noise_peaks : float
-        Target median blobs per quiet frame above the chosen threshold.
+        Noise budget, in local maxima above the threshold per quiet frame.
     tail_ratio_tol : float
         Largest positive-over-mirrored blob-count ratio at the grid minimum for
         which the mirrored tail still stands in for the positive one; above it
         the quietest ``quiet_quantile`` of frames are used instead.
     quiet_quantile : float
-        Last-resort fraction of lowest-max(T) frames used as the quiet set, when the
-        null-based cut (mu0 + sigma0*sqrt(2 ln N)) finds fewer than 4 quiet frames
-        and the mirrored tail ``-min_k MF(z)`` is too sparse to reach the target.
+        Fraction of frames with the lowest ``max(T)`` taken as quiet. Used only when
+        fewer than 4 frames pass the null cut and the mirrored tail ``-min_s T_s``
+        already meets the budget at the lowest grid value.
     mf_scales : tuple[float, ...]
-        Matched-filter kernel scales (Bragg-spot core sigma range).
+        Gaussian template widths in pixels.
     local_inner_radius, local_outer_radius : int
-        Annulus radii for the per-frame local-background subtraction.
+        Inner and outer half-widths, in pixels, of the square per-frame background
+        annulus.
     size_min : int
-        Minimum blob pixel count to keep.
+        Pixels above the threshold required in the 3 x 3 neighbourhood of a counted
+        maximum.
     threshold_grid_min, threshold_grid_max, threshold_grid_step : float
-        T* sweep grid.
+        Range and step of the threshold sweep.
     body_subsample : int
-        Cap on pooled body pixels for the empirical-null fit.
+        Cap on the pooled ``T`` values for the empirical null.
     flux_variance : bool
-        Use the photon-transfer variance floor for ``var_eff``.
+        Whiten against the flux-scaled variance from :func:`fit_photon_transfer`.
     flux_var_floor : float
-        ``floor_coef`` passed to :func:`flux_variance_floor`.
+        Lower bound on the flux-scaled variance, as a fraction of the running
+        variance.
     rng_seed : int
-        Subsample seed (reproducible).
+        Seed for the ``T`` subsample.
     finder : PeakFinder, optional
-        If given, install the result onto it in place.
+        Receives the result through :meth:`ThresholdCalibration.apply`.
 
     Returns
     -------
@@ -527,8 +537,7 @@ def calibrate_threshold(
     )
     thr_list = tgrid.tolist()
 
-    # Only the maximum, a body subsample and the blob counts are kept per frame,
-    # so the full T map is freed before the next frame is read.
+    # keep max(T), a T subsample and the counts per frame; each T map is then freed
     t_max_per_frame: list[float] = []
     body_pieces: list[Tensor] = []
     counts: list[list[int]] = []
@@ -536,6 +545,7 @@ def calibrate_threshold(
     per_frame_cap = max(1, body_subsample // n_frames)
 
     def blob_counts(T: Tensor) -> list[int]:
+        # per threshold: 3 x 3 local maxima above it, >= size_min of the 9 above too
         pooled = F.max_pool2d(T[None, None], kernel_size=3, stride=1, padding=1)
         is_max = (T >= pooled[0, 0]) & mask
         row: list[Tensor] = []
@@ -611,6 +621,7 @@ def calibrate_threshold(
         c = torch.tensor(counts, dtype=torch.float32)[quiet_idx]
         counts_t = (c - c[:, -1:]).median(dim=0).values
     elif len(quiet_idx) < 4:
+        # too few quiet frames (hit-only input): count noise on the mirrored tail
         counts_t = torch.tensor(mirrored, dtype=torch.float32).median(dim=0).values
         quiet_idx = []
         if float(counts_t[0]) <= float(target_noise_peaks):  # tail too sparse to use

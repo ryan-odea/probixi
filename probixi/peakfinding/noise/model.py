@@ -8,6 +8,7 @@ from torch import Tensor, nn
 from ...kernels import select
 from ._drift import DriftDiagnostics
 
+# CrystFEL flag_* keys mapped to the test a good pixel passes
 FLAG_TESTS = {
     "flag_lessthan": torch.ge,
     "flag_morethan": torch.le,
@@ -22,10 +23,8 @@ def value_ok(frame: Tensor, flags: Iterable[tuple]) -> Tensor:
     return ok
 
 
-# NOISE STATES MOTHER ===================================================
 class NoiseStats(nn.Module):
-    # Streaming mean/variance base: mean_, M2_ (Welford sum-of-squares for
-    # decay == 1, else EWMA variance directly), n_ (frames since reset).
+    # Streaming base; M2_ is the Welford sum of squares at decay 1, else EWMA variance
 
     mean_: Tensor
     M2_: Tensor
@@ -69,12 +68,12 @@ class NoiseStats(nn.Module):
             if kernel is not None:
                 kernel.update_stat(self, x)
                 return
-            # Welford: mean += delta/n; M2 += delta*(x - mean_new). var divides by n-1.
+            # Welford (1962): delta * (x - new mean) avoids float32 cancellation
             delta = x - self.mean_
             self.mean_.add_(delta / self.n_)
             self.M2_.add_(delta * (x - self.mean_))
         else:
-            # EWMA with alpha = max(decay, 1/n); M2 holds the variance directly
+            # EWMA with alpha = max(decay, 1/n): a plain running mean until 1/n < decay
             a = (1.0 / self.n_.to(self.mean_.dtype)).clamp_min(self.decay)
             delta = x - self.mean_
             self.mean_.add_(a * delta)
@@ -102,7 +101,7 @@ class NoiseStats(nn.Module):
         return self.var().clamp_min(0.0).sqrt()
 
     def _project(self, frame: Tensor, mask: Optional[Tensor]) -> Tensor:
-        # Map a coerced frame to stat-shape; identity (full-frame) by default.
+        # Subclasses reduce the frame to stat_shape (bins, panels)
         return frame
 
     def _coerce(self, frame: Tensor) -> Tensor:
@@ -115,67 +114,75 @@ class NoiseStats(nn.Module):
         return frame.to(self.mean_)
 
 
-# NOISE MODEL ====================================================
-
 from ._panel import PanelNoise, PanelSpec  # noqa: E402
 from ._pixel import PixelNoise  # noqa: E402
 from ._radial import RotationalNoise  # noqa: E402
 
 
 class NoiseModel(nn.Module):
-    """Composite noise model: pixel + radial + panel.
+    """Running background model blending pixel, radial, and panel estimators.
 
-    Blends per-pixel, radial (rotational), and panel background estimates into
-    a single mean+variance prediction for detection and calibration. With
-    ``robust_update`` each frame is upper-clipped at ``mean + robust_k*sigma``
-    before folding into the running statistics, so Bragg peaks do not inflate
-    the per-pixel variance that detection relies on.
+    Each estimator keeps a running mean and variance over the frame stream, and
+    :meth:`predict` blends their means. With ``robust_update``, each frame is clipped
+    from above at ``mean + robust_k * sigma`` before it updates the statistics, which
+    keeps Bragg peaks out of the variance that detection tests against. See
+    docs/overview/peakfinding.md.
 
     Parameters
     ----------
     frame_size : tuple[int, int]
-        Detector frame shape ``(rows, cols)``.
-    mode : {"per_frame", "online"}
-        ``online`` keeps running stats; ``per_frame`` resets each frame.
+        Frame shape ``(rows, cols)``.
+    mode : {"online", "per_frame"}
+        ``online`` accumulates over the stream; ``per_frame`` resets before every frame.
     decay : float
-        EWMA weight in ``(0, 1]``; ``1.0`` is an unweighted running estimate.
+        Forgetting weight in ``(0, 1]``, a memory of about ``1 / decay`` frames;
+        ``1.0`` averages the whole stream.
     beam_center : tuple[float, float], optional
-        Radial-bin center, for a single-panel detector.
+        Centre ``(row, col)`` of the radial annuli in pixels; the frame centre by
+        default. Ignored when ``radial_radius`` is given.
     radial_radius : Tensor, optional
-        Per-pixel lab-frame radius ``(rows, cols)``, in pixels, for the radial
-        annuli
+        ``(rows, cols)`` lab-frame distance of each pixel from the beam, in pixels.
     radial_bin_width : float
         Width of the radial annuli in pixels.
     panels : PanelSpec, optional
-        Panel layout (id map or slice/box specs); ``None`` is one panel.
+        ``(rows, cols)`` panel id map with -1 outside every panel, or one
+        ``(row_slice, col_slice)`` or ``(r0, r1, c0, c1)`` per panel; ``None`` is one
+        panel spanning the frame.
     warmup_frames : int
-        Frames before the dead-pixel mask is committed and shrinkage saturates.
+        Frames before the dead-pixel mask is committed and the ``shrinkage`` blend
+        reaches the pixel mean.
     drift_log_every : int
-        Record drift diagnostics every this many frames.
+        Frames between drift records.
     robust_update : bool
-        Upper-clip peaks before updating running stats.
+        Clip each frame from above before it updates the statistics; online mode only.
     robust_k : float
-        Clip level in sigma for ``robust_update``.
+        Clip level in standard deviations.
     robust_min_frames : int
-        Frames before robust clipping engages.
+        Frames before the clip engages.
     valid_mask : Tensor, optional
-        Static a-priori bad-pixel mask, applied from the first frame.
+        ``(rows, cols)`` static mask, True where a pixel is usable; applied from the
+        first frame.
     value_flags : iterable of tuple, optional
-        Per-frame ``(rows, cols, key, value)`` geometry value flags; pixels
-        failing them in a frame read as their running mean (see ``clean``).
+        CrystFEL ``flag_lessthan``, ``flag_morethan``, and ``flag_equal`` tests as
+        ``(rows, cols, key, value)``. A pixel that fails one on a frame takes its
+        running mean on that frame.
     device, dtype
-        Tensor placement and precision.
+        Placement and precision of the statistics.
 
     Attributes
     ----------
     read_var, gain : float or None
-        Photon-transfer curve ``var = read_var + gain*level`` (fit later).
+        Photon-transfer fit ``var = read_var + gain * level``, set by
+        :func:`fit_photon_transfer`.
     eigen_modes : Tensor or None
-        Low-rank background eigen-images ``(n_modes, H, W)`` (fit later).
+        ``(n_modes, H, W)`` background eigen-images, set by
+        :func:`fit_eigen_background`.
     var_scale : float
-        Multiplier pinning the calibrated background z to unit variance.
+        Scale on the per-pixel standard deviation that gives the calibrated
+        background unit variance.
     calibrated_weights : dict or None
-        Learned convex blend over background-mean sources.
+        Convex weights over ``pixel``, ``rotational``, and ``panel``, set by
+        :meth:`CalibrationResult.apply`.
     """
 
     n_frames: Tensor
@@ -246,8 +253,7 @@ class NoiseModel(nn.Module):
         self.register_buffer(
             "n_frames", torch.zeros((), dtype=torch.long, device=device)
         )
-        # Static a-priori mask fed to the spatial estimators from the first
-        # frame, so bad pixels never poison a radial bin / panel.
+        # static mask keeps bad pixels out of the radial and panel means from frame 1
         if valid_mask is not None:
             static = valid_mask.to(dtype=torch.bool, device=device)
             if tuple(static.shape) != self.frame_size:
@@ -268,11 +274,8 @@ class NoiseModel(nn.Module):
         # host mirror of n_frames; version bumped whenever valid_mask changes
         self._n_host = 0
         self._mask_version = 0
-        # Set by calibrate_noise().apply(); used by the "calibrated" combination.
         self.calibrated_weights: Optional[dict[str, float]] = None
-        # None -> update every source; else only these (pixel always updates, as
-        # robust clip, mask commit, and drift all read it). Set post-calibration
-        # so sources the active prediction never blends aren't computed per frame.
+        # None updates every source; pixel always updates (clip, mask, drift read it)
         self.active_update_sources: Optional[set] = None
         self.var_scale: float = 1.0
         self.eigen_modes: Optional[Tensor] = None
@@ -281,7 +284,7 @@ class NoiseModel(nn.Module):
 
     @torch.no_grad()
     def _robust_clip(self, frame: Tensor) -> Tensor:
-        # Upper-clip at mean + k*sigma so peaks cannot poison the stats used to detect them.
+        # Upper clip at mean + k * sigma keeps peaks out of the stats that detect them
         if not self.robust_update or self.mode != "online":
             return frame
         if self._n_host < self.robust_min_frames:
@@ -350,8 +353,7 @@ class NoiseModel(nn.Module):
             self._record_drift(n)
 
     def set_active_update_sources(self, sources: Optional[Iterable[str]]) -> None:
-        # Restrict per-frame updates to `sources` (plus pixel, always required).
-        # Pass None to restore updating every source (e.g. before recalibration).
+        """Update only ``sources`` plus ``pixel`` per frame; ``None`` updates all."""
         if sources is None:
             self.active_update_sources = None
         else:
@@ -367,10 +369,22 @@ class NoiseModel(nn.Module):
         return self
 
     def diagnostics(self, frames: Iterable[Tensor], path, **kwargs):
-        """Fit over ``frames`` in batches and write a diagnostic GIF.
+        """Update the model on ``frames`` and write an animated GIF of its state.
 
-        Renders the running mean background, its radial profile, and the
-        per-batch drift as an animation over batches.
+        Each step of the animation follows one batch of frames and shows the standard
+        error and mean of the background, its radial profile, and the mean absolute
+        change of the pixel mean per batch.
+
+        Parameters
+        ----------
+        frames : iterable of Tensor
+            ``(H, W)`` frames or ``(B, H, W)`` batches; every frame updates the model.
+        path : str or Path
+            Output ``.gif``; parent directories are created.
+        **kwargs
+            ``batch_size`` (frames per step, default 15), ``fps``, ``dpi``,
+            ``max_radius``, ``figsize``, and ``assemble`` with ``assembled_beam`` to
+            draw an assembled detector image.
 
         Returns
         -------
@@ -393,8 +407,7 @@ class NoiseModel(nn.Module):
         if combination == "panel":
             return {"panel": 1.0}, "panel"
         if combination == "shrinkage":
-            # Linear shrinkage from radial prior toward per-pixel as evidence
-            # accrues: w = min(1, n/warmup); mean = w*pixel + (1-w)*rotational.
+            # linear shrinkage from the radial mean to the pixel mean over warmup
             n = float(self._n_host)
             w = min(1.0, n / max(1.0, float(self.warmup_frames)))
             return {"pixel": w, "rotational": 1.0 - w}, "pixel"
@@ -413,21 +426,23 @@ class NoiseModel(nn.Module):
         weights: Optional[dict[str, float]] = None,
         var_source: Optional[str] = None,
     ) -> dict[str, Tensor]:
-        """Blend pixel/rotational/panel sources into a single mean+var prediction.
+        """Return the blended background mean and variance.
 
         Parameters
         ----------
         combination : {"pixel", "rotational", "panel", "shrinkage", "calibrated"}
-            Named preset for the mean blend and variance source.
+            Preset for the mean blend and the variance source.
         weights : dict, optional
-            Custom convex weights over sources; overrides ``combination``'s blend.
+            Weights over ``pixel``, ``rotational``, and ``panel``, normalised to sum
+            to 1; replaces the preset blend.
         var_source : str, optional
-            Source whose variance to use; defaults to the preset's choice.
+            Source of the variance; the preset's source by default.
 
         Returns
         -------
         dict
-            ``{"mean": Tensor, "var": Tensor, "mask": Tensor}``.
+            ``mean``, ``var``, and ``mask``, each ``(rows, cols)``. Under the
+            ``calibrated`` preset the variance includes ``var_scale**2``.
         """
         sources = {
             "pixel": self.pixel,
@@ -492,7 +507,6 @@ class NoiseModel(nn.Module):
         pred = self.predict(
             combination=combination, weights=weights, var_source=var_source
         )
-        # z = (x - mu) / sigma
         std = pred["var"].clamp_min(1e-12).sqrt()
         return torch.where(self.valid_mask, (frame - pred["mean"]) / std, 0.0)
 
@@ -538,7 +552,7 @@ class NoiseModel(nn.Module):
             denom = valid.sum().clamp_min(1).to(mean.dtype)
             mean_shift = (((mean - prev_mean).abs()) * valid).sum() / denom
             var_ratio = (torch.log(var / prev_var) * valid).sum() / denom
-            # per-pixel KL( N(mu,s^2) || N(mu_p,s_p^2) ), averaged over valid pixels.
+            # per-pixel KL(N(mu, s^2) || N(mu_p, s_p^2)), averaged over valid pixels
             kl_map = 0.5 * (
                 torch.log(prev_var / var)
                 + (var + (mean - prev_mean) ** 2) / prev_var

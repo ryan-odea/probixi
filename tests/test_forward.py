@@ -19,7 +19,7 @@ def proper_rotation(seed: int) -> torch.Tensor:
 
 
 def sample_positions(geometry_dict) -> torch.Tensor:
-    # pixels offset from the beam center (and one on it)
+    # pixels offset from the beam centre, and one on it
     row, col = geometry_dict["beam_center"]
     offsets = [(0, 0), (200, 0), (0, 300), (-150, 250), (600, -400)]
     return torch.tensor([[row + dr, col + dc] for dr, dc in offsets], dtype=DT)
@@ -80,9 +80,6 @@ def test_q_to_detector_rejects_wrong_shape(geometry_dict):
         q_to_detector(torch.zeros((4, 2), dtype=DT), geometry_dict)
 
 
-# --- multi-panel (CSPAD-style) physical geometry -----------------------------
-
-
 def _q_from_physical(x_pix, y_pix, g):
     # reference q for a pixel at physical lab (x, y) px, z = clen
     pix, clen, lam = (
@@ -96,7 +93,7 @@ def _q_from_physical(x_pix, y_pix, g):
 
 
 def _rotated_two_panel():
-    # panel B sits right of A in data space but is physically rotated 90 deg (CSPAD-style)
+    # B sits right of A in data space but is rotated 90 deg in the lab, as on a CSPAD
     panels = {
         "A": {
             "min_ss": 0,
@@ -174,7 +171,7 @@ def test_panel_model_uses_physical_position_on_rotated_panel():
     assert not torch.allclose(q[0], flat, atol=1e-6)
 
 
-def test_panel_model_round_trip_each_panel():
+def test_panel_model_inverse_on_each_panel():
     g = _rotated_two_panel()
     pos = torch.tensor([[2.0, 3.0], [7.0, 5.0], [3.0, 15.0], [8.0, 18.0]], dtype=DT)
     back = q_to_detector(detector_to_q(pos, g), g)

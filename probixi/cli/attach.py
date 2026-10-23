@@ -8,12 +8,11 @@ import click
 @click.argument("table", type=click.Path(exists=True, dir_okay=False))
 @click.option("--sep", default="\t", help="Column separator of TABLE (default: tab).")
 def main(database: str, table: str, sep: str) -> None:
-    """Attach per-frame values to a probixi database.
+    """Attach per-frame values from TABLE to the frames table of DATABASE.
 
-    TABLE is a text table with a header ``filename event <name> ...``; every
-    further column (a pulse energy, a spectral width, ...) becomes a column of
-    the database's ``frames`` table, matched on filename and event, so a merging
-    program can read it per image.
+    TABLE is a text table with the header ``filename event <name> ...``. Each
+    further column, such as a pulse energy or a spectral width, becomes a column
+    of ``frames``, matched on filename and event.
     """
     from ..io.db import attach_frame_values
 

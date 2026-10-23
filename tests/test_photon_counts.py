@@ -1,9 +1,4 @@
-"""Photon counts for detected peaks, and how they reach the DB.
-
-Only searched peaks carry these: a predicted position has no measured blob, so
-there is no honest pixel set to sum a background over.
-"""
-
+# Only searched peaks carry photon counts; a predicted position has no blob pixels
 from __future__ import annotations
 
 import torch
@@ -106,16 +101,13 @@ def test_gain_rejects_nonsense_values(tmp_path):
 
 
 def test_peak_photometry_survives_the_index_peak_cap(geometry_dict, cell):
-    # The cap keeps the brightest peaks by topk, whose indices are not in
-    # position order, so the photometry has to be reindexed with them rather
-    # than truncated. Truncation would pair a peak with another peak's counts.
+    # the cap's topk indices are not in position order; photometry must follow them
     from probixi.indexer.indexer import Indexer, SeedConfig
 
     idxr = Indexer(geometry_dict, cell, seed=SeedConfig(max_index_peaks=6))
     n = 10
     positions = torch.stack([torch.arange(n).float()] * 2, dim=-1)
-    # ascending, so topk picks the LAST six: its indices are not a prefix, and a
-    # truncating implementation would hand peaks the wrong counts
+    # ascending, so topk keeps the last six, whose indices are not a prefix
     intensities = torch.arange(n).float()
     bg = intensities * 10.0  # tie each peak's photometry to its intensity
     npix = intensities + 100.0
@@ -129,8 +121,7 @@ def test_peak_photometry_survives_the_index_peak_cap(geometry_dict, cell):
 
 
 def test_peak_photometry_follows_each_peeled_lattice(geometry_dict, cell):
-    # Two lattices on one frame: peeling hands the second lattice the residue,
-    # so each result's photometry must match its own surviving peaks.
+    # peeling hands the second lattice the residue; each keeps its own photometry
     import sim
 
     from probixi.indexer.indexer import Indexer, RefineConfig, SeedConfig

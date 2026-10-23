@@ -62,7 +62,7 @@ from .peakfinding.noise.model import value_ok
 
 PathLike = Union[str, Path]
 
-# Beam-center exclusion (|q|_min) tuning - maybe exposure to user in future???
+# Beamstop-halo |q|_min search; see "Masks learned from the data" in peakfinding.md
 _BEAMSTOP_MAX_FRAMES = 200
 _BEAMSTOP_N_BINS = 40
 _BEAMSTOP_SPIKE_RATIO = 50.0
@@ -73,23 +73,22 @@ _BEAMSTOP_MIN_BIN_PEAKS = 5
 _BEAMSTOP_MIN_BIN_PIXELS = 10_000
 _BEAMSTOP_MAX_EXTEND_BINS = 2
 
-_SEED_LEVEL_OVERSAMPLE = 3
-_SEED_LEVEL_STRIDE = 97
+_SEED_LEVEL_OVERSAMPLE = 3  # candidates drawn per seed frame before the level cut
+_SEED_LEVEL_STRIDE = 97  # a frame's level is the median of every 97th pixel
 
 _LAB_RADIUS_CHUNK_PIXELS = 1 << 18
 
-_SHADOW_MAD_K = 6.0
-_SHADOW_MAX_RATIO = 0.5
-_SHADOW_CORE_FRACTION = 0.5
+_SHADOW_MAD_K = 6.0  # dark: log(pixel / radial mean) below median - 6 robust sigma
+_SHADOW_MAX_RATIO = 0.5  # and pixel mean below half the radial mean
+_SHADOW_CORE_FRACTION = 0.5  # core: dark pixel in a window at least half dark
 _RADII_MIN_FRAMES = 32
 _RADII_MAX_FRAMES = 512
 _RADII_MIN_PEAKS = 200
-_APERTURE_MIN_PEAKS = 4000  # "auto" needs strong, isolated peaks: sample more
-# background fluctuation above which flux variance is on
-_FLUX_AUTO_RATIO = 1.5
-_CLEN_MIN_SHIFT = 1e-3  # smaller camera-length re-fits are ignored
-_CLEN_MIN_Z = 5.0
-_CLEN_MAX_RESIDUAL_PX = 6.0
+_APERTURE_MIN_PEAKS = 4000  # --aperture auto tests strong, isolated peaks
+_FLUX_AUTO_RATIO = 1.5  # flux variance turns on above this background fluctuation
+_CLEN_MIN_SHIFT = 1e-3  # a camera-length re-fit must exceed 0.1% (relative)
+_CLEN_MIN_Z = 5.0  # and five standard errors
+_CLEN_MAX_RESIDUAL_PX = 6.0  # radial residual beyond which a peak is an outlier
 _CLEN_MAX_ROUNDS = 3
 
 
@@ -108,13 +107,13 @@ _CITATION_URL = (
     "https://raw.githubusercontent.com/ryan-odea/probixi/main/docs/assets/citation.bib"
 )
 
-# Cite repo version
+# Bundled entry; citation() prefers the current one on GitHub
 __citation__ = _CITATION.strip() + "\n"
 
 
 @lru_cache(maxsize=1)
 def mps_is_usable() -> bool:
-    """Whether this MPS can be used."""
+    # is_available() is insufficient: the pipeline needs torch.linalg.inv on MPS
     try:
         torch.linalg.inv(torch.eye(3, device="mps"))
     except Exception:
@@ -123,14 +122,12 @@ def mps_is_usable() -> bool:
 
 
 def auto_device() -> torch.device:
-    """Pick the best available torch device.
+    """Return the best available torch device.
 
     Returns
     -------
     torch.device
-        ``cuda``, ``mps`` or ``cpu``. MPS is chosen only when it is both
-        available and able to run the pipeline's kernels; see
-        :func:`mps_is_usable`.
+        ``cuda``; else ``mps`` when ``torch.linalg.inv`` runs on it; else ``cpu``.
     """
     if torch.cuda.is_available():
         return torch.device("cuda")
@@ -141,8 +138,20 @@ def auto_device() -> torch.device:
 
 
 def citation(timeout: float = 3.0) -> str:
-    # urlopen's timeout is per address tried, so on a node that drops outbound
-    # packets the fetch runs in a daemon thread and waits at most `timeout`
+    """Print and return the BibTeX entry for probixi.
+
+    Parameters
+    ----------
+    timeout : float, default 3.0
+        Seconds to wait for the current entry on GitHub before using the bundled
+        ``__citation__``.
+
+    Returns
+    -------
+    str
+        The BibTeX entry, newline-terminated.
+    """
+    # urlopen's timeout applies per address tried; the daemon thread caps the total
     fetched: list[str] = []
 
     def pull() -> None:
@@ -165,121 +174,113 @@ def citation(timeout: float = 3.0) -> str:
 
 @dataclass
 class CellCalibration:
-    """One run-level re-centring of the target cell (see ``Probixi.cell_calibrate``).
-
-    Attributes
-    ----------
-    n_lattices : int
-        Accepted lattices whose refined cells were pooled.
-    cell : CellParams
-        The new target: component-wise median of those cells.
-    previous : CellParams
-        The target it replaced.
-    edge_shift : float
-        Largest relative change over a, b, c.
-    angle_shift : float
-        Largest absolute change over alpha, beta, gamma (radians).
-    applied : bool
-        False when the median fell outside the file cell's match window
-        and the target was left alone.
-    """
-
-    n_lattices: int
-    cell: CellParams
+    # One entry of Probixi.cell_calibrations
+    n_lattices: int  # refined cells pooled
+    cell: CellParams  # their component-wise median
     previous: CellParams
-    edge_shift: float
-    angle_shift: float
-    applied: bool = True
+    edge_shift: float  # largest relative change over a, b, c
+    angle_shift: float  # largest absolute change over alpha, beta, gamma (rad)
+    applied: bool = True  # False: the median left the cell file's match window
 
 
 @dataclass
 class CameraLengthCalibration:
-    """Camera length fitted on the seed lattices.
-
-    Attributes
-    ----------
-    n_lattices : int
-        Lattices in the fit.
-    previous, distance : float
-        Camera length (m) before and after.
-    eps, sigma : float
-        Relative change ``distance / previous - 1`` and the last fit's error.
-    applied : bool
-        Whether the distance was changed.
-    """
-
+    # Probixi.camera_length_calibration, fitted on the seed lattices
     n_lattices: int
-    previous: float
-    distance: float
-    eps: float
-    sigma: float
-    applied: bool
+    previous: float  # m, before the first re-fit
+    distance: float  # m
+    eps: float  # distance / previous - 1
+    sigma: float  # standard error of the last fit's relative shift
+    applied: bool  # distance differs from previous
 
 
 @dataclass
 class Probixi:
     """Self-calibrating probabilistic peak finder and indexer.
 
-    Observe the detector noise on a slice of seed frames, calibrate a
-    probabilistic detector from it (peak/noise scale ``kappa``, peak prior, the
-    pixel/radial/panel mean blend, a variance scale pinning the background to
-    ``N(0, 1)``, and the matched-filter detection threshold), then stream frames
-    to emit indexed, merge-ready results.
+    :meth:`calibrate` learns the background model, the peak contrast ``kappa``,
+    the peak prior, and the detection threshold on seed frames;
+    :meth:`index_stream` then detects, indexes, predicts, and integrates frames.
 
     Parameters
     ----------
     list_file, geometry_file, cell_file : path-like
-        CrystFEL ``.lst`` list, ``.geom`` geometry and ``.cell`` unit-cell inputs.
-        ``cell_file`` may be omitted for peak-only use
+        CrystFEL list, geometry, and cell files. ``cell_file`` is required for
+        indexing and may be omitted for peakfinding only.
     mask_file : path-like, optional
-        HDF5 file holding the bad-pixel mask (e.g. the Eiger master file when the
-        list names its data files), overriding the geometry's ``mask_file`` and
-        the data file it falls back to. The dataset is the geometry's ``mask``
-        path if the file has it, else the NeXus ``pixel_mask`` under
-        ``/entry/instrument/detector`` (or its ``detectorSpecific`` group). A mask
-        that cannot be read from it is an error rather than skipped.
+        HDF5 file holding the bad-pixel mask, such as an Eiger master file;
+        overrides the geometry's ``mask_file``. The dataset is the geometry's
+        ``mask`` path when the file has it, else the NeXus ``pixel_mask`` under
+        ``/entry/instrument/detector`` or its ``detectorSpecific`` group. An
+        unreadable mask raises.
     noise_mode : {"online", "per_frame"}, default "online"
-        Whether the running noise model keeps updating per frame ("online",
-        tracking slow drift) or resets each frame.
+        ``online`` keeps updating the background after calibration;
+        ``per_frame`` rebuilds it for each frame.
     warmup_frames : int, default 16
-        Frames observed before the dead-pixel mask is committed.
+        Frames seen before zero-variance pixels are masked as dead.
     noise_decay : float, default 1.0
-        Per-frame weight of the running background statistics: ``1`` averages
-        the run, ``d < 1`` remembers about ``1/d`` frames.
-    finder_kappa, posterior_threshold, candidate_threshold
-        Pre-calibration detector defaults; ``calibrate`` overrides ``kappa`` and
-        the peak prior with learned values.
-    matched_filter : bool, default True
-        Use the multi-scale matched filter (the recommended operating point).
-    frame_screen_frac : float, default 0.1
-        Keep frames whose median level is below this fraction of the run's own
-        typical level out of the running background model, and report them.
-        ``0`` disables the screen (``--force-all``).
-    seed_level_frac : float, default 0.0 (off)
-        Drop calibration seed frames whose median level falls below this
-        fraction of the seed sample's own median level, i.e. blank/no-beam
-        shots.
-    mf_scales, mf_threshold
-        Matched-filter kernel scales and the fallback threshold (learned by
-        ``calibrate`` when ``target_noise_peaks`` is set).
-    flux_variance : bool or None, default None
-        Replace the frozen variance floor with a learned photon-transfer curve
-        so dim/low-flux shots are whitened against their own Poisson noise.
-        ``None`` decides at calibration: on when the background fluctuates (XFELs).
+        Per-frame weight of the running statistics; 1 averages the run, ``d < 1``
+        remembers about ``1/d`` frames.
+    finder_kappa : float, default 10.0
+        Peak contrast before calibration; :meth:`calibrate` replaces it.
     peak_size_max : int, default 30
-        Maximum connected-component size accepted as a peak.
+        Floor of the component-size cap, in pixels; the cap grows with the
+        matched-filter response.
+    posterior_threshold : float, default 0.5
+        Posterior above which a pixel is detected when ``matched_filter`` is off.
+    candidate_threshold : float, optional
+        Lower posterior threshold that also emits weak spots, in
+        ``(0, posterior_threshold]``; used only when ``matched_filter`` is off.
+    matched_filter : bool, default True
+        Detect on the multi-scale matched filter; False thresholds the posterior.
+    mf_scales : tuple of float, default (1.0, 1.6, 2.4)
+        Gaussian template widths of the matched filter, in pixels.
+    mf_threshold : float, default 5.0
+        Matched-filter threshold until :meth:`calibrate` learns one.
+    seed_level_frac : float, default 0.0
+        Drop seed frames whose median level is below this fraction of the seed
+        sample's median; 0 disables.
+    frame_screen_frac : float, default 0.1
+        Withhold frames whose median level is below this fraction of the run's
+        from the running background and list them in ``screened_frames``;
+        0 disables (``--force-all``).
+    flux_variance : bool or None, default None
+        Whiten each pixel against the variance a fitted photon-transfer curve
+        predicts at the frame's own level. None decides at calibration: on when
+        the background changes between shots beyond photon noise.
+    flux_var_floor : float, default 0.15
+        Lower bound on the flux-scaled variance, as a fraction of the running
+        variance.
     random_seed : int, default 1988
-        Seed for the draw of calibration and radii-training frames.
-    seed, refine, cell_match, integrate
-        Optional indexer configuration objects.
-    device, dtype
-        Torch device and frame dtype. ``device=None`` (the default) selects the
-        best available: CUDA, else Apple MPS, else CPU.
+        Seed for the draw of calibration and aperture-training frames.
+    cell_calibrate : bool, default True
+        Re-centre the target cell on the median refined cell of the calibration
+        lattices and then during the stream, and re-fit the camera length.
+    cell_calibrate_after : int, default 200
+        Accepted lattices pooled before each re-centring during the stream.
+    cell_calibrate_rounds : int, default 2
+        Re-centrings during the stream.
+    cell_calibrate_warn : float, default 0.005
+        Relative edge shift above which a re-centring warns.
+    cell_calibrate_alpha : float, default 1e-3
+        Largest enrichment chance probability of a lattice whose cell is pooled.
+    seed, refine, cell_match, integrate : optional
+        Indexer configurations; None takes each class's defaults.
+    device : torch.device, optional
+        None selects CUDA, then MPS, then CPU.
+    dtype : torch.dtype, default torch.float32
+        Frame dtype.
 
     Attributes
     ----------
     threshold_calibration : ThresholdCalibration or None
-        The fitted matched-filter threshold result, set by ``calibrate``.
+        Matched-filter threshold fit, set by :meth:`calibrate`.
+    screened_frames : list of int
+        Absolute indices of frames withheld from the background as blank.
+    cell_calibrations : list
+        One record per target-cell re-centring.
+    camera_length_calibration : optional
+        Camera-length fit on the seed lattices, set by :meth:`calibrate`.
     """
 
     list_file: PathLike
@@ -367,11 +368,11 @@ class Probixi:
 
     @property
     def integration_radii(self) -> Optional[tuple[float, float, float]]:
-        """Learned ``(disk, annulus_in, annulus_out)`` radii in pixels.
+        """Learned ``(disk, annulus_in, annulus_out)`` radii in pixels, or None.
 
-        Measured by :meth:`calibrate` from the radial profile of the seed
-        frames' peaks; ``None`` before calibration or when too few peaks were
-        found to measure it (the indexer then falls back to a fixed triple).
+        :meth:`calibrate` measures them from the radial profile of peaks on
+        frames outside the seed set. None before calibration or with too few
+        peaks, in which case the indexer uses fixed radii.
         """
         if self.indexer is None:
             return None
@@ -379,16 +380,15 @@ class Probixi:
 
     @property
     def aperture_choice(self) -> Optional[tuple[str, dict]]:
-        """``(aperture, diagnostics)`` of an ``"auto"`` aperture after calibrate.
+        """``(aperture, diagnostics)`` chosen under ``aperture="auto"``, or None.
 
-        ``None`` unless :meth:`calibrate` measured the choice. The diagnostics
-        hold the strong-peak count ``n``, the captured fraction ``f_mean``, its
-        ``common_trend`` over |q|, the per-crystal ``residual_trend`` and
-        ``crystal_spread`` (with ``spread_z``), when that spread is significant
-        the ``noise_ratio`` of flux to snr per-observation variance (flux only
-        below 1), both radii and the ``reason``.
-        Early exits (too few peaks or crystals) carry only the keys measured
-        so far.
+        Set by :meth:`calibrate`. ``diagnostics`` holds the strong-peak count
+        ``n``, the captured flux fraction ``f_mean`` and its ``common_trend`` over
+        ``|q|``, the per-crystal ``residual_trend`` and ``crystal_spread`` with
+        ``spread_z``, the ``noise_ratio`` of flux to snr per-observation variance
+        when the spread is significant (flux wins only below 1), both radii, and
+        the ``reason``. An early exit, on too few peaks or crystals, carries only
+        the keys measured before it.
         """
         diag = getattr(self, "_aperture_diag", None)
         if diag is None or self.indexer is None:
@@ -397,13 +397,11 @@ class Probixi:
 
     @property
     def integration_recipe(self) -> Optional[dict]:
-        """Integration settings recorded in the database's ``integration`` table.
+        """Integration settings written to the database's ``integration`` table.
 
         ``radii`` (disk, annulus_in, annulus_out) in pixels, ``adu_per_photon``,
-        the local-background ``bg_annulus_pixels`` and the ``aperture`` rule, as
-        the indexer applies them after :meth:`calibrate`; ``None`` without an
-        indexer. A merging program (e.g. torchsx) reads these back instead of
-        guessing CrystFEL defaults.
+        the local-background ``bg_annulus_pixels``, and the ``aperture`` rule, as
+        applied after :meth:`calibrate`. None without a cell.
         """
         if self.indexer is None:
             return None
@@ -421,17 +419,17 @@ class Probixi:
 
     @property
     def blank_frame_floor(self) -> Optional[float]:
-        """Median-level cut below which a frame is treated as a blank shot.
+        """Median level below which a frame is a blank shot, or None.
 
-        ``None`` when the screen is disabled or the run's reference level is not
-        known yet (it is measured during :meth:`calibrate`).
+        None when the screen is disabled or before :meth:`calibrate` measures the
+        run's reference level.
         """
         if self.frame_screen_frac <= 0.0 or not self._level_ref:
             return None
         return self.frame_screen_frac * float(self._level_ref)
 
     def frame_source(self, index: int) -> str:
-        """``path //event`` for an absolute frame index, for log messages."""
+        """CrystFEL ``filename //event`` label of an absolute frame index."""
         offset = 0
         for info in (self.metadata.files or {}).values():
             n = int(getattr(info, "n_frames", 0))
@@ -452,16 +450,16 @@ class Probixi:
 
     @property
     def geometry(self) -> dict:
-        """Detector geometry dict (beam_center, clen, pixel_size, wavelength, ...)."""
+        """Detector geometry dict, including any camera-length re-fit."""
         if self.indexer is not None:
             return self.indexer.geometry
         geom = self.loader.metadata.geometry
-        assert geom is not None  # guaranteed non-None by __post_init__
+        assert geom is not None  # __post_init__ raises otherwise
         return geom.to_dict()
 
     @property
     def target_cell(self) -> CellParams:
-        """Target unit cell that accepted orientations must match."""
+        """Unit cell accepted lattices must match, after any re-centring."""
         if self.indexer is None:
             raise RuntimeError(
                 "no target cell; construct Probixi with a cell_file to index"
@@ -470,7 +468,7 @@ class Probixi:
 
     @property
     def noise(self) -> NoiseModel:
-        """The live noise model (built lazily on the first frame seen)."""
+        """Live noise model, built on the first frame seen."""
         if self._noise is None:
             raise RuntimeError(
                 "Probixi not yet seeded; pass a frame through fit_noise, calibrate, "
@@ -480,7 +478,7 @@ class Probixi:
 
     @property
     def finder(self) -> PeakFinder:
-        """The peak finder over the noise model (built lazily on the first frame)."""
+        """Peak finder over the noise model, built on the first frame seen."""
         if self._finder is None:
             raise RuntimeError(
                 "Probixi not yet seeded; pass a frame through fit_noise, calibrate, "
@@ -500,16 +498,17 @@ class Probixi:
         Parameters
         ----------
         start, stop : int, optional
-            Half-open absolute frame range over the run; full run if omitted.
+            Absolute frame range ``[start, stop)``; the whole run by default.
         batch_size : int, default 1
-            Frames stacked per yielded tensor (1 yields single frames).
+            Frames per yielded tensor.
         prefetch : int, default 2
-            Batches read ahead on a background thread to overlap I/O.
+            Batches a background thread reads ahead.
 
         Returns
         -------
         Iterator[torch.Tensor]
-            Frames on the configured device and dtype.
+            ``(H, W)`` frames, or ``(B, H, W)`` batches when ``batch_size > 1``,
+            on the configured device and dtype.
         """
         return iter_frames(
             self.loader,
@@ -572,27 +571,24 @@ class Probixi:
         update_noise: bool = False,
         **render_kwargs,
     ) -> Path:
-        """Render one frame with its detected peaks and indexed reflections.
+        """Render one frame with its detected peaks and predicted reflections.
 
-        Resolves ``frame`` to an absolute index, reads it off disk, runs peak
-        finding (and indexing, when a target cell is configured) on that single
-        frame, and writes an overlay image. Call :meth:`calibrate` first for
-        production-quality detection. Tiled detectors are drawn assembled.
+        Runs peakfinding, and indexing when a cell is set, on that frame alone.
+        Tiled detectors are drawn assembled. Call :meth:`calibrate` first.
 
         Parameters
         ----------
-        frame : int or str or tuple
-            Absolute frame index, an ``"image_filename//event"`` string, or a
-            ``(filename, event)`` pair; per-event files also take ``"file tag-N//"``.
+        frame : int, str, or tuple
+            Absolute frame index, ``"filename//event"``, ``"filename tag-N//"``,
+            or a ``(filename, event)`` pair.
         path : str or Path
             Output image path.
         peaks : bool, default True
-            Overlay detected peaks.
+            Overlay detected peaks as open circles.
         predictions : bool, default True
-            Overlay the predicted lattice when the frame indexes.
+            Overlay predicted reflections as crosses when the frame indexes.
         update_noise : bool, default False
-            Fold this frame into the live noise model (off by default so
-            recalling a frame does not perturb pipeline state).
+            Fold this frame into the live noise model.
         **render_kwargs
             Forwarded to :func:`probixi.io.render_frame` (``title``, ``cmap``,
             ``vmax_pct``, ...).
@@ -687,10 +683,7 @@ class Probixi:
         )
 
     def _static_mask(self, frame: Tensor, frame_size: tuple[int, int]) -> Tensor:
-        # a-priori bad pixels: at/above max_adu (gaps/dead/saturated), pixels
-        # flagged by value (flag_lessthan/morethan/equal, CrystFEL's strict
-        # comparisons), panel-edge pixels, and geometry bad regions in either
-        # coordinate form -- all kept out of the background model and detection.
+        # A priori bad: >= max_adu, flag_* values, panel edges, bad regions, stored mask
         mask = torch.ones(frame_size, dtype=torch.bool, device=frame.device)
         geom = self.loader.metadata.geometry
         max_adu = geom.parameters.get("max_adu") if geom else None
@@ -757,7 +750,7 @@ class Probixi:
         ).reshape(frame_size)
 
     def _infer_beamstop_qmin(self, seed: Iterable[Tensor]) -> Optional[float]:
-        # Learn a beam-center exclusion |q|_min (A^-1) from the calibrated finder
+        # Beamstop-halo |q|_min (A^-1) from the |q| density of the seed peaks
         if self._noise is None:
             return None
         shp = self._noise.valid_mask.shape
@@ -816,7 +809,6 @@ class Probixi:
             estimate_scale=False,
         ):
             n_frames += 1
-            # stop once the profile rests on enough frames and enough peaks
             if n_frames > _RADII_MIN_FRAMES and n_peaks >= (
                 _APERTURE_MIN_PEAKS if auto else _RADII_MIN_PEAKS
             ):
@@ -876,7 +868,7 @@ class Probixi:
             )
             self.indexer._resolved_aperture = aperture
             self._aperture_diag = diag
-            # what the decision saw, for offline inspection
+            # inputs to the aperture choice, kept for offline inspection
             self._aperture_data = dict(
                 sums=torch.cat(sums).cpu(),
                 squares=torch.cat(sqs).cpu(),
@@ -892,8 +884,7 @@ class Probixi:
         return radii_from_profile(profile, snr=aperture != "flux")
 
     def _apply_beamstop_qmin(self, q_min: float) -> None:
-        # AND a |q| >= q_min beam-center exclusion into the noise model's masks so
-        # detection and the background sources skip the beamstop region.
+        # Exclude |q| < q_min from detection and from every background source
         if self._noise is None or q_min <= 0:
             return
         shp = self._noise.valid_mask.shape
@@ -909,11 +900,10 @@ class Probixi:
         keep = keep.to(self._noise.valid_mask.device)
         self._noise.static_mask &= keep
         self._noise.valid_mask &= keep
-        self._noise._mask_version += 1
+        self._noise._mask_version += 1  # PeakFinder recomputes mask denominators
 
     def _infer_shadow_mask(self) -> Optional[Tensor]:
-        # Static shadow from the warmed noise model== pixel mean far below the
-        # radial model at the same radius, grown by the local-background radius
+        # Grown by the annulus radius so no local background straddles a shadow edge
         if self._noise is None:
             return None
         finder = self.finder
@@ -942,12 +932,17 @@ class Probixi:
             self.noise.update(item)
 
     def fit_noise(self, frames: Iterable[Tensor]) -> "Probixi":
-        """Observe ``frames`` to warm the noise model (builds it on the first).
+        """Fold frames into the noise model, building it on the first.
+
+        Parameters
+        ----------
+        frames : iterable of torch.Tensor
+            ``(H, W)`` frames or ``(B, H, W)`` batches.
 
         Returns
         -------
         Probixi
-            Self, for chaining.
+            Self.
         """
         for item in frames:
             self._ensure_built(item)
@@ -964,29 +959,23 @@ class Probixi:
         batch_size: int = 15,
         **kwargs,
     ) -> Path:
-        """Write a noise-model diagnostic GIF, driving the live model.
+        """Write a GIF of the live noise model over a slice of the run.
 
-        Streams ``frames`` (or a ``[start, stop)`` slice of the run) through the
-        pipeline's live noise model, snapshotting after every ``batch_size``
-        frames, and animates the running mean background, its radial profile,
-        and the per-batch drift. The model is built lazily (with the
-        geometry-aware bad-pixel mask) if it has not been seeded yet.
-
-        Because it drives the *live* model, every frame is folded into the
-        running stats: run it before ``calibrate`` to watch warmup, or on a
-        fresh ``Probixi`` to inspect a run's drift. One mean-image snapshot is
-        retained per batch, so prefer a bounded slice for long runs.
+        Animates the running mean, its radial profile, and the per-batch drift.
+        Every frame is folded into the live model, so call it before
+        :meth:`calibrate` or on a fresh pipeline. One mean image is kept per
+        batch in memory.
 
         Parameters
         ----------
         path : path-like
             Output ``.gif`` path.
         frames : iterable of torch.Tensor, optional
-            Explicit frames; defaults to the ``[start, stop)`` run slice.
+            Frames to animate; the ``[start, stop)`` slice of the run by default.
         start, stop : int, optional
-            Half-open frame range when ``frames`` is not given.
+            Frame range when ``frames`` is not given.
         batch_size : int, default 15
-            Frames folded in between animation snapshots.
+            Frames folded in between snapshots.
         **kwargs
             Forwarded to the noise model's diagnostics (``fps``, ``cmap``,
             ``dpi``, ``max_radius``, ``figsize``).
@@ -1003,9 +992,7 @@ class Probixi:
         except StopIteration as exc:
             raise ValueError("no frames available to animate") from exc
         self._ensure_built(first)
-        # For a tiled/rotated detector (e.g. CSPAD) reassemble the mean image
-        # into physical detector space so rings render continuously; single-panel
-        # geometries return None and keep the raw image.
+        # Tiled detectors are drawn assembled so rings stay continuous
         asm = build_physical_assembler(self.loader.metadata.geometry)
         if asm is not None:
             assemble_fn, beam_yx, *_ = asm
@@ -1025,40 +1012,38 @@ class Probixi:
         threshold_opts: Optional[dict] = None,
         **opts,
     ) -> CalibrationResult:
-        """Calibrate the detector on seed frames, then freeze the learned params.
+        """Calibrate the detector on seed frames and freeze the learned parameters.
 
-        Warms the noise model, then learns the peak/noise scale ``kappa`` and
-        peak prior (EM mixture) and the mean blend + variance scale that pin the
-        background ``z`` to ``N(0, 1)``. With ``target_noise_peaks`` set (the
-        default), also calibrates the matched-filter threshold so a signal-free
-        frame yields at most that many noise blobs, and installs it on the
-        finder. Decides ``flux_variance`` when it is ``None`` and, if on, fits
-        the photon-transfer curve.
+        Fits the background blend and variance scale that make the background
+        ``z`` standard normal, the peak contrast ``kappa`` and peak prior by EM,
+        and, with ``target_noise_peaks`` set, the matched-filter threshold. Also
+        decides ``flux_variance`` when it is None and learns the shadow and
+        beamstop masks and the integration aperture. With a cell it indexes the
+        seed frames to size the disks at predicted positions and, under
+        ``cell_calibrate``, to re-centre the cell and re-fit the camera length.
 
         Parameters
         ----------
         n_seed : int, default 32
-            Frames drawn at random from the run to calibrate on when
-            ``seed_frames`` is not given.
+            Frames drawn at random from the run when ``seed_frames`` is not given.
         seed_frames : iterable of torch.Tensor, optional
-            Explicit calibration frames that replace the ``n_seed`` random
-            draw. Anything with a length, such as a list or a stacked tensor,
-            is read one frame at a time. A generator is copied into a list
-            first.
+            Calibration frames replacing the random draw; a generator is copied
+            into a list first.
         eigen_modes : int, default 0
-            If > 0, also fit this many low-rank background modes (XFEL/SFX).
+            Low-rank background modes to fit; 0 fits none.
         target_noise_peaks : float or None, default 5.0
-            Matched-filter operating point (expected noise blobs per signal-free
-            frame). ``None`` skips threshold calibration. 5 ~ ``mf_threshold`` 5.5.
+            Noise budget: expected noise detections per signal-free frame. None
+            keeps ``mf_threshold``.
         threshold_opts : dict, optional
-            Extra keyword arguments forwarded to ``calibrate_threshold``.
+            Keyword arguments for :func:`probixi.peakfinding.calibrate_threshold`.
         **opts
-            Extra keyword arguments forwarded to ``calibrate_noise``.
+            Keyword arguments for :func:`probixi.peakfinding.calibrate_noise`.
 
         Returns
         -------
         CalibrationResult
-            The applied noise calibration.
+            The applied noise calibration (``kappa``, ``prior_peak``,
+            ``var_scale``, ...).
         """
         seed_indices: list[int] = []
         self.blank_seed_floor = None
@@ -1215,14 +1200,14 @@ class Probixi:
         )
         if step:
             self.indexer.geometry["clen"] = new
-            self.indexer.geometry["clen_shift"] = new - first  # for the file's clen
+            self.indexer.geometry["clen_shift"] = new - first  # writers move file clen
             self.loader.metadata.geometry.distance = new
             self.indexer._q_max = None
         return step
 
     @property
     def beamstop_min_res(self) -> Optional[float]:
-        """Effective low-resolution cutoff (A) excluding the beam center, or None."""
+        """Low-resolution limit (A) of the learned beamstop exclusion, or None."""
         return 1.0 / self._beamstop_qmin if self._beamstop_qmin else None
 
     def _sync_active_noise_sources(self) -> None:
@@ -1247,22 +1232,20 @@ class Probixi:
         Parameters
         ----------
         frames : iterable of torch.Tensor
-            Frames to search; the first triggers lazy model construction.
+            ``(H, W)`` frames or ``(B, H, W)`` batches; the first builds the
+            noise model if needed.
         start_index : int, default 0
-            Absolute index assigned to the first frame (so results carry true
-            run indices when starting partway through).
+            Absolute index of the first frame.
         update_noise : bool, default True
-            Fold each frame into the running noise model as it passes.
+            Fold each non-blank frame into the running noise model.
         estimate_scale : bool, default True
-            Estimate the per-frame fluence scale (when a calibration reference
-            exists) so ``index_stream`` can attach it to each solution. Set
-            ``False`` for peak-only use to skip the per-frame regression and
-            avoid accumulating scales that are never consumed.
+            Estimate each frame's fluence scale for :meth:`index_stream`; False
+            skips the regression, as peakfinding alone never reads it.
 
         Returns
         -------
         PeakStream
-            Lazy, composable stream of ``PeakResult`` (torch-resident).
+            Lazy stream of ``PeakResult``; tensors stay on the device.
         """
 
         floor = self.blank_frame_floor
@@ -1313,17 +1296,18 @@ class Probixi:
         recalibrate_every: Optional[int] = None,
         enrich_alpha: Optional[float] = None,
     ) -> IndexStream[FrameIndexResult]:
-        """Yield individual lattices from ``index_frame_stream``.
+        """Open a lazy stream with one result per accepted lattice.
 
         Parameters
         ----------
         frames, batch_size, start_index, update_noise, recalibrate_every, enrich_alpha
-            See ``index_frame_stream``.
+            As in :meth:`index_frame_stream`.
 
         Returns
         -------
         IndexStream
-            Accepted lattices, sharing physical-frame statistics.
+            Single-use stream of accepted lattices in input order; tensors stay
+            on the device, and only the writers move them off.
         """
         return self.index_frame_stream(
             frames,
@@ -1343,30 +1327,32 @@ class Probixi:
         recalibrate_every: Optional[int] = None,
         enrich_alpha: Optional[float] = None,
     ) -> FrameIndexStream:
-        """Yield every input image with its accepted lattices.
+        """Open a lazy stream with one result per input frame, indexed or not.
 
         Parameters
         ----------
-        frames : iterable of Tensor
-            Images in input-list order, starting at ``start_index``.
-        batch_size : int
-            Frames per indexing batch.
-        start_index : int
-            Absolute input-list offset.
-        update_noise : bool
-            Update running statistics when ``recalibrate_every`` is None.
+        frames : iterable of torch.Tensor
+            Frames in list order, the first at ``start_index``.
+        batch_size : int, default 8
+            Frames per batched refinement pass.
+        start_index : int, default 0
+            Absolute index of the first frame.
+        update_noise : bool, default True
+            Fold frames into the running statistics; ignored when
+            ``recalibrate_every`` is set.
         recalibrate_every : int, optional
-            None preserves running updates; zero freezes calibration. Positive
-            intervals rebuild noise and thresholds from the leading seed frames
-            at input-list boundaries, freezing statistics between boundaries.
-            Call ``calibrate`` first to set seed count and threshold options.
+            Recalibrate on the first ``n_seed`` frames of every block of this many
+            absolute frames and freeze the statistics in between; 0 freezes the
+            initial calibration. Reuses the options of a prior :meth:`calibrate`.
         enrich_alpha : float, optional
-            Gate lattices before cross-lattice overlap exclusion.
+            Keep only lattices whose enrichment chance probability is at most this,
+            tested before overlap exclusion; None disables the gate.
 
         Returns
         -------
         FrameIndexStream
-            Includes unindexed images and physical-frame statistics.
+            Single-use stream of per-frame results, with running counts in
+            ``stats``.
         """
         if self.indexer is None:
             raise RuntimeError(
@@ -1383,8 +1369,7 @@ class Probixi:
         self._frame_scales.clear()
         stats = IndexStats()
 
-        # a recalibration boundary can fall inside a batch, so split batched
-        # input into single frames whenever a schedule is in force
+        # A recalibration boundary can fall inside a batch: schedules split batches
         def _individual() -> Iterator[Tensor]:
             for item in frames:
                 yield from item if item.ndim == 3 else (item,)
@@ -1518,25 +1503,22 @@ class Probixi:
         frames: Iterable[Tensor],
         start_index: int = 0,
     ) -> Iterator[FrameScale]:
-        """Infer the per-frame relative intensity scale, frame by frame.
+        """Yield each frame's fluence scale relative to the calibration background.
 
-        Each frame is regressed against the background reference frozen at
-        ``calibrate`` (so online drift-tracking does not contaminate the scale),
-        yielding ``g_f`` and its uncertainty -- the shot-to-shot fluence scale
-        that dominates at an XFEL and that initializes downstream per-pattern
-        scaling. Requires ``calibrate`` to have been run.
+        Each frame is regressed against the background reference frozen by
+        :meth:`calibrate`, so online drift does not enter the scale.
 
         Parameters
         ----------
         frames : iterable of torch.Tensor
-            Frames to scale (single 2-D frames).
+            ``(H, W)`` frames; a batch contributes only its first frame.
         start_index : int, default 0
-            Absolute index assigned to the first frame.
+            Absolute index of the first frame.
 
         Yields
         ------
         FrameScale
-            ``(frame_index, scale, sigma, offset)`` per frame.
+            ``frame_index``, ``scale``, ``sigma``, and ``offset`` of each frame.
         """
         if self._scale_ref is None:
             raise RuntimeError("call calibrate() before scale_stream() (no reference)")
@@ -1549,6 +1531,7 @@ class Probixi:
 def _beamstop_qmin_from_histogram(
     ph: Tensor, pix: Tensor, edges: Tensor, n_bins: int
 ) -> Optional[float]:
+    # ph, pix: seed peaks and valid pixels per |q| bin; returns the spike's outer edge
     density = ph / pix.clamp_min(1.0)
     big = pix >= _BEAMSTOP_MIN_BIN_PIXELS
     if not bool(big.any()):
@@ -1611,8 +1594,8 @@ def camera_length_error(
         rho = obs.norm(dim=-1).clamp_min(1e-9)
         dr = ((obs - pred) * obs).sum(-1) / rho
         keep = dr.abs() < _CLEN_MAX_RESIDUAL_PX
-        xs.append(rho[keep])
-        us.append((rho * torch.sqrt(rho * rho + L * L) / L)[keep])
+        xs.append(rho[keep])  # radial shift per unit camera-length error
+        us.append((rho * torch.sqrt(rho * rho + L * L) / L)[keep])  # rho / cos 2theta
         ys.append(dr[keep])
         ids.append(torch.full((int(keep.sum()),), len(ids)))
     if len(ids) < 10:
@@ -1632,7 +1615,7 @@ def camera_length_error(
         eps = float((w * X * Y).sum() / (w * X * X).sum().clamp_min(1e-12))
         res = Y - X * eps
         s = 1.4826 * float(res.abs().median())
-        w = (1.5 * s / res.abs().clamp_min(1e-12)).clamp_max(1.0)
+        w = (1.5 * s / res.abs().clamp_min(1e-12)).clamp_max(1.0)  # Huber, k = 1.5
     se = s / math.sqrt(float((w * X * X).sum().clamp_min(1e-12)))
     return eps, se, len(ids)
 
@@ -1750,29 +1733,7 @@ def _mask_panel_edges(mask: Tensor, geom) -> None:
 def shadow_mask(
     pixel_mean: Tensor, radial_mean: Tensor, valid: Tensor, grow: int
 ) -> Optional[Tensor]:
-    """Static shadow regions: pixels far below the radial background model.
-
-    Compares each live pixel's mean to the rotational model's mean at its radius.
-    A pixel is dark when its log-ratio lies more than ``_SHADOW_MAD_K`` robust
-    sigmas below the median and the ratio is under ``_SHADOW_MAX_RATIO``; a
-    shadow core is a dark pixel whose ``(2*grow+1)``-square window is at least
-    half dark (isolated dark pixels are not a shadow). Cores are grown by
-    ``grow`` pixels so no local-background annulus straddles the edge.
-
-    Parameters
-    ----------
-    pixel_mean, radial_mean : Tensor
-        (H, W) per-pixel and radial-model background means.
-    valid : Tensor
-        (H, W) bool mask of live pixels.
-    grow : int
-        Growth radius in pixels (the local-background annulus radius).
-
-    Returns
-    -------
-    Tensor or None
-        (H, W) bool mask of shadow pixels, or ``None`` when there is none.
-    """
+    # (H, W) bool or None: dark pixels in mostly dark windows, grown by grow px
     ok = valid & torch.isfinite(pixel_mean) & (radial_mean > 0)
     if int(ok.sum()) < 1000:
         return None
@@ -1805,7 +1766,7 @@ def shadow_mask(
 
 
 def _mask_lab_bad_regions(mask: Tensor, geom) -> None:
-    # mask abd regions defined in lab-frame coordinates (e.g. beamstop, guard ring, etc.)
+    # Bad regions given in lab-frame x/y (px), such as a beamstop or guard ring
     regions = [br for br in geom.bad_regions if br.is_lab_frame]
     if not regions:
         return

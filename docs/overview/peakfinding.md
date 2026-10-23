@@ -2,7 +2,7 @@
 
 A conventional peakfinder keeps whatever exceeds a threshold, in detector units or in a signal-to-noise proxy. The appropriate threshold depends on the beam, the detector, the background, and the sample, so a value tuned on one run does not transfer to the next. `probixi` replaces the threshold with a hypothesis test whose null distribution is learned from the data. Constants and defaults are listed in the [method reference](method.md).
 
-## Two properties of the stream
+## Stationary background and sparse signal
 
 1. Every frame records the same detector under the same beam. The background at pixel $i$ is therefore a draw from one distribution $F_i$, common to all frames and changing only slowly within a run.
 2. Bragg signal is sparse. At any pixel only a small fraction of observations carry signal.
@@ -19,9 +19,9 @@ which is standard normal under $H_0$ once the model is calibrated, and tests $z$
 
 `probixi` accumulates the mean and variance with Welford's update, which avoids the cancellation that $\sum x^2 - n\bar x^2$ suffers in single precision. A per-pixel estimate needs many frames to stabilise and ignores the spatial structure of a detector background, so three estimators of the same form run on the same stream.
 
-- **Pixel.** One estimate per pixel.
-- **Radial.** Pixels pooled into annuli 2 pixels wide about the beam centre. This captures solvent and air scatter, which are symmetric about the beam.
-- **Frame-wide.** All pixels pooled. This captures an offset common to the frame, such as a pedestal shift.
+- The pixel estimator keeps one estimate per pixel.
+- The radial estimator pools pixels into annuli 2 pixels wide about the beam centre, which captures solvent and air scatter, symmetric about the beam.
+- The frame-wide estimator pools the pixels of each geometry panel, or of the whole frame on a single-panel detector, which captures an offset common to a panel, such as a pedestal shift.
 
 The prediction is a convex blend of the three means with one scale on the per-pixel standard deviation,
 
@@ -29,9 +29,9 @@ $$\mu_i = \sum_k w_k\,\mu_{k,i}, \qquad \sigma_i = s\,\sigma_{\text{pix},i}.$$
 
 A Bragg peak that enters the update inflates the variance against which later peaks are tested. Each frame is therefore clipped from above at $\mu_i + 5\sigma_i$ before the update. The clip is one-sided, so a downward excursion updates the model as usual and a peak contributes at most $5\sigma_i$. Pixels whose variance is still zero after 16 frames are masked as dead.
 
-## Calibration
+## Calibration of the null and peak hypotheses
 
-The test assumes $z \sim \mathcal N(0,1)$ on background, which holds for no arbitrary choice of blend. `probixi` therefore chooses $(w, s)$ on a set of seed frames drawn at random from the run. On a random subsample of pixels it labels the background set $\{|z| < 3\}$ using the pixel mean alone, so the set does not depend on the blend. For each $w$ on a simplex grid of spacing 0.1 it evaluates
+The test assumes $z \sim \mathcal N(0,1)$ on background, which an arbitrary blend does not satisfy. `probixi` therefore chooses $(w, s)$ on a set of seed frames drawn at random from the run. On a random subsample of pixels it labels the background set $\{|z| < 3\}$ using the pixel mean alone, so the set does not depend on the blend. For each $w$ on a simplex grid of spacing 0.1 it evaluates
 
 $$\mathcal L(w) = \bar z^{\,2} + (v - 1)^2 + \tfrac12\,\mathrm{kurt}^2,$$
 
@@ -83,7 +83,7 @@ Input that holds only hits, such as Cheetah's hit files, has no quiet frame, and
 
 The budget, five noise detections per signal-free frame by default (`--target-noise-peaks`), is the one operating point left in the method. It is stated in units of noise detections per frame, which mean the same thing on every detector.
 
-## Peaks
+## Peak extraction and shape filters
 
 Pixels above the threshold are grouped into 8-connected components. Each component is reduced to a centroid weighted by the positive excess, a summed excess with its uncertainty, and two shape terms. A component is kept when it has at least two pixels, its second-moment eigenvalue ratio is at most 5, which rejects streaks and cosmic-ray tracks, and its maximum exceeds 1.2 times its mean, which rejects flat regions. The size limit follows from the filter. A Gaussian response of height $R$ exceeds the threshold over an area $2\pi\sigma_s^2\ln(R/T^\star)$, and a component may cover four times that area at the largest width, or 30 pixels if that is larger. A frame with more than 1000 components indicates a failure of the background model and yields no peaks.
 
@@ -91,16 +91,16 @@ Pixels above the threshold are grouped into 8-connected components. Each compone
 
 Pixels that carry no measurement are excluded from every estimate and every test. The static mask combines the geometry's bad regions, panel edges, saturated pixels, and any mask stored with the data. Three more are learned.
 
-- **Dead pixels**, with zero variance after 16 frames.
-- **Static shadows**, such as a beamstop holder. A pixel is dark when its running mean lies far below the radial mean at the same radius. Dark regions are grown by 9 pixels to keep every local-background annulus clear of the edge, and the model is refitted without them.
-- **Beamstop halo.** The seed peaks are histogrammed by $|\mathbf q|$. When the innermost bins hold at least 50 times the median peak density, the exclusion is extended outward, by at most two bins, to where the density falls to a tenth of the spike. This also sets the low-resolution limit the output reports.
+- Dead pixels, with zero variance after 16 frames.
+- Static shadows, such as a beamstop holder. A pixel is dark when its running mean lies far below the radial mean at the same radius. Dark regions are grown by 9 pixels to keep every local-background annulus clear of the edge, and the model is refitted without them.
+- The beamstop halo. The seed peaks are histogrammed by $|\mathbf q|$. When the innermost bins hold at least 50 times the median peak density, the exclusion is extended outward, by at most two bins, to where the density falls to a tenth of the spike. This also sets the low-resolution limit the output reports.
 
 Frames that received no beam, with a median level below a tenth of the run's, are withheld from the running statistics but still pass through detection (`--force-all` disables this).
 
-## Variable flux
+## Flux-dependent variance
 
 The running variance is measured at the run's typical fluence. With the flux model ([vignette](../vignettes/variable_flux.md)), chosen at calibration when the background level changes between shots beyond photon noise or forced with `--flux-variance`, `probixi` fits $\sigma^2 = \sigma^2_{\text{read}} + g\,\mu$ to the calibrated model and whitens each pixel against the variance predicted at that frame's own level, bounded below by 0.15 of the running variance.
 
-## After calibration
+## Frozen parameters and drift
 
 The blend, the scale, $\kappa$, $\pi$, and the threshold are frozen after calibration. The running statistics continue to update and follow slow drift within the run. They average the whole run unless `--noise-decay d` is set, which makes them forget with a memory of about $1/d$ frames, for a sample or beam that changes within the run. `--recalibrate-every` instead rebuilds the calibration at fixed intervals and freezes the statistics in between, which suits a run that spans an abrupt change. Every run is whitened to the same unit-variance standard, so peak counts and indexing rates are comparable between conditions.

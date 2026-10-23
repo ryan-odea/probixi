@@ -8,7 +8,7 @@ from .model import NoiseStats
 
 
 class RotationalNoise(NoiseStats):
-    # Radial-bin running stats for a rotationally-symmetric background
+    # Radial estimator: annuli of bin_width px about beam_center (row, col)
 
     bin_idx: Tensor
     pixels_per_bin: Tensor
@@ -53,7 +53,6 @@ class RotationalNoise(NoiseStats):
                 (rr - self.beam_center[0]) ** 2 + (cc - self.beam_center[1]) ** 2
             )
 
-        # bin = floor(radius / bin_width)
         bin_idx = torch.floor(radius / self.bin_width).long().clamp_min(0)
         n_bins = int(bin_idx.max().item()) + 1
         self.n_bins = n_bins
@@ -73,14 +72,14 @@ class RotationalNoise(NoiseStats):
         self.valid_mask.fill_(True)
 
     def _project(self, frame: Tensor, mask: Optional[Tensor]) -> Tensor:
-        # Mean over each bin's (valid) pixels: xbar_b = sum_b x / count_b.
+        # Observation per bin: the mean of its valid pixels
         flat_idx = self.bin_idx.flatten()
         sum_per_bin = torch.zeros_like(self.mean_)
         if mask is None:
             sum_per_bin.index_add_(0, flat_idx, frame.flatten())
             counts = self.pixels_per_bin
         else:
-            # per-bin counts (exact integers) only change with the mask
+            # per-bin counts depend only on the mask, so they are cached by its key
             key = (tensor_key(mask), frame.dtype, frame.device)
             cached = getattr(self, "_mask_counts", None)
             if cached is None or cached[0] != key:
@@ -96,4 +95,5 @@ class RotationalNoise(NoiseStats):
         return self.mean_[self.bin_idx]
 
     def var(self) -> Tensor:
+        # a bin mean has variance sigma^2 / n; scale back to the per-pixel variance
         return super().var()[self.bin_idx] * self.pixels_per_bin[self.bin_idx]

@@ -1,11 +1,3 @@
-"""Run-level re-centring of the target cell (Probixi.cell_calibrate).
-
-The file cell only has to bootstrap the first lattices; afterwards the seed
-basis, inlier tolerance and cell-refinement prior follow the data. Motivated by
-b2AR, where a Millepede camera length left the cell file ~1% inconsistent with
-the geometry and the known-cell seeder lost every peak inside 7 A.
-"""
-
 from __future__ import annotations
 
 import math
@@ -81,8 +73,7 @@ def test_set_target_cell_rebuilds_basis_tolerance_and_keeps_metadata(
 
 
 def test_recentring_moves_recovered_cell_from_prior_to_truth(geometry_dict, cell):
-    # With per-crystal cell refinement off, the recovered cell IS the target:
-    # a 1 % wrong target yields a 1 % wrong cell; re-centring on the truth fixes it.
+    # Without cell refinement the recovered cell is the target, 1 % off until re-centred
     U = sim.proper_rotation(0, max_angle_deg=8.0)
     positions, _ = sim.lattice_peaks(geometry_dict, cell, U)
     wrong = _scaled(cell, 1.01)
@@ -102,7 +93,7 @@ def test_recentring_moves_recovered_cell_from_prior_to_truth(geometry_dict, cell
 
 
 def _fake_pipeline(monkeypatch, cells_per_frame, **opts):
-    """A Probixi whose indexer yields canned crystals; records set_target_cell calls."""
+    # Probixi whose indexer yields canned crystals; calls records set_target_cell
     p = object.__new__(Probixi)
     p._frame_scales = {}
     p._calibration_options = {}
@@ -176,8 +167,7 @@ def test_pipeline_recentres_on_median_after_n_lattices_for_n_rounds(monkeypatch)
     def c(a):
         return CellParams(a, 20.0, 30.0, math.pi / 2, 1.8, math.pi / 2)
 
-    # frame 0: 2 lattices, frame 1: none, frame 2: 1 -> first round after frame 2;
-    # frames 3-5: one each -> second round after frame 5; frames 6-7 pooled no more
+    # The pool reaches 3 after frames 2 and 5; with 2 rounds, frames 6-7 are not pooled
     cells = {
         0: [c(9.6), c(9.8)],
         1: [],
