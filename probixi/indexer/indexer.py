@@ -719,6 +719,7 @@ class Indexer:
         self.frame_wavelengths: Optional[list[float]] = None
         # learned |q|-shell disk radii of unsnapped reflections, and their profile sums
         self._radius_by_q: Optional[tuple[Tensor, list[float]]] = None
+        self._shell_capture: Optional[list[float]] = None
         self._profile_acc: Optional[list] = None
         self.set_target_cell(target_cell)
 
@@ -1516,10 +1517,11 @@ class Indexer:
         acc, self._profile_acc = self._profile_acc, None
         if not acc or float(acc[2][:, 0].sum()) <= 0:
             return None
-        radii = radius_by_shell(
+        radii, captured = radius_by_shell(
             acc[1].cpu(), acc[2].cpu(), acc[3].cpu(), self._radii()[0]
         )
         self._radius_by_q = (acc[0].float(), radii)
+        self._shell_capture = captured
         return radii
 
     def _aperture(self) -> str:

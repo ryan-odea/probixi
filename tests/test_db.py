@@ -629,3 +629,67 @@ def test_frame_peak_summary_measures_the_intensity_falloff():
     )
     assert out[0] == pytest.approx([2.0, 9.0, 1.2])
     assert math.isnan(out[1, 0]) and out[1, 1:] == pytest.approx([9.0, 2.0])
+
+
+def test_db_records_calibration_and_shells(geometry_dict, cell, tmp_path):
+    """The calibration provenance row and the per-shell disk radii, resolved on exit."""
+    from probixi.io.db import SCHEMA_VERSION
+
+    out = tmp_path / "out.duckdb"
+    cal = dict(
+        n_seed_frames=100,
+        gain=1.1,
+        read_var=0.5,
+        flux_variance=True,
+        background_fluctuation=3.2,
+        mf_threshold=5.9,
+        tail_ratio=10.2,
+        n_quiet_frames=0,
+        kappa=2.3,
+        prior_peak=0.03,
+        var_scale=0.96,
+        snap_radius=3.0,
+        aperture="snr",
+        captured_fraction=0.72,
+        clen=0.1,
+        cell=(61.4, 141.6, 94.4, 90.0, 90.0, 90.0),
+    )
+    shells = [(0, 0.0, 1.2, 1.5, 1.0), (1, 1.2, 1.6, 2.5, 0.8)]
+    with DuckDBOffloader(
+        out,
+        geometry=geometry_dict,
+        cell=cell,
+        calibration=lambda: cal,
+        shells=lambda: shells,
+    ) as off:
+        off.write(_make_index_result(cell))
+    conn = duckdb.connect(str(out), read_only=True)
+    try:
+        row = conn.execute(
+            "SELECT schema_version, gain, flux_variance, tail_ratio, aperture, cell_b_A FROM calibration"
+        ).fetchone()
+        assert row == (SCHEMA_VERSION, 1.1, True, 10.2, "snr", 141.6)
+        assert conn.execute(
+            "SELECT shell, radius_px, captured_fraction FROM shells ORDER BY shell"
+        ).fetchall() == [(0, 1.5, 1.0), (1, 2.5, 0.8)]
+    finally:
+        conn.close()
+
+
+def test_db_writes_a_frame_without_peaks(geometry_dict, cell, tmp_path):
+    """A hit with every peak filtered away still gets its frames row."""
+    from probixi.indexer.indexer import FrameIndexResult
+
+    out = tmp_path / "out.duckdb"
+    empty = FrameIndexResult(
+        0, [], torch.zeros((0, 2)), torch.zeros(0), peak_aux=torch.zeros((0, 2))
+    )
+    with DuckDBOffloader(out, geometry=geometry_dict, cell=cell) as off:
+        off.write(empty)
+    conn = duckdb.connect(str(out), read_only=True)
+    try:
+        assert conn.execute("SELECT indexed, n_peaks FROM frames").fetchall() == [
+            (False, 0)
+        ]
+    finally:
+        conn.close()

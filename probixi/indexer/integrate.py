@@ -163,10 +163,9 @@ def radius_by_shell(
     base: float,
     k_max: int = 4,
     z_min: float = 5.0,
-) -> list[float]:
-    # Per shell: smallest radius within 2% of the best stacked S/N, non-decreasing
+) -> tuple[list[float], list[float]]:
     n_ring = _ring_pixel_counts(sums.shape[1] - 1, sums.device)
-    out, r = [], float(base)
+    out, captured, r = [], [], float(base)
     for s, c, sq in zip(sums.double(), counts.double(), squares.double()):
         p = s / c.clamp_min(1.0)
         se2 = (sq / c.clamp_min(1.0) - p * p).clamp_min(0.0) / c.clamp_min(1.0)
@@ -174,12 +173,16 @@ def radius_by_shell(
         S = torch.cumsum(p * n_ring, 0)[1 : k_max + 1]
         V = torch.cumsum(se2 * n_ring * n_ring, 0)[1 : k_max + 1]
         snr = S / torch.cumsum(n_ring, 0)[1 : k_max + 1].sqrt()
+        f = 1.0
         if float(snr.max()) > 0:  # r is kept without positive stacked signal
             k = int(torch.nonzero(snr >= 0.98 * snr.max())[0])
             if float(S[k]) > z_min * math.sqrt(float(V[k])):
                 r = max(r, k + 1.5)
+            k = min(max(int(round(r - 1.5)), 0), k_max - 1)
+            f = min(max(float(S[k] / S[-1]), 1e-3), 1.0) if float(S[-1]) > 0 else 1.0
         out.append(r)
-    return out
+        captured.append(f)
+    return out, captured
 
 
 def radii_from_profile(

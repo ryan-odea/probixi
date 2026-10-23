@@ -169,7 +169,8 @@ def test_radius_by_shell_follows_the_stacked_profile():
     counts = (n * 1e4).expand(4, 9)
     sums = profiles * counts
     squares = counts * 100.0 + sums * profiles
-    radii = radius_by_shell(sums, counts, squares, base=1.5)
+    radii, captured = radius_by_shell(sums, counts, squares, base=1.5)
+    assert captured[0] == 1.0 and 0.5 < captured[1] < 1.0 and captured[2] == 1.0
     # sharp spot keeps the base disk, a blurred one widens, an empty shell keeps it
     assert radii[0] == 1.5
     assert radii[1] > 2.0

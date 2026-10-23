@@ -364,3 +364,16 @@ def test_calibrate_threshold_uses_the_quietest_frames_on_skewed_low_count_noise(
         hits.append(f + torch.from_numpy(spots))
     th = calibrate_threshold(nm, hits, target_noise_peaks=5.0, rng_seed=0)
     assert abs(th.threshold - tc.threshold) <= 0.5
+
+
+def test_calibrate_threshold_default_budget_scales_with_the_valid_pixels():
+    """Without a target the budget is 1.25 per million valid pixels, at least one."""
+    from probixi.peakfinding.noise.calibrate import NOISE_PEAKS_PER_MPX
+
+    shape = (96, 96)
+    frames = _frames(shape, 32, background=100.0, noise_sigma=10.0, seed=5)
+    nm = NoiseModel(shape, mode="online", dtype=DTYPE)
+    calibrate_noise(nm, frames, rng_seed=0).apply(nm)
+    tc = calibrate_threshold(nm, frames, rng_seed=0)
+    assert tc.target_noise_peaks == max(1.0, round(NOISE_PEAKS_PER_MPX * 96 * 96 / 1e6))
+    assert tc.achieved_noise_peaks <= tc.target_noise_peaks

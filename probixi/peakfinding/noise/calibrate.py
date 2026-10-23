@@ -19,6 +19,8 @@ from ..peaks.neighborhood import (
 )
 
 TAIL_RATIO_TOL = 1.5
+#: default noise budget: spurious detections per million valid pixels (5 on a 4M)
+NOISE_PEAKS_PER_MPX = 1.25
 
 
 @dataclass
@@ -432,7 +434,7 @@ def calibrate_threshold(
     noise_model,
     seed_frames: Iterable[Tensor],
     *,
-    target_noise_peaks: float = 10.0,
+    target_noise_peaks: Optional[float] = None,
     quiet_quantile: float = 0.5,
     tail_ratio_tol: float = TAIL_RATIO_TOL,
     mf_scales: tuple[float, ...] = (1.0, 1.6, 2.4),
@@ -463,7 +465,7 @@ def calibrate_threshold(
         Model calibrated by :meth:`CalibrationResult.apply`.
     seed_frames : Iterable[Tensor]
         A sequence of ``(H, W)`` frames; any other iterable is copied into a list.
-    target_noise_peaks : float
+    target_noise_peaks : float, optional
         Noise budget, in local maxima above the threshold per quiet frame.
     tail_ratio_tol : float
         Largest positive-over-mirrored blob-count ratio at the grid minimum for
@@ -507,7 +509,7 @@ def calibrate_threshold(
         raise ValueError("seed_frames is empty")
     if not 0.0 < quiet_quantile <= 1.0:
         raise ValueError("quiet_quantile must be in (0, 1]")
-    if target_noise_peaks < 0:
+    if target_noise_peaks is not None and target_noise_peaks < 0:
         raise ValueError("target_noise_peaks must be >= 0")
     if threshold_grid_min >= threshold_grid_max:
         raise ValueError("threshold_grid_min must be < threshold_grid_max")
@@ -604,6 +606,8 @@ def calibrate_threshold(
     tmax_t = torch.tensor(t_max_per_frame)
     # quiet frames: max(T) below the null extreme mu0 + sigma0*sqrt(2 ln N)
     n_valid = int(mask.sum())
+    if target_noise_peaks is None:  # the budget scales with the pixels counted on
+        target_noise_peaks = max(1.0, float(round(NOISE_PEAKS_PER_MPX * n_valid / 1e6)))
     z_extreme = math.sqrt(2.0 * math.log(max(n_valid, 2)))
     quiet_max_T = mu0 + sigma0 * z_extreme
     quiet_idx = [i for i, m in enumerate(t_max_per_frame) if m <= quiet_max_T]

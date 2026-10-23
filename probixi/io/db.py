@@ -135,6 +135,9 @@ _PEAK_COLUMNS = (
     "eccentricity",
 )
 
+#: bumped when tables or columns change; TorchSX refuses a newer one
+SCHEMA_VERSION = 2
+
 _SCHEMA = """
 CREATE TABLE geometry (
     beam_center_row  DOUBLE,
@@ -167,6 +170,41 @@ CREATE TABLE cell (
     lattice_type VARCHAR,
     centering    VARCHAR,
     unique_axis  VARCHAR
+);
+
+CREATE TABLE calibration (
+    probixi_version        VARCHAR,
+    schema_version         INTEGER,
+    n_seed_frames          INTEGER,
+    gain                   DOUBLE,
+    read_var               DOUBLE,
+    flux_variance          BOOLEAN,
+    background_fluctuation DOUBLE,
+    mf_threshold           DOUBLE,
+    target_noise_peaks     DOUBLE,
+    tail_ratio             DOUBLE,
+    n_quiet_frames         INTEGER,
+    kappa                  DOUBLE,
+    prior_peak             DOUBLE,
+    var_scale              DOUBLE,
+    snap_radius            DOUBLE,
+    aperture               VARCHAR,
+    captured_fraction      DOUBLE,
+    clen                   DOUBLE,
+    cell_a_A               DOUBLE,
+    cell_b_A               DOUBLE,
+    cell_c_A               DOUBLE,
+    cell_alpha_deg         DOUBLE,
+    cell_beta_deg          DOUBLE,
+    cell_gamma_deg         DOUBLE
+);
+
+CREATE TABLE shells (
+    shell             INTEGER,
+    q_lo_nm_inv       DOUBLE,
+    q_hi_nm_inv       DOUBLE,
+    radius_px         DOUBLE,
+    captured_fraction DOUBLE
 );
 
 CREATE TABLE integration (
@@ -370,6 +408,8 @@ class DuckDBOffloader(_StreamWriter):
         indexer_name: str = "probixi",
         panel: str = "0",
         integration: Optional[dict] = None,
+        calibration=None,
+        shells=None,
     ):
         super().__init__(
             path,
@@ -381,6 +421,9 @@ class DuckDBOffloader(_StreamWriter):
         )
         self.cell = cell
         self.integration = integration
+        #: calibration dict and shell rows (or callables giving them), written on exit
+        self.calibration = calibration
+        self.shells = shells
         self._crystal_rows: list[tuple] = []
         self._frame_range = frame_range
         self._conn = None
@@ -408,10 +451,54 @@ class DuckDBOffloader(_StreamWriter):
         try:
             self._emit_unindexed()
             self._flush()
+            self._write_calibration()
             self._conn.execute(_INDEXES)
         finally:
             self._conn.close()
             self._conn = None
+
+    def _write_calibration(self) -> None:
+        assert self._conn is not None
+        cal = self.calibration() if callable(self.calibration) else self.calibration
+        rows = self.shells() if callable(self.shells) else self.shells
+        if cal:
+            cell = cal.get("cell") or (None,) * 6
+            self._conn.execute(
+                "INSERT INTO calibration VALUES (" + ", ".join("?" * 24) + ")",
+                [
+                    _probixi_version(),
+                    SCHEMA_VERSION,
+                    cal.get("n_seed_frames"),
+                    *(_as_float(cal.get(k)) for k in ("gain", "read_var")),
+                    (
+                        None
+                        if cal.get("flux_variance") is None
+                        else bool(cal["flux_variance"])
+                    ),
+                    *(
+                        _as_float(cal.get(k))
+                        for k in (
+                            "background_fluctuation",
+                            "mf_threshold",
+                            "target_noise_peaks",
+                            "tail_ratio",
+                        )
+                    ),
+                    cal.get("n_quiet_frames"),
+                    *(
+                        _as_float(cal.get(k))
+                        for k in ("kappa", "prior_peak", "var_scale", "snap_radius")
+                    ),
+                    cal.get("aperture"),
+                    *(_as_float(cal.get(k)) for k in ("captured_fraction", "clen")),
+                    *(_as_float(x) for x in cell),
+                ],
+            )
+        for row in rows or []:
+            self._conn.execute(
+                "INSERT INTO shells VALUES (?, ?, ?, ?, ?)",
+                [int(row[0]), *(_as_float(x) for x in row[1:])],
+            )
 
     def write(self, result: Union["IndexResult", "FrameIndexResult"]) -> None:
         """Buffer one frame and its lattices.
@@ -989,7 +1076,7 @@ def _nan_array(t, n: int) -> np.ndarray:
 
 def _aux_rows(aux, n: int) -> tuple:
     # (brightest pixel, eccentricity) per peak, NaN if absent
-    if aux is None:
+    if aux is None or n == 0:
         return np.full(n, np.nan), np.full(n, np.nan)
     a = _to_array(aux).reshape(n, -1)
     return a[:, 0], a[:, 1]
@@ -1049,6 +1136,15 @@ def _columns(names: tuple, rows: list) -> dict:
         array = np.array([zero if v is None else v for v in values])
         columns[name] = array if valid.all() else (array, valid)
     return columns
+
+
+def _probixi_version() -> Optional[str]:
+    try:
+        from importlib.metadata import version
+
+        return version("probixi")
+    except Exception:  # noqa: BLE001 - version is provenance only
+        return None
 
 
 def _as_float(value) -> Optional[float]:
