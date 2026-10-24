@@ -18,7 +18,6 @@ from probixi.indexer.integrate import (
     radii_from_profile,
     radius_by_shell,
     ring_sums,
-    snap_positions,
     snr_disk_radius,
     unexplained_signal_p,
 )
@@ -31,33 +30,6 @@ def _flat_frame(background: float, sigma: float = 0.0):
     excess = torch.zeros(SHAPE, dtype=torch.float32)
     var = torch.full(SHAPE, max(sigma**2, 1.0), dtype=torch.float32)
     return excess, var, mean
-
-
-def test_snap_positions_moves_prediction_onto_nearby_observed():
-    predicted = torch.tensor([[10.0, 10.0]])
-    observed = torch.tensor([[12.0, 10.0]])
-    positions, snapped, _ = snap_positions(predicted, observed, radius=5.0)
-    assert bool(snapped.all())
-    assert torch.allclose(positions, observed)
-
-
-def test_snap_positions_leaves_prediction_beyond_radius():
-    predicted = torch.tensor([[10.0, 10.0]])
-    observed = torch.tensor([[30.0, 10.0]])
-    positions, snapped, _ = snap_positions(predicted, observed, radius=5.0)
-    assert not bool(snapped.any())
-    assert torch.allclose(positions, predicted)
-
-
-def test_snap_positions_handles_empty_inputs():
-    empty = torch.zeros((0, 2))
-    positions, snapped, _ = snap_positions(
-        empty, torch.tensor([[1.0, 1.0]]), radius=5.0
-    )
-    assert positions.shape == (0, 2) and snapped.shape == (0,)
-    predicted = torch.tensor([[10.0, 10.0]])
-    positions, snapped, _ = snap_positions(predicted, empty, radius=5.0)
-    assert not bool(snapped.any())
 
 
 def test_disk_overlap_counts_flags_both_members_of_a_close_pair():
@@ -95,22 +67,20 @@ def test_integrate_rings_requires_the_background_mean():
             torch.tensor([[32.0, 32.0]]),
             excess,
             var,
-            torch.zeros((0, 2)),
             radii=(3.0, 5.0, 7.0),
         )
 
 
 def test_integrate_rings_returns_empty_for_no_predictions():
     excess, var, mean = _flat_frame(5.0)
-    positions, intensity, sigma, snapped, peak, background, *extras = integrate_rings(
+    positions, intensity, sigma, peak, background, *extras = integrate_rings(
         torch.zeros((0, 2)),
         excess,
         var,
-        torch.zeros((0, 2)),
         mean=mean,
         radii=(3.0, 5.0, 7.0),
     )
-    for t in (positions, intensity, sigma, snapped, peak, background, *extras):
+    for t in (positions, intensity, sigma, peak, background, *extras):
         assert len(t) == 0
     assert len(extras) == 5
 
@@ -118,11 +88,10 @@ def test_integrate_rings_returns_empty_for_no_predictions():
 def test_integrate_rings_recovers_intensity_above_flat_background():
     excess, var, mean = _flat_frame(7.0)
     excess[32, 32] = 100.0
-    _, intensity, _, _, peak, background, *_ = integrate_rings(
+    _, intensity, _, peak, background, *_ = integrate_rings(
         torch.tensor([[32.0, 32.0]]),
         excess,
         var,
-        torch.zeros((0, 2)),
         mean=mean,
         radii=(3.0, 5.0, 7.0),
     )
@@ -145,7 +114,6 @@ def test_integrate_rings_takes_one_radius_per_reflection():
         torch.tensor([[20.0, 20.0], [44.0, 44.0]]),
         excess,
         var,
-        torch.zeros((0, 2)),
         mean=mean,
         radii=radii,
     )
@@ -185,7 +153,6 @@ def test_integrate_rings_does_not_double_count_overlapping_disks():
         positions,
         excess,
         var,
-        torch.zeros((0, 2)),
         mean=mean,
         radii=(3.0, 5.0, 7.0),
     )
@@ -200,7 +167,6 @@ def test_integrate_rings_falls_back_to_model_variance_on_a_thin_annulus():
         torch.tensor([[0.0, 0.0]]),
         excess,
         var,
-        torch.zeros((0, 2)),
         mean=mean,
         radii=(1.0, 1.5, 2.0),
     )
@@ -218,7 +184,6 @@ def test_integrate_rings_prefers_the_annulus_variance_when_it_has_samples():
         torch.tensor([[32.0, 32.0]]),
         excess,
         var,
-        torch.zeros((0, 2)),
         mean=mean,
         radii=(3.0, 5.0, 9.0),
     )
@@ -232,7 +197,6 @@ def test_integrate_rings_zero_sigma_only_when_no_pixels_are_owned():
         torch.tensor([[-50.0, -50.0]]),
         excess,
         var,
-        torch.zeros((0, 2)),
         mean=mean,
         radii=(2.0, 4.0, 6.0),
     )

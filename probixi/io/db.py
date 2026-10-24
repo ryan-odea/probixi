@@ -187,7 +187,6 @@ CREATE TABLE calibration (
     kappa                  DOUBLE,
     prior_peak             DOUBLE,
     var_scale              DOUBLE,
-    snap_radius            DOUBLE,
     aperture               VARCHAR,
     captured_fraction      DOUBLE,
     clen                   DOUBLE,
@@ -464,7 +463,7 @@ class DuckDBOffloader(_StreamWriter):
         if cal:
             cell = cal.get("cell") or (None,) * 6
             self._conn.execute(
-                "INSERT INTO calibration VALUES (" + ", ".join("?" * 24) + ")",
+                "INSERT INTO calibration VALUES (" + ", ".join("?" * 23) + ")",
                 [
                     _probixi_version(),
                     SCHEMA_VERSION,
@@ -487,7 +486,7 @@ class DuckDBOffloader(_StreamWriter):
                     cal.get("n_quiet_frames"),
                     *(
                         _as_float(cal.get(k))
-                        for k in ("kappa", "prior_peak", "var_scale", "snap_radius")
+                        for k in ("kappa", "prior_peak", "var_scale")
                     ),
                     cal.get("aperture"),
                     *(_as_float(cal.get(k)) for k in ("captured_fraction", "clen")),
@@ -726,7 +725,7 @@ class DuckDBOffloader(_StreamWriter):
             flags = _reflection_flags(result)
             flags = np.array(flags) if flags else np.full((3, pos.shape[1]), np.nan)
             extras = np.vstack([extras, flags])
-            # unsnapped prediction, NaN if not recorded
+            # the prediction before any peak matching, NaN if not recorded
             raw = result.predicted_raw_positions
             raw = (
                 _nan_array(None, 2 * pos.shape[1]).reshape(2, -1)
@@ -1090,7 +1089,7 @@ def _frame_stat_values(stats) -> list:
 
 
 def _matched_values(post) -> tuple:
-    # snapped fraction of predictions and their mean posterior
+    # matched fraction of predictions and their mean posterior
     if post is None or post.numel() == 0:
         return None, None
     hit = torch.isfinite(post)

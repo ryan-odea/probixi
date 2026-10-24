@@ -133,11 +133,10 @@ def test_integrate_recovers_injected_intensity_and_background(cell):
     var = torch.full(SHAPE, noise_sigma**2, dtype=torch.float32)
     mean = torch.full(SHAPE, background, dtype=torch.float32)
 
-    positions, intensity, sigma, snapped, peak, bg, *_ = integrate_rings(
+    positions, intensity, sigma, peak, bg, *_ = integrate_rings(
         lattice_pos,
         excess,
         var,
-        obs_positions=torch.empty(0, 2, dtype=torch.float32),
         mean=mean,
         radii=(4.0, 6.0, 9.0),
     )
@@ -148,57 +147,16 @@ def test_integrate_recovers_injected_intensity_and_background(cell):
     assert bool((sigma > 0).any())
 
 
-def test_integrate_snaps_predicted_to_nearby_observed_peak(cell):
-    geom = _synthetic_geometry()
-    lattice_pos, _ = sim.lattice_peaks(geom, cell, _orientation())
-    assert lattice_pos.shape[0] > 0
-    excess = torch.zeros(SHAPE, dtype=torch.float32)
-    var = torch.ones(SHAPE, dtype=torch.float32)
-    mean = torch.zeros(SHAPE, dtype=torch.float32)
-    # predicted positions are offset; observed peaks sit on the true lattice
-    positions, _, _, snapped, *_ = integrate_rings(
-        lattice_pos + 0.4,
-        excess,
-        var,
-        obs_positions=lattice_pos,
-        snap_radius=5.0,
-        mean=mean,
-        radii=(3.0, 5.0, 7.0),
-    )
-    assert bool(snapped.all())
-    # snapped centres land exactly on the observed peaks
-    assert torch.allclose(positions, lattice_pos)
-
-
-def test_integrate_does_not_snap_observed_peak_outside_snap_radius():
-    shape = (64, 64)
-    pred_pos = torch.tensor([[20.0, 20.0]], dtype=torch.float32)
-    positions, _, _, snapped, *_ = integrate_rings(
-        pred_pos,
-        torch.zeros(shape, dtype=torch.float32),
-        torch.ones(shape, dtype=torch.float32),
-        obs_positions=torch.tensor([[40.0, 40.0]], dtype=torch.float32),
-        snap_radius=5.0,
-        mean=torch.zeros(shape, dtype=torch.float32),
-        radii=(2.0, 4.0, 6.0),
-    )
-    assert not bool(snapped[0])
-    # without a snap the predicted position is retained
-    assert torch.allclose(positions, pred_pos)
-
-
-def test_integrate_with_no_observed_peaks_keeps_predicted_positions():
+def test_integrate_keeps_predicted_positions():
     shape = (64, 64)
     pred_pos = torch.tensor([[10.0, 12.0], [30.0, 40.0]], dtype=torch.float32)
-    positions, _, _, snapped, *_ = integrate_rings(
+    positions, *_ = integrate_rings(
         pred_pos,
         torch.zeros(shape, dtype=torch.float32),
         torch.ones(shape, dtype=torch.float32),
-        obs_positions=torch.empty(0, 2, dtype=torch.float32),
         mean=torch.zeros(shape, dtype=torch.float32),
         radii=(2.0, 4.0, 6.0),
     )
-    assert not bool(snapped.any())
     assert torch.allclose(positions, pred_pos)
 
 
@@ -214,7 +172,6 @@ def test_integrate_deblend_owns_shared_pixel_by_nearest_then_lowest_index():
         positions,
         excess,
         torch.ones(shape, dtype=torch.float32),
-        obs_positions=torch.empty(0, 2, dtype=torch.float32),
         mean=torch.zeros(shape, dtype=torch.float32),
         radii=(3.0, 5.0, 7.0),
     )
@@ -242,7 +199,6 @@ def test_integrate_deblend_runs_on_mps_and_matches_cpu():
             positions.to(dev),
             excess.to(dev),
             var.to(dev),
-            obs_positions=torch.empty(0, 2, dtype=torch.float32, device=dev),
             mean=mean.to(dev),
             radii=(3.0, 5.0, 7.0),
         )
@@ -261,11 +217,10 @@ def test_integrate_peak_is_disk_maximum_of_excess():
     shape = (32, 32)
     excess = torch.zeros(shape, dtype=torch.float32)
     excess[16, 16] = 42.0
-    _, intensity, _, _, peak, *_ = integrate_rings(
+    _, intensity, _, peak, *_ = integrate_rings(
         torch.tensor([[16.0, 16.0]], dtype=torch.float32),
         excess,
         torch.ones(shape, dtype=torch.float32),
-        obs_positions=torch.empty(0, 2, dtype=torch.float32),
         mean=torch.zeros(shape, dtype=torch.float32),
         radii=(2.0, 4.0, 6.0),
     )
@@ -284,13 +239,12 @@ def test_integrate_reports_disk_pixels_and_model_background():
         pred_pos,
         torch.zeros(shape, dtype=torch.float32),
         var,
-        obs_positions=torch.empty(0, 2, dtype=torch.float32),
         mean=mean,
         n_bg=200.0,
         radii=(2.0, 4.0, 6.0),
     )
-    assert len(out) == 11
-    n_pix, bg_model, bg_model_var, n_total, n_masked = out[6:]
+    assert len(out) == 10
+    n_pix, bg_model, bg_model_var, n_total, n_masked = out[5:]
     assert int(n_total[0]) == 13 and int(n_masked[0]) == 0
     # a radius-2 disk holds the 13 integer offsets with dr^2 + dc^2 <= 4
     assert int(n_pix[0]) == 13
@@ -303,11 +257,10 @@ def test_integrate_reports_disk_pixels_and_model_background():
         pred_pos,
         torch.zeros(shape, dtype=torch.float32),
         var,
-        obs_positions=torch.empty(0, 2, dtype=torch.float32),
         mean=mean,
         radii=(2.0, 4.0, 6.0),
     )
-    assert float(out0[8][0]) == 0.0
+    assert float(out0[7][0]) == 0.0
     # masked pixels drop out of both the count and the model sum
     valid = torch.ones(shape, dtype=torch.bool)
     valid[30, 30] = False
@@ -315,15 +268,14 @@ def test_integrate_reports_disk_pixels_and_model_background():
         pred_pos,
         torch.zeros(shape, dtype=torch.float32),
         var,
-        obs_positions=torch.empty(0, 2, dtype=torch.float32),
         mean=mean,
         pixel_valid=valid,
         radii=(2.0, 4.0, 6.0),
     )
-    assert int(out1[6][0]) == 12
+    assert int(out1[5][0]) == 12
     # ... and are counted against the nominal disk
-    assert int(out1[9][0]) == 13 and int(out1[10][0]) == 1
-    assert float(out1[7][0]) == pytest.approx(12 * background)
+    assert int(out1[8][0]) == 13 and int(out1[9][0]) == 1
+    assert float(out1[6][0]) == pytest.approx(12 * background)
 
 
 def test_detector_q_max_uses_panel_corners_not_raw_array_corners(cell):

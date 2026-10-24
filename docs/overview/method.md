@@ -362,9 +362,9 @@ $$
 
 with $r_{\text{in}}, r_{\text{out}}$ left at the flux-rule values so the annulus still clears the 2 % radius. On 1 px spots this gives a $3\times3$ disk ($r_{\text{sig}} = 1.5$) where the flux rule gave 5 px; on broad spots both rules agree. If too few peaks are found the indexer falls back to $(3.0, 4.0, 7.36)$ px (`FALLBACK_RADII`).
 
-#### Radii for unsnapped predictions
+#### Radii by resolution shell
 
-The profile above is centred on found peaks. A reflection with no peak within the snap radius is integrated at its prediction, so its profile is the spot convolved with the prediction error, which grows with $|q|$. While the seed lattices are integrated, the excess (clipped at $10\sigma$) is stacked around their unsnapped predictions in 12 shells of equal reciprocal volume; per shell, $p(b)$ is the stacked ring mean less its mean over rings 6–8, and the disk radius is the smallest $k + 0.5$, $1 \le k \le 4$, with $S(k)/\sqrt{N(k)}$ within 2 % of its maximum, provided $S(k)$ exceeds five standard errors. Otherwise, and whenever smaller, the previous shell's radius is kept, starting from $r_{\text{sig}}$. Such a reflection's annulus starts at $\max(r_{\text{in}}, r + 1)$ and keeps the pixel count of the learned annulus.
+The profile above is centred on found peaks. Every reflection is integrated at its prediction, so its profile is the spot convolved with the prediction error, which grows with $|q|$. While the seed lattices are integrated, the excess (clipped at $10\sigma$) is stacked around their predictions in 12 shells of equal reciprocal volume; per shell, $p(b)$ is the stacked ring mean less its mean over rings 6–8, and the disk radius is the smallest $k + 0.5$, $1 \le k \le 4$, with $S(k)/\sqrt{N(k)}$ within 2 % of its maximum, provided $S(k)$ exceeds five standard errors. Otherwise, and whenever smaller, the previous shell's radius is kept, starting from $r_{\text{sig}}$. Such a reflection's annulus starts at $\max(r_{\text{in}}, r + 1)$ and keeps the pixel count of the learned annulus.
 
 #### Auto rule
 
@@ -372,7 +372,7 @@ Default, `--aperture auto`; `choose_aperture`. The SNR disk captures a fraction 
 
 ### 7.2 Ring integration of a predicted reflection
 
-For each predicted position (`integrate_rings`, `integrate.py`), first snapped onto an observed peak centroid within 5 px (`snap_radius`) when one exists, the raw frame is $R = E + \mu_{\text{eff}}$ and pixel offsets $(\delta r, \delta c)$ about the rounded centre have $\rho^2 = \delta r^2 + \delta c^2$:
+For each predicted position (`integrate_rings`, `integrate.py`), the raw frame is $R = E + \mu_{\text{eff}}$ and pixel offsets $(\delta r, \delta c)$ about the rounded centre have $\rho^2 = \delta r^2 + \delta c^2$:
 
 - annulus $\mathcal A_i = \{r_{\text{in}}^2 \le \rho^2 \le r_{\text{out}}^2\}$ on live in-frame pixels, $n_{b,i} = |\mathcal A_i|$,
   $$B_i = \frac{1}{n_{b,i}}\sum_{\mathcal A_i} R_p \ [\text{ADU/px}], \qquad s^2_{b,i} = \frac{1}{n_{b,i}-1}\sum_{\mathcal A_i}(R_p - B_i)^2 ;$$
@@ -411,7 +411,7 @@ $$
 \texttt{enrich\_p} = \Pr\big[X \ge n_{\text{bright}}\big],\ X \sim \text{Poisson}(n_{\text{keep}}\,p_0) .
 $$
 
-An enrichment near 1 is a lattice indistinguishable from chance; `--enrich-gate` drops crystals with $\texttt{enrich\_p} > \alpha$, $\alpha = 10^{-3}$ (`--enrich-alpha`). The bright spots a lattice was fitted to cannot prove it real: on a crowded frame an orientation optimised against 100 peaks catches a dozen by chance, and snapping moves predictions onto peaks up to `snap_radius` away. After integration the lattice must therefore also carry signal where no found peak explains it. Over the predictions that were not snapped and lie inside the crystal's limit (§7.5), $z = \sum_i I_i/\sigma_i \,/\, \sqrt{n}$ is $\sim\mathcal N(0, 1)$ for a chance lattice and large for a real one (`unexplained_signal_p`); $\texttt{enrich\_p}$ is the larger of the two chance probabilities, $\Pr[X \ge n_{\text{bright}}]$ and $1 - \Phi(z)$.
+An enrichment near 1 is a lattice indistinguishable from chance; `--enrich-gate` drops crystals with $\texttt{enrich\_p} > \alpha$, $\alpha = 10^{-3}$ (`--enrich-alpha`). The bright spots a lattice was fitted to cannot prove it real: on a crowded frame an orientation optimised against 100 peaks catches a dozen by chance. After integration the lattice must therefore also carry signal where no found peak explains it. Over the predictions with no found peak within 5 px that lie inside the crystal's limit (§7.5), $z = \sum_i I_i/\sigma_i \,/\, \sqrt{n}$ is $\sim\mathcal N(0, 1)$ for a chance lattice and large for a real one (`unexplained_signal_p`); $\texttt{enrich\_p}$ is the larger of the two chance probabilities, $\Pr[X \ge n_{\text{bright}}]$ and $1 - \Phi(z)$.
 
 ### 7.5 Resolution limit and profile radius
 
@@ -428,7 +428,7 @@ Per frame: the peak list (fs, ss, $10|\mathbf q|$ in nm$^{-1}$, $I_B$), `hit = [
 | `sigma(I)` | $\sigma_i$ | ADU |
 | `peak` | $\max_{\mathcal U_i}(R_p - B_i)$ | ADU |
 | `background` | $B_i$ | ADU/px |
-| `fs ss panel` | snapped position and panel | px |
+| `fs ss panel` | predicted position and panel | px |
 
 A disk touching the mask, the frame edge or another predicted disk is not written; it stays in the database with `n_pixels_total`, `n_masked` and `n_overlap`.
 

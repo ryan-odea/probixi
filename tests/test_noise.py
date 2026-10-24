@@ -377,3 +377,18 @@ def test_calibrate_threshold_default_budget_scales_with_the_valid_pixels():
     tc = calibrate_threshold(nm, frames, rng_seed=0)
     assert tc.target_noise_peaks == max(1.0, round(NOISE_PEAKS_PER_MPX * 96 * 96 / 1e6))
     assert tc.achieved_noise_peaks <= tc.target_noise_peaks
+
+
+def test_warmup_masks_stuck_pixels_whose_variance_is_only_rounding():
+    """A pixel stuck at a constant level, whose float32 variance is rounding residue
+    rather than zero, is masked with the dead ones; a live low-count pixel is not."""
+    shape = (32, 32)
+    frames = _frames(shape, 40, background=100.0, noise_sigma=10.0, seed=3)
+    for i, f in enumerate(frames):
+        f[5, 7] = 12.0 + 1e-6 * (i % 2)  # stuck: float32 variance ~2e-13
+        f[9, 9] = 1.0 if i == 0 else 0.0  # one count in the warmup: variance ~0.02
+    nm = NoiseModel(shape, mode="online", warmup_frames=len(frames), dtype=DTYPE)
+    for f in frames:
+        nm.update(f)
+    assert not bool(nm.valid_mask[5, 7])
+    assert bool(nm.valid_mask[9, 9]) and bool(nm.valid_mask[0, 0])

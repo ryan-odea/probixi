@@ -442,7 +442,6 @@ class Probixi:
             kappa=cal.kappa,
             prior_peak=cal.prior_peak,
             var_scale=cal.var_scale,
-            snap_radius=None if idx is None else idx.integrate.snap_radius,
             aperture=None if ap is None else ap[0],
             captured_fraction=None if ap is None or not ap[1] else ap[1].get("f_mean"),
             clen=None if idx is None else idx.geometry.get("clen"),
@@ -455,7 +454,7 @@ class Probixi:
 
     @property
     def shell_table(self) -> Optional[list[tuple]]:
-        """Per-shell disk radii of unsnapped predictions for the database's
+        """Per-shell disk radii of the predictions for the database's
         ``shells`` table: ``(shell, q_lo, q_hi, radius_px, captured_fraction)``
         with |q| in nm^-1. None until the seed lattices were integrated."""
         idx = self.indexer

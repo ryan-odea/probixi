@@ -20,7 +20,6 @@ from .integrate import (
     radius_by_shell,
     resolution_bands,
     ring_sums,
-    snap_positions,
     spot_enrichment,
     unexplained_signal_p,
 )
@@ -38,6 +37,11 @@ DUPLICATE_LATTICE_TOL = 0.02
 MIN_PEAKS_PER_LATTICE = 6
 # (disk, annulus inner, outer) px for a few-pixel spot, when calibrate() did not run
 FALLBACK_RADII = (3.0, 4.0, 7.36)
+
+
+#: a found peak within this distance (px) explains a prediction; only the
+#: enrichment test uses it, predictions are never moved
+EXPLAINED_RADIUS_PX = 5.0
 
 
 @dataclass
@@ -111,11 +115,11 @@ class IndexResult:
         (M, 3) Miller indices of all reflections predicted to diffract on this
         frame, or None if prediction/integration was not run.
     predicted_positions : Tensor, optional
-        (M, 2) predicted detector ``(row, col)`` positions, snapped onto an
-        observed centroid where one lies within ``snap_radius``.
+        (M, 2) predicted detector ``(row, col)`` positions, where each
+        reflection is integrated.
     predicted_raw_positions : Tensor, optional
-        (M, 2) the same positions before snapping; the difference is the
-        observed spot's offset from the lattice prediction.
+        Not set by probixi's integration, which no longer moves predictions.
+        Kept for the database's ``pred_fs``/``pred_ss`` columns.
     predicted_intensities : Tensor, optional
         (M,) integrated intensity (ADU) per predicted reflection.
     predicted_sigmas : Tensor, optional
@@ -151,13 +155,13 @@ class IndexResult:
     peak_posterior : Tensor, optional
         (N,) mean detection posterior of each detected peak's blob.
     predicted_peak_posterior : Tensor, optional
-        (M,) that posterior for the peak a predicted reflection snapped onto;
-        NaN where no peak lay within ``snap_radius``.
+        Not set by probixi's integration; kept for the database's
+        ``peak_posterior`` column.
     peak_aux : Tensor, optional
         (N, 2) ``(brightest pixel, eccentricity)`` of each detected peak.
     predicted_peak_max : Tensor, optional
-        (M,) brightest pixel of the peak each reflection snapped onto; NaN where
-        unsnapped.
+        Not set by probixi's integration; kept for the database's ``peak_max``
+        column.
     adu_per_photon : float, optional
         Gain (ADU per photon) the frame was processed with.
     diffraction_limit : float, optional
@@ -417,9 +421,6 @@ class IntegrateConfig:
         ``|S| - 1`` is ``wavelength * predict_sigma * rho(|q|)``.
     domain_size_recip : float
         Constant (domain-size) term of the rocking width (A^-1).
-    snap_radius : float
-        A prediction within this many px of a detected peak is moved onto its
-        centroid before integration.
     resolution_isigma : float
         Shell-mean ``I/sigma`` that defines ``IndexResult.falloff_limit``.
     resolution_nbins : int
@@ -459,7 +460,6 @@ class IntegrateConfig:
     bandwidth: float = 0.0
     predict_sigma: float = 1.5
     domain_size_recip: float = 5.0e-5
-    snap_radius: float = 5.0
     resolution_isigma: float = 0.5
     resolution_nbins: int = 10
     resolution_min_refl: int = 40
@@ -717,7 +717,7 @@ class Indexer:
         self._q_max: Optional[float] = None
         # Per-frame wavelengths (A) by frame index; None uses the geometry's
         self.frame_wavelengths: Optional[list[float]] = None
-        # learned |q|-shell disk radii of unsnapped reflections, and their profile sums
+        # learned |q|-shell disk radii, and their profile sums
         self._radius_by_q: Optional[tuple[Tensor, list[float]]] = None
         self._shell_capture: Optional[list[float]] = None
         self._profile_acc: Optional[list] = None
@@ -1474,23 +1474,21 @@ class Indexer:
             r._integration_positions = r._integration_valid = None
             r._integration_radius = None
 
-    def _reflection_radii(self, q: Tensor, snapped: Tensor) -> tuple:
-        # Base disk on snapped reflections, the learned shell radius elsewhere
+    def _reflection_radii(self, q: Tensor) -> tuple:
+        # The learned shell radius for every reflection; the base disk until learned
         base = self._radii()
         if self._radius_by_q is None:
             return base
         edges, shell = self._radius_by_q
         k = torch.bucketize(q, edges.to(q)).clamp(1, len(shell)) - 1
         r = torch.tensor(shell, dtype=q.dtype, device=q.device)[k]
-        r = torch.where(snapped.to(q.device), base[0], r)
         r_in = torch.clamp(r + 1.0, min=base[1])
         # r_out keeps the base annulus area
         return r, r_in, (r_in * r_in + base[2] ** 2 - base[1] ** 2).sqrt()
 
-    def _stack_profiles(self, excess, var, valid, positions, pred, snapped) -> None:
-        # Stacks excess, clipped at 10 sigma, around unsnapped predictions per |q| shell
-        free = ~snapped
-        if not bool(free.any()):
+    def _stack_profiles(self, excess, var, valid, positions, pred) -> None:
+        # Stacks excess, clipped at 10 sigma, around the predictions per |q| shell
+        if not len(positions):
             return
         if not self._profile_acc:  # equal-volume |q| shells to the detector edge
             edges = torch.linspace(0.0, 1.0, 13, dtype=torch.float64) ** (1 / 3)
@@ -1501,19 +1499,19 @@ class Indexer:
         acc = self._profile_acc
         clipped = torch.minimum(excess, 10.0 * var.clamp_min(1e-12).sqrt())
         total, counts, sq = ring_sums(
-            clipped, positions[free], pixel_valid=valid, max_radius=8, squares=True
+            clipped, positions, pixel_valid=valid, max_radius=8, squares=True
         )
-        shell = torch.bucketize(pred.resolution[free].to(acc[0]), acc[0])
+        shell = torch.bucketize(pred.resolution.to(acc[0]), acc[0])
         k = shell.clamp(1, len(acc[0]) - 1) - 1
         for buf, v in zip(acc[1:], (total, counts, sq)):
             buf.index_add_(0, k.to(buf.device), v.to(buf))
 
     def start_profile_stacking(self) -> None:
-        """Stack profiles around unsnapped predictions from now on."""
+        """Stack profiles around the predictions from now on."""
         self._profile_acc = []
 
     def finish_profile_stacking(self) -> Optional[list[float]]:
-        """Set and return the per-shell disk radii (px) of unsnapped reflections."""
+        """Set and return the per-shell disk radii (px)."""
         acc, self._profile_acc = self._profile_acc, None
         if not acc or float(acc[2][:, 0].sum()) <= 0:
             return None
@@ -1586,20 +1584,16 @@ class Indexer:
             centering=self.target_cell.centering,
             frame_shape=frame_shape,
         )
-        diagnostic_positions, snapped, matched = snap_positions(
-            pred.positions.to(excess.dtype),
-            result.positions.to(excess.dtype),
-            self.integrate.snap_radius,
-        )
+        # every reflection is integrated where the lattice predicts it
+        positions = pred.positions.to(excess.dtype)
         result.n_bright, result.enrichment, result.enrich_p = spot_enrichment(
-            diagnostic_positions, excess, var, bright_threshold, pixel_valid=valid_mask
+            positions, excess, var, bright_threshold, pixel_valid=valid_mask
         )
         if enrich_alpha is not None and result.enrich_p > enrich_alpha:
             return
         if len(pred) == 0:
             result.predicted_hkl = pred.hkl
             result.predicted_positions = pred.positions
-            result.predicted_raw_positions = pred.positions
             for name in (
                 "intensities",
                 "sigmas",
@@ -1614,12 +1608,11 @@ class Indexer:
             ):
                 setattr(result, "predicted_" + name, excess.new_empty(0))
             return
-        radii = self._reflection_radii(pred.resolution.to(excess.dtype), snapped)
+        radii = self._reflection_radii(pred.resolution.to(excess.dtype))
         (
             positions,
             intensity,
             sigma,
-            _,
             peak,
             background,
             n_pix,
@@ -1628,11 +1621,9 @@ class Indexer:
             n_total,
             n_masked,
         ) = integrate_rings(
-            diagnostic_positions,  # already snapped to the observed peaks
+            positions,
             excess,
             var,
-            result.positions[:0].to(excess.dtype),  # empty: no further snapping
-            snap_radius=self.integrate.snap_radius,
             mean=mean.to(excess.dtype) if mean is not None else None,
             pixel_valid=valid_mask,
             adu_per_photon=self._adu_per_photon(),
@@ -1685,7 +1676,11 @@ class Indexer:
                 drl = float("inf")
         result.diffraction_limit = drl
         # a real lattice also carries signal where no found peak explains it
-        inner = sig_ok & ~snapped
+        explained = torch.zeros_like(sig_ok)
+        if len(result.positions):
+            near = torch.cdist(positions, result.positions.to(positions))
+            explained = near.min(1).values < EXPLAINED_RADIUS_PX
+        inner = sig_ok & ~explained
         inner &= pred.resolution.to(excess.dtype) * A_INV_TO_NM_INV <= drl
         result.enrich_p = max(
             result.enrich_p, unexplained_signal_p(intensity, sigma, inner)
@@ -1693,9 +1688,7 @@ class Indexer:
         if enrich_alpha is not None and result.enrich_p > enrich_alpha:
             return
         if self._profile_acc is not None:
-            self._stack_profiles(
-                excess, var, valid_mask, diagnostic_positions, pred, snapped
-            )
+            self._stack_profiles(excess, var, valid_mask, positions, pred)
         # Rocking width (A^-1) at the resolution limit, else at the median peak |q|
         if drl is not None and math.isfinite(drl) and drl > 0.0:
             q_rep = drl / A_INV_TO_NM_INV
@@ -1713,21 +1706,6 @@ class Indexer:
         keep = torch.where(stored)[0]
         result.predicted_hkl = pred.hkl[keep]
         result.predicted_positions = positions[keep]
-        result.predicted_raw_positions = pred.positions.to(positions)[keep]
-        if result.peak_posterior is not None and len(result.peak_posterior):
-            post = result.peak_posterior.to(positions)[
-                matched.clamp(max=len(result.peak_posterior) - 1)
-            ]
-            result.predicted_peak_posterior = torch.where(
-                snapped, post, torch.full_like(post, float("nan"))
-            )[keep]
-        if result.peak_aux is not None and len(result.peak_aux):
-            pmax = result.peak_aux[:, 0].to(positions)[
-                matched.clamp(max=len(result.peak_aux) - 1)
-            ]
-            result.predicted_peak_max = torch.where(
-                snapped, pmax, torch.full_like(pmax, float("nan"))
-            )[keep]
         result.predicted_intensities = intensity[keep]
         result.predicted_sigmas = sigma[keep]
         result.predicted_peak = peak[keep]

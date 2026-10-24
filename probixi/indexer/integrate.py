@@ -10,21 +10,6 @@ A_INV_TO_NM_INV = 10.0
 MIN_ANNULUS_PIXELS = 10  # fewest pixels for an empirical background estimate
 
 
-def snap_positions(
-    positions: Tensor, observed: Tensor, radius: float
-) -> tuple[Tensor, Tensor, Tensor]:
-    # Snaps predictions onto the nearest centroid within radius px; index names it
-    snapped = torch.zeros(len(positions), dtype=torch.bool, device=positions.device)
-    index = torch.zeros(len(positions), dtype=torch.long, device=positions.device)
-    if len(positions) and len(observed):
-        distance, index = torch.cdist(positions, observed.to(positions)).min(1)
-        snapped = distance < radius
-        positions = torch.where(
-            snapped[:, None], observed.to(positions)[index], positions
-        )
-    return positions, snapped, index
-
-
 @torch.no_grad()
 def disk_overlap_counts(
     positions: Tensor,
@@ -387,8 +372,6 @@ def integrate_rings(
     pred_positions: Tensor,
     excess: Tensor,
     var: Tensor,
-    obs_positions: Tensor,
-    snap_radius: float = 5.0,
     mean: Tensor | None = None,
     pixel_valid: Tensor | None = None,
     adu_per_photon: float = 1.0,
@@ -398,10 +381,10 @@ def integrate_rings(
 ) -> tuple[Tensor, ...]:
     if mean is None:
         raise ValueError("circular integration requires the background mean image")
-    positions, snapped, _ = snap_positions(pred_positions, obs_positions, snap_radius)
+    positions = pred_positions
     if not len(positions):
         empty = excess.new_empty(0)
-        return (positions, empty, empty, snapped) + (empty,) * 7
+        return (positions, empty, empty) + (empty,) * 7
     # Disk minus annulus on the raw frame; see docs/overview/indexing.md, Integration
     raw = excess + mean
     # each radius is a scalar or one value per centre
@@ -482,7 +465,6 @@ def integrate_rings(
         positions,
         intensity,
         sigma,
-        snapped,
         peak,
         background,
         n,

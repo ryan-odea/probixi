@@ -648,7 +648,6 @@ def test_db_records_calibration_and_shells(geometry_dict, cell, tmp_path):
         kappa=2.3,
         prior_peak=0.03,
         var_scale=0.96,
-        snap_radius=3.0,
         aperture="snr",
         captured_fraction=0.72,
         clen=0.1,
