@@ -333,3 +333,62 @@ def test_value_flagged_pixels_stay_out_of_the_stats_and_the_peak_mask():
     assert abs(float(nm.pixel.mean_[20, 30] - mean[20, 30])) < 1e-3
     (res,) = list(PeakFinder(nm).peak_stream([frame]))
     assert not bool(res.valid_mask[20, 30]) and bool(res.valid_mask[20, 31])
+
+
+def _poisson_frames(shape, n, lam=0.3, seed=0):
+    g = torch.Generator().manual_seed(seed)
+    return [
+        torch.poisson(torch.full(shape, float(lam)), generator=g).to(DTYPE)
+        for _ in range(n)
+    ]
+
+
+def test_calibrate_threshold_uses_the_quietest_frames_on_skewed_low_count_noise():
+    """Poisson noise at a fraction of a count: no frame passes the Gaussian extreme and
+    the mirrored tail under-counts, so the quietest frames set the threshold; the
+    noise-blob target then holds on the positive tail, with or without spots."""
+    shape = (192, 192)
+    quiet = _poisson_frames(shape, 32, lam=0.3, seed=7)
+    nm = NoiseModel(shape, mode="online", dtype=DTYPE)
+    calibrate_noise(nm, quiet, rng_seed=0).apply(nm)
+    tc = calibrate_threshold(nm, quiet, target_noise_peaks=5.0, rng_seed=0)
+    assert tc.tail_ratio > 1.5 and tc.n_quiet_frames >= 4
+    assert tc.achieved_noise_peaks <= 5.0
+    rng = np.random.default_rng(1)
+    yy, xx = np.mgrid[: shape[0], : shape[1]]
+    hits = []
+    for f in quiet:
+        spots = np.zeros(shape, dtype=np.float32)
+        for r, c in rng.uniform(10, 182, size=(10, 2)):
+            spots += 30.0 * np.exp(-((yy - r) ** 2 + (xx - c) ** 2) / 2.0)
+        hits.append(f + torch.from_numpy(spots))
+    th = calibrate_threshold(nm, hits, target_noise_peaks=5.0, rng_seed=0)
+    assert abs(th.threshold - tc.threshold) <= 0.5
+
+
+def test_calibrate_threshold_default_budget_scales_with_the_valid_pixels():
+    """Without a target the budget is 1.25 per million valid pixels, at least one."""
+    from probixi.peakfinding.noise.calibrate import NOISE_PEAKS_PER_MPX
+
+    shape = (96, 96)
+    frames = _frames(shape, 32, background=100.0, noise_sigma=10.0, seed=5)
+    nm = NoiseModel(shape, mode="online", dtype=DTYPE)
+    calibrate_noise(nm, frames, rng_seed=0).apply(nm)
+    tc = calibrate_threshold(nm, frames, rng_seed=0)
+    assert tc.target_noise_peaks == max(1.0, round(NOISE_PEAKS_PER_MPX * 96 * 96 / 1e6))
+    assert tc.achieved_noise_peaks <= tc.target_noise_peaks
+
+
+def test_warmup_masks_stuck_pixels_whose_variance_is_only_rounding():
+    """A pixel stuck at a constant level, whose float32 variance is rounding residue
+    rather than zero, is masked with the dead ones; a live low-count pixel is not."""
+    shape = (32, 32)
+    frames = _frames(shape, 40, background=100.0, noise_sigma=10.0, seed=3)
+    for i, f in enumerate(frames):
+        f[5, 7] = 12.0 + 1e-6 * (i % 2)  # stuck: float32 variance ~2e-13
+        f[9, 9] = 1.0 if i == 0 else 0.0  # one count in the warmup: variance ~0.02
+    nm = NoiseModel(shape, mode="online", warmup_frames=len(frames), dtype=DTYPE)
+    for f in frames:
+        nm.update(f)
+    assert not bool(nm.valid_mask[5, 7])
+    assert bool(nm.valid_mask[9, 9]) and bool(nm.valid_mask[0, 0])

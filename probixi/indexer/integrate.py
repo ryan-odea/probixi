@@ -10,21 +10,6 @@ A_INV_TO_NM_INV = 10.0
 MIN_ANNULUS_PIXELS = 10  # fewest pixels for an empirical background estimate
 
 
-def snap_positions(
-    positions: Tensor, observed: Tensor, radius: float
-) -> tuple[Tensor, Tensor, Tensor]:
-    # Snaps predictions onto the nearest centroid within radius px; index names it
-    snapped = torch.zeros(len(positions), dtype=torch.bool, device=positions.device)
-    index = torch.zeros(len(positions), dtype=torch.long, device=positions.device)
-    if len(positions) and len(observed):
-        distance, index = torch.cdist(positions, observed.to(positions)).min(1)
-        snapped = distance < radius
-        positions = torch.where(
-            snapped[:, None], observed.to(positions)[index], positions
-        )
-    return positions, snapped, index
-
-
 @torch.no_grad()
 def disk_overlap_counts(
     positions: Tensor,
@@ -164,7 +149,6 @@ def radius_by_shell(
     k_max: int = 4,
     z_min: float = 5.0,
 ) -> list[float]:
-    # Per shell: smallest radius within 2% of the best stacked S/N, non-decreasing
     n_ring = _ring_pixel_counts(sums.shape[1] - 1, sums.device)
     out, r = [], float(base)
     for s, c, sq in zip(sums.double(), counts.double(), squares.double()):
@@ -384,8 +368,6 @@ def integrate_rings(
     pred_positions: Tensor,
     excess: Tensor,
     var: Tensor,
-    obs_positions: Tensor,
-    snap_radius: float = 5.0,
     mean: Tensor | None = None,
     pixel_valid: Tensor | None = None,
     adu_per_photon: float = 1.0,
@@ -395,10 +377,10 @@ def integrate_rings(
 ) -> tuple[Tensor, ...]:
     if mean is None:
         raise ValueError("circular integration requires the background mean image")
-    positions, snapped, _ = snap_positions(pred_positions, obs_positions, snap_radius)
+    positions = pred_positions
     if not len(positions):
         empty = excess.new_empty(0)
-        return (positions, empty, empty, snapped) + (empty,) * 7
+        return (positions, empty, empty) + (empty,) * 7
     # Disk minus annulus on the raw frame; see docs/overview/indexing.md, Integration
     raw = excess + mean
     # each radius is a scalar or one value per centre
@@ -479,7 +461,6 @@ def integrate_rings(
         positions,
         intensity,
         sigma,
-        snapped,
         peak,
         background,
         n,
@@ -608,57 +589,3 @@ def spot_enrichment(
             torch.special.gammainc(k, torch.tensor(lam, dtype=torch.float32))
         )
     return n_bright, enrichment, p_value
-
-
-# background bands (A): low > 6, mid 6-4.2, ring 4.2-3.0, high 3.0-2.3, edge < 2.3
-BAND_EDGES_A = (6.0, 4.2, 3.0, 2.3)
-ICE_RINGS_A = (3.90, 3.67, 3.44)  # ice Ih (100), (002), (101)
-ICE_HALF_WIDTH_A = 0.04
-ICE_FLANK_A = 0.12
-
-
-def resolution_bands(d_spacing: Tensor) -> tuple[Tensor, Tensor]:
-    # per-pixel d (A) -> band 0..4 and ice code (1 ring window, 2 flank, 0 elsewhere)
-    band = torch.zeros(d_spacing.shape, dtype=torch.long, device=d_spacing.device)
-    for edge in BAND_EDGES_A:
-        band += (d_spacing < edge).long()
-    ice = torch.zeros_like(band)
-    for ring in ICE_RINGS_A:
-        off = (d_spacing - ring).abs()
-        ice = torch.where((off <= ICE_FLANK_A) & (ice == 0), 2, ice)
-        ice = torch.where(off <= ICE_HALF_WIDTH_A, 1, ice)
-    return band, ice
-
-
-@torch.no_grad()
-def frame_background_stats(
-    mean: Tensor,
-    excess: Tensor | None,
-    var: Tensor | None,
-    mask: Tensor | None,
-    band: Tensor,
-    ice: Tensor,
-) -> Tensor:
-    # (6,): model background per band, then ice-window excess over flanks in sigma
-    mean = mean.reshape(band.shape)
-    ok = (
-        torch.ones_like(band, dtype=torch.bool)
-        if mask is None
-        else mask.reshape(band.shape).bool()
-    )
-    b = band[ok]
-    n = torch.bincount(b, minlength=5).to(mean.dtype)
-    bg = torch.bincount(b, weights=mean[ok], minlength=5) / n.clamp_min(1)
-    bg = torch.where(n > 0, bg, torch.full_like(bg, float("nan")))
-    score = torch.full((1,), float("nan"), dtype=mean.dtype, device=mean.device)
-    inner, flank = ok & (ice == 1), ok & (ice == 2)
-    if (
-        excess is not None
-        and var is not None
-        and int(inner.sum()) >= MIN_ANNULUS_PIXELS
-        and int(flank.sum()) >= MIN_ANNULUS_PIXELS
-    ):
-        excess, var = excess.reshape(band.shape), var.reshape(band.shape)
-        sigma = var[inner].sqrt().median().clamp_min(1e-12)
-        score[0] = (excess[inner].median() - excess[flank].median()) / sigma
-    return torch.cat([bg, score])

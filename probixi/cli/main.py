@@ -241,10 +241,9 @@ def _run_multi_gpu(device_list: list, opts: dict, refine, integrate) -> None:
 @click.option(
     "--target-noise-peaks",
     type=float,
-    default=5.0,
-    show_default=True,
-    help="Noise budget: spurious detections allowed on a signal-free frame. "
-    "Lower is stricter.",
+    default=None,
+    help="Noise budget: spurious detections allowed on a signal-free frame; "
+    "default 1.25 per million valid pixels. Lower is stricter.",
 )
 @click.option(
     "--flux-variance/--no-flux-variance",
@@ -359,7 +358,7 @@ def main(
     noise_decay: float,
     seed_frames: int,
     random_seed: int,
-    target_noise_peaks: float,
+    target_noise_peaks: Optional[float],
     flux_variance: Optional[bool],
     flux_var_floor: float,
     panel: str,
@@ -455,7 +454,10 @@ def main(
         if not quiet:
             click.echo(f"Wrote noise diagnostic GIF to {gif}")
 
-    cal = probixi.calibrate(n_seed=seed_frames, target_noise_peaks=target_noise_peaks)
+    cal = probixi.calibrate(
+        n_seed=seed_frames,
+        target_noise_peaks="auto" if target_noise_peaks is None else target_noise_peaks,
+    )
     if not quiet:
         tc = probixi.threshold_calibration
         msg = (
@@ -463,7 +465,7 @@ def main(
             f"prior_peak={cal.prior_peak:.4f} var_scale={cal.var_scale:.3f}"
         )
         if tc is not None:
-            msg += f" mf_threshold={tc.threshold:.2f}"
+            msg += f" mf_threshold={tc.threshold:.2f} (noise target {tc.target_noise_peaks:g})"
             if tc.n_quiet_frames == 0:  # no signal-free seed frame: mirrored tail
                 msg += " (noise from the mirrored tail)"
         msg += f" flux_variance={'on' if probixi.flux_variance else 'off'}"
@@ -587,6 +589,7 @@ def main(
     )
     if is_duckdb_path(output):
         offloader = DuckDBOffloader
+        offload_kwargs["calibration"] = lambda: probixi.calibration_summary
         offload_kwargs["frame_range"] = (
             start or 0,
             stop if stop is not None else meta.n_frames,

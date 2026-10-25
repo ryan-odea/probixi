@@ -8,6 +8,10 @@ from torch import Tensor, nn
 from ...kernels import select
 from ._drift import DriftDiagnostics
 
+#: warmup variance (ADU^2) at or below which a pixel is dead or stuck; float32 rounding
+#: leaves a stuck pixel near 1e-13, a live one sits far above (one count in 90 frames ~0.01)
+DEAD_PIXEL_VAR = 1e-5
+
 # CrystFEL flag_* keys mapped to the test a good pixel passes
 FLAG_TESTS = {
     "flag_lessthan": torch.ge,
@@ -533,7 +537,7 @@ class NoiseModel(nn.Module):
     @torch.no_grad()
     def _commit_mask(self) -> None:
         # Combine the warmup dead-pixel mask with the static a-priori mask.
-        self.pixel.commit_dead_pixel_mask(tol=0.0)
+        self.pixel.commit_dead_pixel_mask(tol=DEAD_PIXEL_VAR)
         self.valid_mask.copy_(self.pixel.valid_mask & self.static_mask)
         self._mask_version += 1
         self._mask_committed = True

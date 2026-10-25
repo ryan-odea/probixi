@@ -97,7 +97,7 @@ _CITATION = r"""
 @software{odea_probixi,
   author  = {O'Dea, Ryan and Kepa, Michal and Weinert, Tobias},
   title   = {{probixi}: Self-Calibrating Probabilistic Peak Finding for Serial X-Ray Crystallographic Data},
-  version = {0.9.0},
+  version = {0.10.0},
   year    = {2026},
   url     = {https://github.com/ryan-odea/probixi}
 }
@@ -410,6 +410,44 @@ class Probixi:
             adu_per_photon=self.indexer._adu_per_photon(),
             bg_annulus_pixels=self.indexer._bg_annulus_pixels,
             aperture=self.indexer._aperture(),
+        )
+
+    @property
+    def calibration_summary(self) -> Optional[dict]:
+        """Calibration provenance for the database's ``calibration`` table.
+
+        The noise model (gain, read variance, flux model), the detection
+        threshold with its quiet-frame diagnostics, the peak mixture, the
+        integration aperture and the cell and camera length in use. None before
+        :meth:`calibrate`.
+        """
+        cal = getattr(self, "calibration", None)
+        if cal is None:
+            return None
+        tc = getattr(self, "threshold_calibration", None)
+        ap = self.aperture_choice
+        idx = self.indexer
+        cell = idx.target_cell if idx is not None else None
+        return dict(
+            n_seed_frames=self.n_seed_frames,
+            gain=self.noise.gain,
+            read_var=self.noise.read_var,
+            flux_variance=bool(self.flux_variance),
+            background_fluctuation=getattr(self, "background_fluctuation", None),
+            mf_threshold=None if tc is None else tc.threshold,
+            target_noise_peaks=None if tc is None else tc.target_noise_peaks,
+            tail_ratio=None if tc is None else tc.tail_ratio,
+            n_quiet_frames=None if tc is None else tc.n_quiet_frames,
+            kappa=cal.kappa,
+            prior_peak=cal.prior_peak,
+            var_scale=cal.var_scale,
+            aperture=None if ap is None else ap[0],
+            clen=None if idx is None else idx.geometry.get("clen"),
+            cell=(
+                None
+                if cell is None
+                else (cell.a, cell.b, cell.c, cell.alpha, cell.beta, cell.gamma)
+            ),
         )
 
     @property
@@ -1008,7 +1046,7 @@ class Probixi:
         n_seed: int = 32,
         seed_frames: Optional[Iterable[Tensor]] = None,
         eigen_modes: int = 0,
-        target_noise_peaks: Optional[float] = 5.0,
+        target_noise_peaks: Union[float, str, None] = "auto",
         threshold_opts: Optional[dict] = None,
         **opts,
     ) -> CalibrationResult:
@@ -1031,9 +1069,10 @@ class Probixi:
             into a list first.
         eigen_modes : int, default 0
             Low-rank background modes to fit; 0 fits none.
-        target_noise_peaks : float or None, default 5.0
-            Noise budget: expected noise detections per signal-free frame. None
-            keeps ``mf_threshold``.
+        target_noise_peaks : float, "auto" or None, default "auto"
+            Noise budget: expected noise detections per signal-free frame;
+            ``"auto"`` is 1.25 per million valid pixels. None keeps
+            ``mf_threshold``.
         threshold_opts : dict, optional
             Keyword arguments for :func:`probixi.peakfinding.calibrate_threshold`.
         **opts
@@ -1100,6 +1139,7 @@ class Probixi:
             self.fit_noise(seed)
         result = calibrate_noise(self.noise, seed, warm=False, **opts)
         result.apply(self.noise, self.finder)
+        self.calibration = result
         if self.flux_variance is None:
             self.background_fluctuation = background_fluctuation_ratio(
                 self.noise,
@@ -1120,7 +1160,9 @@ class Probixi:
             self.threshold_calibration = calibrate_threshold(
                 self.noise,
                 seed,
-                target_noise_peaks=float(target_noise_peaks),
+                target_noise_peaks=(
+                    None if target_noise_peaks == "auto" else float(target_noise_peaks)
+                ),
                 finder=self.finder,
                 **topts,
             )
