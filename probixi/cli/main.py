@@ -590,7 +590,6 @@ def main(
     if is_duckdb_path(output):
         offloader = DuckDBOffloader
         offload_kwargs["calibration"] = lambda: probixi.calibration_summary
-        offload_kwargs["shells"] = lambda: probixi.shell_table
         offload_kwargs["frame_range"] = (
             start or 0,
             stop if stop is not None else meta.n_frames,

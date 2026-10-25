@@ -495,144 +495,8 @@ def test_db_keeps_flagged_and_unmeasured_reflections(geometry_dict, cell, tmp_pa
         conn.close()
 
 
-def test_attach_frame_values_joins_on_filename_and_event(geometry_dict, cell, tmp_path):
-    from probixi.io.db import attach_frame_values
-
-    out = tmp_path / "out.duckdb"
-    with DuckDBOffloader(out, geometry=geometry_dict, cell=cell) as off:
-        off.write(_make_index_result(cell))
-    conn = duckdb.connect(str(out), read_only=True)
-    filename, event = conn.execute("SELECT filename, event FROM frames").fetchone()
-    conn.close()
-    table = tmp_path / "beam.tsv"
-    # another directory, a //event, an empty cell, and an event absent from the run
-    table.write_text(
-        "filename\tevent\tpulse_energy\tbandwidth_eV\n"
-        f"/elsewhere/{filename}\t//{event}\t612.5\t\n"
-        f"/elsewhere/{filename}\t//{event + 1}\t1.0\t2.0\n"
-    )
-    assert attach_frame_values(out, table) == ["pulse_energy", "bandwidth_eV"]
-    conn = duckdb.connect(str(out), read_only=True)
-    try:
-        assert conn.execute(
-            "SELECT pulse_energy, bandwidth_eV FROM frames"
-        ).fetchone() == (
-            612.5,
-            None,
-        )
-    finally:
-        conn.close()
-
-
-def test_db_records_the_detection_posterior(geometry_dict, cell, tmp_path):
-    out = tmp_path / "out.duckdb"
-    result = _make_index_result(cell)
-    result.predicted_hkl = torch.tensor([[1, 0, 0], [0, 1, -1]], dtype=torch.long)
-    result.predicted_positions = torch.tensor([[40.0, 55.0], [70.0, 30.0]])
-    result.predicted_intensities = torch.tensor([1200.0, 800.0])
-    result.predicted_sigmas = torch.tensor([35.0, 28.0])
-    result.predicted_peak = torch.tensor([300.0, 200.0])
-    result.predicted_background = torch.tensor([2.5, 2.25])
-    n_peaks, n_pred = len(result.positions), len(result.predicted_hkl)
-    result.peak_posterior = torch.linspace(0.5, 1.0, n_peaks)
-    pred = torch.full((n_pred,), float("nan"))
-    pred[0] = 0.75
-    result.predicted_peak_posterior = pred
-    with DuckDBOffloader(out, geometry=geometry_dict, cell=cell) as off:
-        off.write(result)
-    conn = duckdb.connect(str(out), read_only=True)
-    try:
-        posts = [
-            r[0]
-            for r in conn.execute("SELECT posterior FROM peaks ORDER BY fs").fetchall()
-        ]
-        assert len(posts) == n_peaks and all(0.5 <= p <= 1.0 for p in posts)
-        rows = conn.execute(
-            "SELECT peak_posterior FROM reflections ORDER BY h, k, l"
-        ).fetchall()
-        assert sum(r[0] is not None for r in rows) == 1
-        assert [r[0] for r in rows if r[0] is not None] == [pytest.approx(0.75)]
-    finally:
-        conn.close()
-
-
-def test_db_records_frame_peak_and_edge_diagnostics(geometry_dict, cell, tmp_path):
-    from probixi.indexer.indexer import FrameIndexResult
-
-    out = tmp_path / "out.duckdb"
-    crystal = _make_index_result(cell)
-    crystal.predicted_hkl = torch.tensor([[1, 0, 0], [0, 1, -1]], dtype=torch.long)
-    crystal.predicted_positions = torch.tensor([[40.0, 55.0], [70.0, 30.0]])
-    crystal.predicted_intensities = torch.tensor([1200.0, 800.0])
-    crystal.predicted_sigmas = torch.tensor([35.0, 28.0])
-    crystal.predicted_peak = torch.tensor([300.0, 200.0])
-    crystal.predicted_background = torch.tensor([2.5, 2.25])
-    crystal.predicted_peak_posterior = torch.tensor([0.75, float("nan")])
-    crystal.predicted_peak_max = torch.tensor([512.0, float("nan")])
-    n = len(crystal.positions)
-    frame = FrameIndexResult(
-        0,
-        [crystal],
-        crystal.positions,
-        crystal.intensities,
-        peak_posterior=torch.linspace(0.5, 1.0, n),
-        peak_aux=torch.stack([torch.full((n,), 300.0), torch.full((n,), 1.5)], -1),
-        frame_stats=torch.tensor([10.0, 9.0, 12.0, 8.0, float("nan"), 0.3]),
-    )
-    with DuckDBOffloader(out, geometry=geometry_dict, cell=cell) as off:
-        off.write(frame)
-    conn = duckdb.connect(str(out), read_only=True)
-    try:
-        row = conn.execute(
-            "SELECT bg_low, bg_mid, bg_ring, bg_high, bg_edge, ice_score, "
-            "peak_falloff, peak_ecc FROM frames"
-        ).fetchone()
-        assert row[:4] == (10.0, 9.0, 12.0, 8.0) and row[4] is None
-        assert row[5] == pytest.approx(0.3)
-        assert row[6] is None and row[7] == pytest.approx(1.5)  # 4 peaks: no falloff
-        assert conn.execute(
-            "SELECT matched_frac, matched_posterior FROM crystals"
-        ).fetchone() == (0.5, 0.75)
-        rows = conn.execute(
-            "SELECT fs, ss, panel, edge_px, peak_max FROM reflections ORDER BY h DESC"
-        ).fetchall()
-        assert [r[4] for r in rows] == [512.0, None]
-        panels = {
-            r[0]: r[1:]
-            for r in conn.execute(
-                "SELECT name, min_fs, max_fs, min_ss, max_ss FROM panels"
-            ).fetchall()
-        }
-        for fs, ss, panel, edge, _ in rows:
-            lo_fs, hi_fs, lo_ss, hi_ss = panels[panel]
-            assert edge == pytest.approx(
-                min(fs - lo_fs, hi_fs - fs, ss - lo_ss, hi_ss - ss)
-            )
-        assert conn.execute(
-            "SELECT min(intensity_max), max(eccentricity) FROM peaks"
-        ).fetchone() == (300.0, 1.5)
-    finally:
-        conn.close()
-
-
-def test_frame_peak_summary_measures_the_intensity_falloff():
-    import numpy as np
-
-    from probixi.io.db import _frame_peak_summary
-
-    recip = np.concatenate([np.linspace(1.0, 5.0, 10), np.array([1.0, 2.0])])
-    intensity = 1000.0 * np.exp(-2.0 * recip**2)
-    npix = np.full(12, 9.0)
-    ecc = np.concatenate([np.full(10, 1.2), np.array([np.nan, 2.0])])
-    out = _frame_peak_summary(
-        recip, intensity, npix, ecc, np.array([0, 10]), np.array([10, 2])
-    )
-    assert out[0] == pytest.approx([2.0, 9.0, 1.2])
-    assert math.isnan(out[1, 0]) and out[1, 1:] == pytest.approx([9.0, 2.0])
-
-
-def test_db_records_calibration_and_shells(geometry_dict, cell, tmp_path):
-    """The calibration provenance row and the per-shell disk radii, resolved on exit."""
+def test_db_records_calibration(geometry_dict, cell, tmp_path):
+    """The calibration provenance row, resolved on exit."""
     from probixi.io.db import SCHEMA_VERSION
 
     out = tmp_path / "out.duckdb"
@@ -643,34 +507,30 @@ def test_db_records_calibration_and_shells(geometry_dict, cell, tmp_path):
         flux_variance=True,
         background_fluctuation=3.2,
         mf_threshold=5.9,
+        target_noise_peaks=5.0,
         tail_ratio=10.2,
         n_quiet_frames=0,
         kappa=2.3,
         prior_peak=0.03,
         var_scale=0.96,
         aperture="snr",
-        captured_fraction=0.72,
         clen=0.1,
         cell=(61.4, 141.6, 94.4, 90.0, 90.0, 90.0),
     )
-    shells = [(0, 0.0, 1.2, 1.5, 1.0), (1, 1.2, 1.6, 2.5, 0.8)]
     with DuckDBOffloader(
         out,
         geometry=geometry_dict,
         cell=cell,
         calibration=lambda: cal,
-        shells=lambda: shells,
     ) as off:
         off.write(_make_index_result(cell))
     conn = duckdb.connect(str(out), read_only=True)
     try:
         row = conn.execute(
-            "SELECT schema_version, gain, flux_variance, tail_ratio, aperture, cell_b_A FROM calibration"
+            "SELECT schema_version, gain, flux_variance, target_noise_peaks, tail_ratio, aperture, cell_b_A FROM calibration"
         ).fetchone()
-        assert row == (SCHEMA_VERSION, 1.1, True, 10.2, "snr", 141.6)
-        assert conn.execute(
-            "SELECT shell, radius_px, captured_fraction FROM shells ORDER BY shell"
-        ).fetchall() == [(0, 1.5, 1.0), (1, 2.5, 0.8)]
+        assert row == (SCHEMA_VERSION, 1.1, True, 5.0, 10.2, "snr", 141.6)
+        assert "shells" not in _tables(conn)
     finally:
         conn.close()
 
@@ -680,9 +540,7 @@ def test_db_writes_a_frame_without_peaks(geometry_dict, cell, tmp_path):
     from probixi.indexer.indexer import FrameIndexResult
 
     out = tmp_path / "out.duckdb"
-    empty = FrameIndexResult(
-        0, [], torch.zeros((0, 2)), torch.zeros(0), peak_aux=torch.zeros((0, 2))
-    )
+    empty = FrameIndexResult(0, [], torch.zeros((0, 2)), torch.zeros(0))
     with DuckDBOffloader(out, geometry=geometry_dict, cell=cell) as off:
         off.write(empty)
     conn = duckdb.connect(str(out), read_only=True)

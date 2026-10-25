@@ -137,8 +137,7 @@ def test_radius_by_shell_follows_the_stacked_profile():
     counts = (n * 1e4).expand(4, 9)
     sums = profiles * counts
     squares = counts * 100.0 + sums * profiles
-    radii, captured = radius_by_shell(sums, counts, squares, base=1.5)
-    assert captured[0] == 1.0 and 0.5 < captured[1] < 1.0 and captured[2] == 1.0
+    radii = radius_by_shell(sums, counts, squares, base=1.5)
     # sharp spot keeps the base disk, a blurred one widens, an empty shell keeps it
     assert radii[0] == 1.5
     assert radii[1] > 2.0
@@ -614,21 +613,3 @@ def test_unexplained_signal_separates_chance_from_real_lattices():
     weak = 2.0 * (0.4 + torch.randn(300, generator=g))  # <I/sigma> = 0.4
     assert unexplained_signal_p(weak, sigma, use) < 1e-6
     assert unexplained_signal_p(weak, sigma, torch.zeros_like(use)) == 0.0
-
-
-def test_frame_background_stats_bands_and_ice_score():
-    from probixi.indexer.integrate import frame_background_stats, resolution_bands
-
-    d = torch.tensor([7.0, 5.0, 3.5, 2.5, 2.0]).repeat(40, 8)  # (40, 40)
-    d[:20, :20] = 3.90  # an ice window
-    d[20:, :20] = 3.80  # its flank
-    band, ice = resolution_bands(d)
-    assert band[0, 20:25].tolist() == [0, 1, 2, 3, 4]
-    assert ice[0, 0] == 1 and ice[39, 0] == 2 and ice[0, 25] == 0
-    mean = band.float()  # background equal to the band index
-    excess = torch.where(ice == 1, 5.0, 1.0)
-    stats = frame_background_stats(mean, excess, torch.ones_like(mean), None, band, ice)
-    assert stats[:5].tolist() == pytest.approx([0.0, 1.0, 2.0, 3.0, 4.0])
-    assert stats[5].item() == pytest.approx(4.0)
-    masked = frame_background_stats(mean, None, None, band == 4, band, ice)
-    assert torch.isnan(masked[:4]).all() and masked[4] == 4.0 and torch.isnan(masked[5])

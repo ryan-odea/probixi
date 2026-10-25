@@ -148,9 +148,9 @@ def radius_by_shell(
     base: float,
     k_max: int = 4,
     z_min: float = 5.0,
-) -> tuple[list[float], list[float]]:
+) -> list[float]:
     n_ring = _ring_pixel_counts(sums.shape[1] - 1, sums.device)
-    out, captured, r = [], [], float(base)
+    out, r = [], float(base)
     for s, c, sq in zip(sums.double(), counts.double(), squares.double()):
         p = s / c.clamp_min(1.0)
         se2 = (sq / c.clamp_min(1.0) - p * p).clamp_min(0.0) / c.clamp_min(1.0)
@@ -158,16 +158,12 @@ def radius_by_shell(
         S = torch.cumsum(p * n_ring, 0)[1 : k_max + 1]
         V = torch.cumsum(se2 * n_ring * n_ring, 0)[1 : k_max + 1]
         snr = S / torch.cumsum(n_ring, 0)[1 : k_max + 1].sqrt()
-        f = 1.0
         if float(snr.max()) > 0:  # r is kept without positive stacked signal
             k = int(torch.nonzero(snr >= 0.98 * snr.max())[0])
             if float(S[k]) > z_min * math.sqrt(float(V[k])):
                 r = max(r, k + 1.5)
-            k = min(max(int(round(r - 1.5)), 0), k_max - 1)
-            f = min(max(float(S[k] / S[-1]), 1e-3), 1.0) if float(S[-1]) > 0 else 1.0
         out.append(r)
-        captured.append(f)
-    return out, captured
+    return out
 
 
 def radii_from_profile(
@@ -593,57 +589,3 @@ def spot_enrichment(
             torch.special.gammainc(k, torch.tensor(lam, dtype=torch.float32))
         )
     return n_bright, enrichment, p_value
-
-
-# background bands (A): low > 6, mid 6-4.2, ring 4.2-3.0, high 3.0-2.3, edge < 2.3
-BAND_EDGES_A = (6.0, 4.2, 3.0, 2.3)
-ICE_RINGS_A = (3.90, 3.67, 3.44)  # ice Ih (100), (002), (101)
-ICE_HALF_WIDTH_A = 0.04
-ICE_FLANK_A = 0.12
-
-
-def resolution_bands(d_spacing: Tensor) -> tuple[Tensor, Tensor]:
-    # per-pixel d (A) -> band 0..4 and ice code (1 ring window, 2 flank, 0 elsewhere)
-    band = torch.zeros(d_spacing.shape, dtype=torch.long, device=d_spacing.device)
-    for edge in BAND_EDGES_A:
-        band += (d_spacing < edge).long()
-    ice = torch.zeros_like(band)
-    for ring in ICE_RINGS_A:
-        off = (d_spacing - ring).abs()
-        ice = torch.where((off <= ICE_FLANK_A) & (ice == 0), 2, ice)
-        ice = torch.where(off <= ICE_HALF_WIDTH_A, 1, ice)
-    return band, ice
-
-
-@torch.no_grad()
-def frame_background_stats(
-    mean: Tensor,
-    excess: Tensor | None,
-    var: Tensor | None,
-    mask: Tensor | None,
-    band: Tensor,
-    ice: Tensor,
-) -> Tensor:
-    # (6,): model background per band, then ice-window excess over flanks in sigma
-    mean = mean.reshape(band.shape)
-    ok = (
-        torch.ones_like(band, dtype=torch.bool)
-        if mask is None
-        else mask.reshape(band.shape).bool()
-    )
-    b = band[ok]
-    n = torch.bincount(b, minlength=5).to(mean.dtype)
-    bg = torch.bincount(b, weights=mean[ok], minlength=5) / n.clamp_min(1)
-    bg = torch.where(n > 0, bg, torch.full_like(bg, float("nan")))
-    score = torch.full((1,), float("nan"), dtype=mean.dtype, device=mean.device)
-    inner, flank = ok & (ice == 1), ok & (ice == 2)
-    if (
-        excess is not None
-        and var is not None
-        and int(inner.sum()) >= MIN_ANNULUS_PIXELS
-        and int(flank.sum()) >= MIN_ANNULUS_PIXELS
-    ):
-        excess, var = excess.reshape(band.shape), var.reshape(band.shape)
-        sigma = var[inner].sqrt().median().clamp_min(1e-12)
-        score[0] = (excess[inner].median() - excess[flank].median()) / sigma
-    return torch.cat([bg, score])

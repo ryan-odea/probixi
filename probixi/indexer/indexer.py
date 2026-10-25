@@ -14,11 +14,9 @@ from .integrate import (
     A_INV_TO_NM_INV,
     disk_overlap_counts,
     falloff_resolution_limit,
-    frame_background_stats,
     integrate_rings,
     peak_resolution_limit,
     radius_by_shell,
-    resolution_bands,
     ring_sums,
     spot_enrichment,
     unexplained_signal_p,
@@ -117,9 +115,6 @@ class IndexResult:
     predicted_positions : Tensor, optional
         (M, 2) predicted detector ``(row, col)`` positions, where each
         reflection is integrated.
-    predicted_raw_positions : Tensor, optional
-        Not set by probixi's integration, which no longer moves predictions.
-        Kept for the database's ``pred_fs``/``pred_ss`` columns.
     predicted_intensities : Tensor, optional
         (M,) integrated intensity (ADU) per predicted reflection.
     predicted_sigmas : Tensor, optional
@@ -152,16 +147,6 @@ class IndexResult:
     peak_n_masked : Tensor, optional
         (N,) pixels of each detected peak's blob that border the mask or the
         frame edge; the stream's peak list skips a peak with any.
-    peak_posterior : Tensor, optional
-        (N,) mean detection posterior of each detected peak's blob.
-    predicted_peak_posterior : Tensor, optional
-        Not set by probixi's integration; kept for the database's
-        ``peak_posterior`` column.
-    peak_aux : Tensor, optional
-        (N, 2) ``(brightest pixel, eccentricity)`` of each detected peak.
-    predicted_peak_max : Tensor, optional
-        Not set by probixi's integration; kept for the database's ``peak_max``
-        column.
     adu_per_photon : float, optional
         Gain (ADU per photon) the frame was processed with.
     diffraction_limit : float, optional
@@ -209,7 +194,6 @@ class IndexResult:
     loss_history: Tensor = field(repr=False)
     predicted_hkl: Optional[Tensor] = None
     predicted_positions: Optional[Tensor] = None
-    predicted_raw_positions: Optional[Tensor] = None
     predicted_intensities: Optional[Tensor] = None
     predicted_sigmas: Optional[Tensor] = None
     predicted_peak: Optional[Tensor] = None
@@ -223,10 +207,6 @@ class IndexResult:
     peak_background_sum: Optional[Tensor] = None
     peak_n_pixels: Optional[Tensor] = None
     peak_n_masked: Optional[Tensor] = None
-    peak_posterior: Optional[Tensor] = None
-    predicted_peak_posterior: Optional[Tensor] = None
-    peak_aux: Optional[Tensor] = None
-    predicted_peak_max: Optional[Tensor] = None
     adu_per_photon: Optional[float] = None
     diffraction_limit: Optional[float] = None
     falloff_limit: Optional[float] = None
@@ -260,12 +240,6 @@ class FrameIndexResult:
     peak_background_sum, peak_n_pixels, peak_n_masked : Tensor, optional
         Per-peak background sum (ADU), pixel count, and count of pixels
         bordering the mask, aligned with ``positions``.
-    peak_posterior : Tensor, optional
-        Per-peak mean detection posterior.
-    peak_aux : Tensor, optional
-        Per-peak ``(brightest pixel, eccentricity)``.
-    frame_stats : Tensor, optional
-        ``(bg_low, bg_mid, bg_ring, bg_high, bg_edge, ice_score)`` of the frame.
     adu_per_photon : float, optional
         Gain (ADU per photon) the frame was processed with.
     """
@@ -277,9 +251,6 @@ class FrameIndexResult:
     peak_background_sum: Optional[Tensor] = None
     peak_n_pixels: Optional[Tensor] = None
     peak_n_masked: Optional[Tensor] = None
-    peak_posterior: Optional[Tensor] = None
-    peak_aux: Optional[Tensor] = None
-    frame_stats: Optional[Tensor] = None
     adu_per_photon: Optional[float] = None
 
     @property
@@ -719,7 +690,6 @@ class Indexer:
         self.frame_wavelengths: Optional[list[float]] = None
         # learned |q|-shell disk radii, and their profile sums
         self._radius_by_q: Optional[tuple[Tensor, list[float]]] = None
-        self._shell_capture: Optional[list[float]] = None
         self._profile_acc: Optional[list] = None
         self.set_target_cell(target_cell)
 
@@ -797,7 +767,6 @@ class Indexer:
         peak_bg_by_frame: Optional[dict[int, Tensor]] = None,
         peak_npix_by_frame: Optional[dict[int, Tensor]] = None,
         peak_nmask_by_frame: Optional[dict[int, Tensor]] = None,
-        peak_aux_by_frame: Optional[dict[int, Tensor]] = None,
     ) -> dict[int, IndexResult]:
         """Index one lattice per frame, refining every frame in one batch.
 
@@ -819,8 +788,6 @@ class Indexer:
         peak_bg_by_frame, peak_npix_by_frame, peak_nmask_by_frame : dict of int -> Tensor, optional
             Per-peak background sum (ADU), pixel count, and mask-bordering pixel
             count, carried onto the result for the writers.
-        peak_aux_by_frame : dict of int -> Tensor, optional
-            Per-peak ``(brightest pixel, eccentricity)``, carried likewise.
 
         Returns
         -------
@@ -839,7 +806,6 @@ class Indexer:
                 (peak_bg_by_frame or {}).get(i),
                 (peak_npix_by_frame or {}).get(i),
                 (peak_nmask_by_frame or {}).get(i),
-                (peak_aux_by_frame or {}).get(i),
             )
             for i, p in positions_by_frame.items()
         }
@@ -894,8 +860,6 @@ class Indexer:
                 peak_bg=data[idx][4],
                 peak_npix=data[idx][5],
                 peak_nmask=data[idx][6],
-                peak_posterior=data[idx][3],
-                peak_aux=data[idx][7],
             )
             if built is not None:
                 out[idx] = built
@@ -959,8 +923,6 @@ class Indexer:
         peak_bg: Optional[Tensor] = None,
         peak_npix: Optional[Tensor] = None,
         peak_nmask: Optional[Tensor] = None,
-        peak_posterior: Optional[Tensor] = None,
-        peak_aux: Optional[Tensor] = None,
     ) -> Optional[IndexResult]:
         # Pick the best refined candidate whose cell matches the target, or None.
         if result.A.shape[0] == 0:
@@ -1023,8 +985,6 @@ class Indexer:
                 peak_background_sum=peak_bg,
                 peak_n_pixels=peak_npix,
                 peak_n_masked=peak_nmask,
-                peak_posterior=peak_posterior,
-                peak_aux=peak_aux,
                 adu_per_photon=self._adu_per_photon(),
             )
         return None
@@ -1079,11 +1039,8 @@ class Indexer:
         n_mask = stats.n_masked
         if n_mask is not None:
             n_mask = n_mask.to(device=self.device, dtype=self.dtype)
-        aux = torch.stack([stats.intensity_max, stats.eccentricity], dim=-1).to(
-            device=self.device, dtype=self.dtype
-        )
         return self._cap_peak_data(
-            positions, intensities, sigmas, weights, bg_sum, n_pix, n_mask, aux
+            positions, intensities, sigmas, weights, bg_sum, n_pix, n_mask
         )
 
     def _cap_peak_data(
@@ -1095,7 +1052,6 @@ class Indexer:
         peak_bg: Optional[Tensor] = None,
         peak_npix: Optional[Tensor] = None,
         peak_nmask: Optional[Tensor] = None,
-        peak_aux: Optional[Tensor] = None,
     ) -> tuple[Optional[Tensor], ...]:
         # Keeps the max_index_peaks brightest peaks in each array aligned with positions
         values = (
@@ -1106,7 +1062,6 @@ class Indexer:
             peak_bg,
             peak_npix,
             peak_nmask,
-            peak_aux,
         )
         cap = self.seed.max_index_peaks
         if cap is None or len(positions) <= cap:
@@ -1129,7 +1084,6 @@ class Indexer:
         peak_bg_by_frame: Optional[dict[int, Tensor]] = None,
         peak_npix_by_frame: Optional[dict[int, Tensor]] = None,
         peak_nmask_by_frame: Optional[dict[int, Tensor]] = None,
-        peak_aux_by_frame: Optional[dict[int, Tensor]] = None,
         maps_by_frame: Optional[dict[int, tuple]] = None,
         bright_threshold: float = 5.0,
         enrich_alpha: Optional[float] = None,
@@ -1152,8 +1106,6 @@ class Indexer:
         peak_bg_by_frame, peak_npix_by_frame, peak_nmask_by_frame : dict of int -> Tensor, optional
             Per-peak photometry as for :meth:`index_frames`, removed with the
             peaks so each lattice keeps its own.
-        peak_aux_by_frame : dict of int -> Tensor, optional
-            As for :meth:`index_frames`.
         maps_by_frame : dict of int -> tuple, optional
             Per-frame ``(excess, var, mask, mean)`` maps. With ``enrich_alpha``,
             each lattice is integrated and gated as it is found; a rejected
@@ -1175,7 +1127,6 @@ class Indexer:
                 (peak_bg_by_frame or {}).get(i),
                 (peak_npix_by_frame or {}).get(i),
                 (peak_nmask_by_frame or {}).get(i),
-                (peak_aux_by_frame or {}).get(i),
             )
             for i, p in positions_by_frame.items()
         }
@@ -1192,7 +1143,6 @@ class Indexer:
                 peak_bg_by_frame={i: v[4] for i, v in remaining.items()},
                 peak_npix_by_frame={i: v[5] for i, v in remaining.items()},
                 peak_nmask_by_frame={i: v[6] for i, v in remaining.items()},
-                peak_aux_by_frame={i: v[7] for i, v in remaining.items()},
             )
             next_remaining = {}
             for i, result in results.items():
@@ -1304,7 +1254,6 @@ class Indexer:
                 peak_bg_by_frame={b["idx"]: b["peak_bg"] for b in hits},
                 peak_npix_by_frame={b["idx"]: b["peak_npix"] for b in hits},
                 peak_nmask_by_frame={b["idx"]: b["peak_nmask"] for b in hits},
-                peak_aux_by_frame={b["idx"]: b["peak_aux"] for b in hits},
                 maps_by_frame={
                     b["idx"]: (b["excess"], b["var"], b["mask"], b["mean"])
                     for b in hits
@@ -1343,9 +1292,6 @@ class Indexer:
                     peak_background_sum=b["peak_bg"],
                     peak_n_pixels=b["peak_npix"],
                     peak_n_masked=b["peak_nmask"],
-                    peak_posterior=b["w"],
-                    peak_aux=b["peak_aux"],
-                    frame_stats=self._frame_stats(b),
                     adu_per_photon=self._adu_per_photon(),
                 )
 
@@ -1362,7 +1308,6 @@ class Indexer:
                     peak_bg,
                     peak_npix,
                     peak_nmask,
-                    peak_aux,
                 ) = self._positions_from_frame(r)
                 buf.append(
                     dict(
@@ -1374,7 +1319,6 @@ class Indexer:
                         peak_bg=peak_bg,
                         peak_npix=peak_npix,
                         peak_nmask=peak_nmask,
-                        peak_aux=peak_aux,
                         excess=r.scores.get("excess") if r.scores else None,
                         var=r.var,
                         mask=r.valid_mask,
@@ -1388,41 +1332,6 @@ class Indexer:
                 yield from _flush(buf)
 
         return FrameIndexStream(_gen(), stats=stats)
-
-    def _resolution_maps(self, shape: tuple[int, int], device) -> tuple[Tensor, Tensor]:
-        # Band and ice-window maps at the geometry wavelength, per frame shape
-        maps = self.__dict__.setdefault("_res_maps", {})
-        key = (tuple(shape), str(device))
-        if key not in maps:
-            rows, cols = shape
-            grid = torch.stack(
-                torch.meshgrid(
-                    torch.arange(rows, device=device, dtype=torch.float32),
-                    torch.arange(cols, device=device, dtype=torch.float32),
-                    indexing="ij",
-                ),
-                dim=-1,
-            ).reshape(-1, 2)
-            d = torch.empty(len(grid), device=device, dtype=torch.float32)
-            for start in range(0, len(grid), 1 << 20):
-                q = detector_to_q(grid[start : start + (1 << 20)], self.geometry)
-                d[start : start + (1 << 20)] = 1.0 / q.norm(dim=-1).clamp_min(1e-6)
-            maps[key] = resolution_bands(d.view(rows, cols))
-        return maps[key]
-
-    def _frame_stats(self, b: dict) -> Optional[Tensor]:
-        mean = b.get("mean")
-        if mean is None or mean.ndim not in (2, 3):
-            return None
-
-        def img(t):
-            return None if t is None else (t[0] if t.ndim == 3 else t)
-
-        mean = img(mean)
-        band, ice = self._resolution_maps(tuple(mean.shape), mean.device)
-        return frame_background_stats(
-            mean, img(b.get("excess")), img(b.get("var")), img(b.get("mask")), band, ice
-        )
 
     def _flag_overlaps(self, crystals: list[IndexResult]) -> None:
         # disk pixels shared with any predicted disk on the panel, across all lattices
@@ -1515,11 +1424,10 @@ class Indexer:
         acc, self._profile_acc = self._profile_acc, None
         if not acc or float(acc[2][:, 0].sum()) <= 0:
             return None
-        radii, captured = radius_by_shell(
+        radii = radius_by_shell(
             acc[1].cpu(), acc[2].cpu(), acc[3].cpu(), self._radii()[0]
         )
         self._radius_by_q = (acc[0].float(), radii)
-        self._shell_capture = captured
         return radii
 
     def _aperture(self) -> str:

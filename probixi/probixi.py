@@ -28,7 +28,6 @@ from .indexer import (
 from .indexer.forward import _lab_xy_pixels, _panel_bases, detector_to_q
 from .indexer.indexer import MIN_PEAKS_TO_INDEX
 from .indexer.integrate import (
-    A_INV_TO_NM_INV,
     choose_aperture,
     nearest_neighbour_distance,
     radii_from_profile,
@@ -443,7 +442,6 @@ class Probixi:
             prior_peak=cal.prior_peak,
             var_scale=cal.var_scale,
             aperture=None if ap is None else ap[0],
-            captured_fraction=None if ap is None or not ap[1] else ap[1].get("f_mean"),
             clen=None if idx is None else idx.geometry.get("clen"),
             cell=(
                 None
@@ -451,22 +449,6 @@ class Probixi:
                 else (cell.a, cell.b, cell.c, cell.alpha, cell.beta, cell.gamma)
             ),
         )
-
-    @property
-    def shell_table(self) -> Optional[list[tuple]]:
-        """Per-shell disk radii of the predictions for the database's
-        ``shells`` table: ``(shell, q_lo, q_hi, radius_px, captured_fraction)``
-        with |q| in nm^-1. None until the seed lattices were integrated."""
-        idx = self.indexer
-        if idx is None or idx._radius_by_q is None:
-            return None
-        edges, radii = idx._radius_by_q
-        captured = idx._shell_capture or [1.0] * len(radii)
-        e = [float(x) * A_INV_TO_NM_INV for x in edges.tolist()]
-        return [
-            (i, e[i], e[i + 1], float(r), float(f))
-            for i, (r, f) in enumerate(zip(radii, captured))
-        ]
 
     @property
     def shadow_fraction(self) -> float:

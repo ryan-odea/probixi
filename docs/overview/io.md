@@ -38,6 +38,7 @@ Four metadata tables are written once, at the start of the run.
 | `panels` | one per panel | Each panel's `name` and fast-scan and slow-scan pixel bounds (`min_fs`, `max_fs`, `min_ss`, `max_ss`). |
 | `cell` | one | The target unit cell: edges `a_A`/`b_A`/`c_A`, angles `alpha_deg`/`beta_deg`/`gamma_deg`, `volume_A3`, and the symmetry labels `lattice_type`, `centering`, `unique_axis`. |
 | `integration` | one | The integration recipe the run applied: disk radius `r_peak` and annulus radii `r_gap`/`r_bg` (px), the gain `adu_per_photon` (measured when the flux model is on, otherwise the geometry's), the local-background annulus size `bg_annulus_pixels`, and the `aperture` rule. |
+| `calibration` | one | What the calibration settled: the probixi version and database `schema_version`, the gain and read variance, whether the flux model is on, the detection threshold with its noise budget and tail ratio, the peak mixture (`kappa`, `prior_peak`, `var_scale`), the aperture, the camera length, and the cell in use. |
 
 Four result tables are joined on `frame_id`, and per lattice on `crystal_id`.
 
@@ -48,16 +49,9 @@ Four result tables are joined on `frame_id`, and per lattice on `crystal_id`.
 | `reflections` | one per integrated reflection | Miller indices `h`/`k`/`l`, `intensity`, `sigma`, `peak`, `background`, position (`fs`, `ss`, `panel`), and `resolution_nm_inv`. Of the `n_pixels_total` pixels in the nominal disk, `n_pixels` were summed, `n_masked` fell on the mask or frame edge, and `n_overlap` are shared with another predicted disk. `background_model` and `background_model_var` are the noise model's background under the summed pixels and its variance ([method](method.md#73-the-model-background-under-the-disk)). |
 | `peaks` | one per searched peak | Position (`fs`, `ss`, `panel`), `intensity`, `resolution_nm_inv`, `n_pixels`, and `n_masked`, the blob pixels bordering the mask or frame edge. `photons` and `background_photons` are the blob's total and background counts in photons. |
 
-Diagnostic columns that the stream does not carry:
-
-- `frames`: the model background in five d-spacing bands, from `bg_low` (above 6 Å) through `bg_mid`, `bg_ring`, and `bg_high` to `bg_edge` (below 2.3 Å); `ice_score`, the excess in the ice-ring windows over their flanks, in σ; `peak_falloff`, the peak intensity falloff with resolution, in nm²; and the mean peak footprint and eccentricity, `peak_size_px` and `peak_ecc`.
-- `crystals`: `matched_frac`, the fraction of predicted reflections with a detected peak, and `matched_posterior`, their mean posterior.
-- `reflections`: `edge_px`, the distance to the panel edge. Every reflection is integrated where the lattice predicts it, so `pred_fs`, `pred_ss`, `peak_posterior` and `peak_max`, which described the peak a prediction was once moved onto, stay empty, as do the crystals' `matched_frac` and `matched_posterior`.
-- `peaks`: `posterior`, `intensity_max`, and `eccentricity`.
-
 Frames that never indexed have `indexed = FALSE`, so the indexing rate is `SELECT AVG(indexed::INT) FROM frames`. A frame has one row however many lattices it yields: count lattices with `SELECT COUNT(*) FROM crystals` and indexed frames with `SELECT COUNT(*) FROM frames WHERE indexed`. `--peaks-only` fills `peaks` and leaves `crystals` and `reflections` empty.
 
-Per-frame values measured outside `probixi` join the database with `probixi-attach run.duckdb table.tsv`. The text table has the columns `filename event <name> ...`, and each further column, such as a pulse energy from a gas detector or a spectral width from a shot-to-shot spectrometer, becomes a column of `frames`, matched on filename and event. TorchSX reads the database directly (`torchsx.train run.duckdb --spacegroup ...`).
+TorchSX reads the database directly (`torchsx.train run.duckdb --spacegroup ...`).
 
 ### CXI peak export
 
