@@ -44,7 +44,7 @@ from .io import (
 )
 from .io.cell import median_cell
 from .io.geometry import EV_ANGSTROM
-from .kernels import Engine, select, use_engine
+from .kernels import Engine, use_engine
 from .peakfinding import PeakFinder, PeakStream
 from .peakfinding.noise import (
     CalibrationResult,
@@ -74,7 +74,7 @@ _BEAMSTOP_MIN_BIN_PIXELS = 10_000
 _BEAMSTOP_MAX_EXTEND_BINS = 2
 
 _SEED_LEVEL_OVERSAMPLE = 3  # candidates drawn per seed frame before the level cut
-_SEED_LEVEL_STRIDE = 97  # a frame's level is the median of every 97th pixel
+_SEED_LEVEL_STRIDE = 97  # a frame's level is the mean of every 97th valid pixel
 
 _LAB_RADIUS_CHUNK_PIXELS = 1 << 18
 
@@ -238,10 +238,10 @@ class Probixi:
     mf_threshold : float, default 5.0
         Matched-filter threshold until :meth:`calibrate` learns one.
     seed_level_frac : float, default 0.0
-        Drop seed frames whose median level is below this fraction of the seed
+        Drop seed frames whose mean level is below this fraction of the seed
         sample's median; 0 disables.
     frame_screen_frac : float, default 0.1
-        Withhold frames whose median level is below this fraction of the run's
+        Withhold frames whose mean level is below this fraction of the run's
         from the running background and list them in ``screened_frames``;
         0 disables (``--force-all``).
     flux_variance : bool or None, default None
@@ -457,7 +457,7 @@ class Probixi:
 
     @property
     def blank_frame_floor(self) -> Optional[float]:
-        """Median level below which a frame is a blank shot, or None.
+        """Mean level below which a frame is a blank shot, or None.
 
         None when the screen is disabled or before :meth:`calibrate` measures the
         run's reference level.
@@ -962,6 +962,16 @@ class Probixi:
         )
         return shadow
 
+    def _frame_level(self, item: Tensor) -> float:
+        # A mean stays continuous on integer counts, where a median sits on 0 or 1.
+        self._ensure_built(item)
+        assert self._noise is not None
+        mask = self._noise.valid_mask
+        keep = mask.reshape(-1)[::_SEED_LEVEL_STRIDE]
+        v = item.reshape(-1, mask.numel())[:, ::_SEED_LEVEL_STRIDE]
+        v = v.to(device=keep.device, dtype=torch.float32)[:, keep]
+        return float(v.mean()) if v.numel() else 0.0
+
     def _update_noise(self, item: Tensor) -> None:
         if item.ndim == 3:
             for frame in item:
@@ -1092,7 +1102,7 @@ class Probixi:
             seed = seed_frames if isinstance(seed_frames, Sized) else list(seed_frames)
         elif self.seed_level_frac > 0.0:
             cand = self._sample_frame_indices(n_seed * _SEED_LEVEL_OVERSAMPLE)
-            levels = [_frame_level(f) for f in self._frames_at(cand)]
+            levels = [self._frame_level(f) for f in self._frames_at(cand)]
             floor = _blank_seed_floor(levels, self.seed_level_frac)
             keep = [i for i, lv in zip(cand, levels) if lv >= floor]
             self.blank_seed_floor = floor
@@ -1128,7 +1138,7 @@ class Probixi:
             **opts,
         )
         if self._level_ref is None and seed:
-            lv = sorted(_frame_level(f) for f in seed)
+            lv = sorted(self._frame_level(f) for f in seed)
             self._level_ref = lv[len(lv) // 2]
         self.fit_noise(seed)
         shadow = self._infer_shadow_mask()
@@ -1182,7 +1192,6 @@ class Probixi:
         return result
 
     def _calibrate_cell(self, frames: Iterable[Tensor]) -> None:
-        n_screened = len(self.screened_frames)
         tc = self.threshold_calibration
 
         def index() -> list:
@@ -1217,7 +1226,6 @@ class Probixi:
             )
         self.predicted_radii = self.indexer.finish_profile_stacking()
         cells = [c.cell for r in results for c in r.crystals]
-        del self.screened_frames[n_screened:]
         self._frame_scales.clear()
         if self.cell_calibrate and len(cells) >= max(
             1, self.cell_calibrate_after // 10
@@ -1297,7 +1305,11 @@ class Probixi:
             for item in frames:
                 self._ensure_built(item)
                 self.noise.record_drift = False
-                blank = floor is not None and _is_blank(item, floor)
+                blank = (
+                    update_noise
+                    and floor is not None
+                    and self._frame_level(item) < floor
+                )
                 if blank:
                     self.screened_frames.append(start_index + offset)
                 if update_noise and not blank:
@@ -1676,21 +1688,6 @@ def _frame_wavelengths(meta: Metadata) -> Optional[list[float]]:
             for k in range(start, start + int(info.n_frames))
         ]
     return out
-
-
-def _frame_level(frame: Tensor) -> float:
-    v = frame.flatten()[::_SEED_LEVEL_STRIDE].float()
-    return float(v.median()) if v.numel() else 0.0
-
-
-def _is_blank(frame: Tensor, floor: float) -> bool:
-    kernel = select(
-        "level",
-        frame.is_cuda and frame.dtype == torch.float32 and frame.is_contiguous(),
-    )
-    if kernel is not None:
-        return kernel.below(frame, floor, _SEED_LEVEL_STRIDE)
-    return _frame_level(frame) < floor
 
 
 def _blank_seed_floor(levels: list[float], frac: float) -> float:

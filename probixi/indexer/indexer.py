@@ -1400,10 +1400,10 @@ class Indexer:
         if not len(positions):
             return
         if not self._profile_acc:  # equal-volume |q| shells to the detector edge
-            edges = torch.linspace(0.0, 1.0, 13, dtype=torch.float64) ** (1 / 3)
+            edges = torch.linspace(0.0, 1.0, 13, dtype=torch.float32) ** (1 / 3)
             edges = (edges * self._q_max).to(self.device)
             edges[-1] = float("inf")
-            zeros = torch.zeros(12, 9, dtype=torch.float64, device=self.device)
+            zeros = torch.zeros(12, 9, dtype=torch.float32, device=self.device)
             self._profile_acc = [edges, zeros, zeros.clone(), zeros.clone()]
         acc = self._profile_acc
         clipped = torch.minimum(excess, 10.0 * var.clamp_min(1e-12).sqrt())

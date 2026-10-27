@@ -304,7 +304,7 @@ def _run_multi_gpu(device_list: list, opts: dict, refine, integrate) -> None:
 @click.option(
     "--force-all",
     is_flag=True,
-    help="Disable the blank-shot screen and index every frame.",
+    help="Disable the blank-shot screen so every frame trains the background.",
 )
 @click.option(
     "--no-refine-cell",
@@ -444,9 +444,9 @@ def main(
         click.echo(f"Loaded {meta.n_frames} frames from {meta.n_files} file(s).")
     if force_all:
         click.echo(
-            "WARNING: --force-all: indexing every frame including blank/no-beam "
-            "shots. Those frames train the background model, which biases the "
-            "per-pixel mean and inflates the variance for every other frame."
+            "WARNING: --force-all: blank/no-beam shots train the background "
+            "model, which biases the per-pixel mean and inflates the variance "
+            "for every other frame."
         )
 
     if gif:
@@ -615,7 +615,7 @@ def main(
                     n_screened += 1
                     click.echo(
                         f"  Frame {probixi.frame_source(idx)} seems "
-                        f"exceptionally dark, not marking for indexing"
+                        f"exceptionally dark, withheld from the background model"
                     )
             now = time.monotonic()
             if not quiet and now - last_log >= _PROGRESS_INTERVAL_S:
