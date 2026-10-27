@@ -118,7 +118,7 @@ i.e. the lowest threshold at which a signal-free frame yields at most $N_{\text{
 
 ### 2.7 Frame level and the blank-shot screen
 
-The *level* of a frame is the median of every 97th pixel, $\text{lvl}(x) = \operatorname{med}(x[0::97])$; the run's reference level is the upper median of the seed levels. A frame with $\text{lvl}(x) < 0.1\,\text{ref}$ (`frame_screen_frac`) is a blank shot: it is still scored but never folded into the running statistics, which would otherwise drift down towards empty frames.
+The *level* of a frame is the mean of every 97th valid pixel, $\text{lvl}(x) = \operatorname{mean}(x[0::97] \mid \text{valid})$; the run's reference level is the upper median of the seed levels. The level is a mean rather than a median because photon-counting detectors near one photon per pixel pin a median of integer counts to 0 or 1, and a screen on that median withholds every frame slightly dimmer than the reference. A frame with $\text{lvl}(x) < 0.1\,\text{ref}$ (`frame_screen_frac`) is a blank shot: it is still scored but never folded into the running statistics, which would otherwise drift down towards empty frames.
 
 ### 2.8 Beam-stop exclusion
 

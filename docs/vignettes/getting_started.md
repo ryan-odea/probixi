@@ -28,7 +28,7 @@ The device defaults to `auto`, which picks CUDA, then Apple MPS, then CPU.
 | `--noise-mode` | `online` | `online` keeps updating the background after calibration; `per_frame` rebuilds it for each frame. |
 | `--flux-variance` | auto | Scale the noise with each frame's own level. Calibration turns it on when the background level changes between shots beyond photon noise, as at free-electron lasers. `--no-flux-variance` forces it off ([Variable flux](variable_flux.md)). |
 | `--flux-var-floor` | 0.15 | Lower bound on the flux-scaled variance, as a fraction of the running variance. |
-| `--force-all` | off | Disable the blank-shot screen and index every frame. |
+| `--force-all` | off | Disable the blank-shot screen so every frame trains the background. |
 | `--random-seed` | 1988 | Seed for the random draw of calibration and aperture frames. Every other draw has a fixed seed, so a run is fully specified by its inputs, the `probixi` version, and this seed. |
 
 ### Indexing and integration
