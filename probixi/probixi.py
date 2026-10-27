@@ -97,7 +97,7 @@ _CITATION = r"""
 @software{odea_probixi,
   author  = {O'Dea, Ryan and Kepa, Michal and Weinert, Tobias},
   title   = {{probixi}: Self-Calibrating Probabilistic Peak Finding for Serial X-Ray Crystallographic Data},
-  version = {0.10.0},
+  version = {0.10.1},
   year    = {2026},
   url     = {https://github.com/ryan-odea/probixi}
 }
