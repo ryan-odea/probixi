@@ -95,7 +95,7 @@ Pixels that carry no measurement are excluded from every estimate and every test
 - Static shadows, such as a beamstop holder. A pixel is dark when its running mean lies far below the radial mean at the same radius. Dark regions are grown by 9 pixels to keep every local-background annulus clear of the edge, and the model is refitted without them.
 - The beamstop halo. The seed peaks are histogrammed by $|\mathbf q|$. When the innermost bins hold at least 50 times the median peak density, the exclusion is extended outward, by at most two bins, to where the density falls to a tenth of the spike. This also sets the low-resolution limit the output reports.
 
-Frames that received no beam, with a median level below a tenth of the run's, are withheld from the running statistics but still pass through detection (`--force-all` disables this).
+Frames that received no beam, with a mean level below a tenth of the run's, are withheld from the running statistics but still pass through detection (`--force-all` disables this).
 
 ## Flux-dependent variance
 

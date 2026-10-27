@@ -542,3 +542,16 @@ def test_too_few_diffraction_frames_leave_the_radii_unmeasured(tmp_path, geom_pa
     px.calibrate(n_seed=N_NOISE, target_noise_peaks=5.0)
     assert px.indexer._measured_radii is None
     assert px.indexer._radii() == FALLBACK_RADII
+
+
+def test_blank_screen_withholds_only_empty_frames(tmp_path, geom_path):
+    rng = np.random.default_rng(7)
+    frames = rng.poisson(0.7, size=(N_NOISE + 8, DET, DET)).astype(np.float32)
+    frames[-1] = 0.0
+    _, lst = sim.write_run(tmp_path / "sparse", frames)
+    px = _build_pipeline(lst, geom_path)
+    px.calibrate(n_seed=N_NOISE, target_noise_peaks=5.0)
+    assert px.screened_frames == []
+    for _ in px.peak_stream(px.frames()):
+        pass
+    assert px.screened_frames == [len(frames) - 1]
