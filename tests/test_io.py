@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import h5py
 import numpy as np
 import pytest
 import sim
@@ -347,3 +348,14 @@ def test_event_list_cxi_uses_original_event_axis(tmp_path):
     with h5py.File(tmp_path / "peaks" / (h5_path.stem + ".cxi")) as f:
         assert f["/entry_1/result_1/nPeaks"].shape == (7,)
         assert f["/entry_1/result_1/nPeaks"][:].tolist() == [0, 0, 0, 0, 1, 0, 0]
+
+
+def test_read_chunk_returns_none_for_an_unallocated_chunk(tmp_path):
+    from probixi.io.frames import _read_chunk
+
+    with h5py.File(tmp_path / "partial.h5", "w") as f:
+        d = f.create_dataset("data", shape=(2, 4, 4), chunks=(1, 4, 4), dtype="u4")
+        d[0] = 7
+        assert _read_chunk(d, 0) is not None
+        assert _read_chunk(d, 1) is None
+        assert np.array_equal(d[1], np.zeros((4, 4), dtype="u4"))

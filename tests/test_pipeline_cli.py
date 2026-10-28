@@ -555,3 +555,13 @@ def test_blank_screen_withholds_only_empty_frames(tmp_path, geom_path):
     for _ in px.peak_stream(px.frames()):
         pass
     assert px.screened_frames == [len(frames) - 1]
+
+
+def test_zero_frames_are_dropped_from_the_seed_draw(tmp_path, geom_path):
+    rng = np.random.default_rng(8)
+    frames = rng.poisson(0.7, size=(N_NOISE + 8, DET, DET)).astype(np.float32)
+    frames[:3] = 0.0
+    _, lst = sim.write_run(tmp_path / "zeros", frames)
+    px = _build_pipeline(lst, geom_path)
+    px.calibrate(n_seed=len(frames) - 3, target_noise_peaks=5.0)
+    assert px.n_blank_seeds_dropped == 3

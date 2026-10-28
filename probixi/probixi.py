@@ -73,6 +73,7 @@ _BEAMSTOP_MIN_BIN_PEAKS = 5
 _BEAMSTOP_MIN_BIN_PIXELS = 10_000
 _BEAMSTOP_MAX_EXTEND_BINS = 2
 
+_MASK_BAD_WARN = 0.5  # a mask file that marks more than this fraction bad warns
 _SEED_LEVEL_OVERSAMPLE = 3  # candidates drawn per seed frame before the level cut
 _SEED_LEVEL_STRIDE = 97  # a frame's level is the mean of every 97th valid pixel
 
@@ -97,7 +98,7 @@ _CITATION = r"""
 @software{odea_probixi,
   author  = {O'Dea, Ryan and Kepa, Michal and Weinert, Tobias},
   title   = {{probixi}: Self-Calibrating Probabilistic Peak Finding for Serial X-Ray Crystallographic Data},
-  version = {0.10.1},
+  version = {0.10.2},
   year    = {2026},
   url     = {https://github.com/ryan-odea/probixi}
 }
@@ -237,7 +238,7 @@ class Probixi:
         Gaussian template widths of the matched filter, in pixels.
     mf_threshold : float, default 5.0
         Matched-filter threshold until :meth:`calibrate` learns one.
-    seed_level_frac : float, default 0.0
+    seed_level_frac : float, default 0.1
         Drop seed frames whose mean level is below this fraction of the seed
         sample's median; 0 disables.
     frame_screen_frac : float, default 0.1
@@ -298,7 +299,7 @@ class Probixi:
     matched_filter: bool = True
     mf_scales: tuple[float, ...] = (1.0, 1.6, 2.4)
     mf_threshold: float = 5.0
-    seed_level_frac: float = 0.0
+    seed_level_frac: float = 0.1
     frame_screen_frac: float = 0.1
     flux_variance: Optional[bool] = None
     flux_var_floor: float = 0.15
@@ -741,6 +742,14 @@ class Probixi:
             _mask_lab_bad_regions(mask, geom)
         h5_mask = self._hdf5_valid_mask(frame_size)
         if h5_mask is not None:
+            bad = 1.0 - float(h5_mask.float().mean())
+            if bad > _MASK_BAD_WARN:
+                warnings.warn(
+                    f"the mask file marks {100 * bad:.0f}% of the detector bad; "
+                    "if its dataset stores 1 for good pixels, set mask_good = 0x1 "
+                    "and mask_bad = 0x0 in the geometry",
+                    stacklevel=2,
+                )
             mask &= h5_mask.to(device=mask.device)
         return mask.to(self.device)
 
