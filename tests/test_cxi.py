@@ -198,3 +198,13 @@ def test_probixi_builds_and_runs_on_multipanel(
     assert len(results) == 8
     # the HDF5-masked pixel is excluded from the valid mask
     assert not bool(px.noise.valid_mask[5, 5])
+
+
+def test_inverted_mask_file_warns(tmp_path, multipanel_geom_file, cell_file):
+    rng = np.random.Generator(np.random.PCG64(2))
+    data4d = rng.normal(100, 10, size=(4, 2, 64, 32)).astype(np.float32)
+    mask = np.ones((2, 64, 32), dtype=np.int32)
+    _, lst = sim.write_multipanel_run(tmp_path, data4d, mask=mask)
+    px = Probixi(list_file=lst, geometry_file=multipanel_geom_file, cell_file=cell_file)
+    with pytest.warns(UserWarning, match="100% of the detector bad"):
+        list(px.peak_stream(px.frames()))

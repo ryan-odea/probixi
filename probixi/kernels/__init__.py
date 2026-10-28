@@ -1,3 +1,4 @@
+import os
 from contextlib import contextmanager
 from contextvars import ContextVar
 from enum import Enum
@@ -20,7 +21,9 @@ class Engine(Enum):
     ACCELERATED = "accelerated"
 
 
-_engine = ContextVar("probixi_engine", default=Engine.AUTO)
+_engine = ContextVar(
+    "probixi_engine", default=Engine(os.environ.get("PROBIXI_ENGINE", "auto"))
+)
 
 
 @contextmanager
