@@ -252,7 +252,7 @@ def _bshuf_lz4_decoder(dset: h5py.Dataset, frame_shape):
 def _read_chunk(dset, j):
     try:
         return dset.id.read_direct_chunk((j, 0, 0))[1]
-    except RuntimeError:
+    except (RuntimeError, MemoryError):
         return None
 
 
