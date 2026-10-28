@@ -249,6 +249,13 @@ def _bshuf_lz4_decoder(dset: h5py.Dataset, frame_shape):
     return decode
 
 
+def _read_chunk(dset, j):
+    try:
+        return dset.id.read_direct_chunk((j, 0, 0))[1]
+    except RuntimeError:
+        return None
+
+
 def _iter_file_frames(info, f_lo, f_hi, pool, window, stop, fast_state):
     f_lo += info.event_start
     f_hi += info.event_start
@@ -265,8 +272,8 @@ def _iter_file_frames(info, f_lo, f_hi, pool, window, stop, fast_state):
             decoder = _bshuf_lz4_decoder(dset, info.frame_shape)
             if decoder is not None:
                 # The direct-chunk decoder is checked once per run against h5py
-                if not fast_state["checked"]:
-                    raw0 = dset.id.read_direct_chunk((f_lo, 0, 0))[1]
+                raw0 = None if fast_state["checked"] else _read_chunk(dset, f_lo)
+                if raw0 is not None:
                     fast_state["ok"] = bool(
                         np.array_equal(decoder(raw0), np.asarray(dset[f_lo]))
                     )
@@ -278,9 +285,10 @@ def _iter_file_frames(info, f_lo, f_hi, pool, window, stop, fast_state):
             end = min(i + window, f_hi)
             if decoder is not None:
                 assert dset is not None
-                raws = [dset.id.read_direct_chunk((j, 0, 0))[1] for j in range(i, end)]
-                for arr in pool.map(decoder, raws):
-                    yield arr
+                raws = [_read_chunk(dset, j) for j in range(i, end)]
+                decoded = pool.map(lambda r: None if r is None else decoder(r), raws)
+                for j, arr in zip(range(i, end), decoded):
+                    yield np.asarray(dset[j]) if arr is None else arr
             elif dset is not None:
                 block = np.asarray(dset[i:end])
                 for k in range(block.shape[0]):
