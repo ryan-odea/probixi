@@ -549,6 +549,7 @@ def main(
                 files=meta.files,
                 frame_range=(start or 0, stop if stop is not None else meta.n_frames),
                 panel=panel,
+                calibration=lambda: probixi.calibration_summary,
             )
         else:
             off_ctx = PeakOffloader(

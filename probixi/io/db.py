@@ -48,6 +48,7 @@ _FRAME_COLUMNS = (
     "adu_per_photon",
     "event_name",
     "photon_energy_eV",
+    "rank",
 )
 _CRYSTAL_COLUMNS = (
     "crystal_id",
@@ -116,7 +117,6 @@ _PEAK_COLUMNS = (
     "n_masked",
 )
 
-#: bumped when tables or columns change; TorchSX refuses a newer one
 SCHEMA_VERSION = 1
 
 _SCHEMA = """
@@ -175,7 +175,8 @@ CREATE TABLE calibration (
     cell_c_A               DOUBLE,
     cell_alpha_deg         DOUBLE,
     cell_beta_deg          DOUBLE,
-    cell_gamma_deg         DOUBLE
+    cell_gamma_deg         DOUBLE,
+    rank                   INTEGER
 );
 
 CREATE TABLE integration (
@@ -201,7 +202,8 @@ CREATE TABLE frames (
     num_reflections          INTEGER,
     adu_per_photon           DOUBLE,
     event_name               VARCHAR,
-    photon_energy_eV         DOUBLE
+    photon_energy_eV         DOUBLE,
+    rank                     INTEGER
 );
 
 CREATE TABLE crystals (
@@ -338,6 +340,12 @@ class DuckDBOffloader(_StreamWriter):
     integration : dict, optional
         Integration recipe (``radii``, ``adu_per_photon``, ``bg_annulus_pixels``,
         ``aperture``), as :attr:`~probixi.Probixi.integration_recipe` returns it.
+    calibration : dict or callable, optional
+        Calibration provenance, as :attr:`~probixi.Probixi.calibration_summary`
+        returns it, written to ``calibration`` on exit.
+    rank : int, default 0
+        Worker that processed these frames, stored in ``frames.rank`` and
+        ``calibration.rank`` so each frame joins the calibration it used.
 
     Notes
     -----
@@ -361,6 +369,7 @@ class DuckDBOffloader(_StreamWriter):
         panel: str = "0",
         integration: Optional[dict] = None,
         calibration=None,
+        rank: int = 0,
     ):
         super().__init__(
             path,
@@ -374,6 +383,7 @@ class DuckDBOffloader(_StreamWriter):
         self.integration = integration
         #: calibration dict (or a callable giving it), written on exit
         self.calibration = calibration
+        self.rank = int(rank)
         self._crystal_rows: list[tuple] = []
         self._frame_range = frame_range
         self._conn = None
@@ -413,7 +423,7 @@ class DuckDBOffloader(_StreamWriter):
         if cal:
             cell = cal.get("cell") or (None,) * 6
             self._conn.execute(
-                "INSERT INTO calibration VALUES (" + ", ".join("?" * 22) + ")",
+                "INSERT INTO calibration VALUES (" + ", ".join("?" * 23) + ")",
                 [
                     _probixi_version(),
                     SCHEMA_VERSION,
@@ -441,6 +451,7 @@ class DuckDBOffloader(_StreamWriter):
                     cal.get("aperture"),
                     _as_float(cal.get("clen")),
                     *(_as_float(x) for x in cell),
+                    self.rank,
                 ],
             )
 
@@ -712,6 +723,7 @@ class DuckDBOffloader(_StreamWriter):
             None if num_reflections is None else int(num_reflections),
             _as_float(gain),
             *self._event_meta(filename, event),
+            self.rank,
         )
 
     def _event_meta(self, filename: str, event: int) -> tuple:
@@ -785,6 +797,7 @@ class DuckDBOffloader(_StreamWriter):
                         filename,
                         physical_event,
                         *self._event_meta(filename, physical_event),
+                        rank=self.rank,
                     )
                 )
                 if len(self._frame_rows) >= _FLUSH_ROWS:
@@ -990,10 +1003,11 @@ def _as_float(value) -> Optional[float]:
 
 
 def _unindexed_frame_row(
-    fid: str, idx: int, fname: str, event: int, name=None, energy=None
+    fid: str, idx: int, fname: str, event: int, name=None, energy=None, rank=0
 ) -> tuple:
     row: list = [None] * len(_FRAME_COLUMNS)
     row[:5] = (fid, int(idx), fname, int(event), False)
     row[_FRAME_COLUMNS.index("event_name")] = name
     row[_FRAME_COLUMNS.index("photon_energy_eV")] = energy
+    row[_FRAME_COLUMNS.index("rank")] = int(rank)
     return tuple(row)

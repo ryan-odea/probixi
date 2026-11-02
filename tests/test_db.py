@@ -262,14 +262,17 @@ def test_merge_dbs_unions_blocks_and_dedups_metadata(geometry_dict, cell, tmp_pa
     # rank 0 owns events [0, 2), indexes event 0; rank 1 owns [2, 4), indexes 2
     part0 = tmp_path / "out.duckdb.rank0"
     part1 = tmp_path / "out.duckdb.rank1"
-    with DuckDBOffloader(
-        part0, geometry=geometry_dict, cell=cell, files=files, frame_range=(0, 2)
-    ) as off:
-        off.write(_make_index_result(cell, frame_index=0))
-    with DuckDBOffloader(
-        part1, geometry=geometry_dict, cell=cell, files=files, frame_range=(2, 4)
-    ) as off:
-        off.write(_make_index_result(cell, frame_index=2))
+    for rank, part, lo in ((0, part0, 0), (1, part1, 2)):
+        with DuckDBOffloader(
+            part,
+            geometry=geometry_dict,
+            cell=cell,
+            files=files,
+            frame_range=(lo, lo + 2),
+            calibration=dict(gain=1.0 + rank),
+            rank=rank,
+        ) as off:
+            off.write(_make_index_result(cell, frame_index=lo))
 
     out = tmp_path / "out.duckdb"
     n_indexed = merge_dbs([part0, part1], out)
@@ -285,6 +288,10 @@ def test_merge_dbs_unions_blocks_and_dedups_metadata(geometry_dict, cell, tmp_pa
         # metadata copied exactly once, not per-rank
         assert conn.execute("SELECT COUNT(*) FROM geometry").fetchone()[0] == 1
         assert conn.execute("SELECT COUNT(*) FROM cell").fetchone()[0] == 1
+        gains = conn.execute(
+            "SELECT list(gain ORDER BY frame_index) FROM frames JOIN calibration USING (rank)"
+        ).fetchone()[0]
+        assert gains == [1.0, 1.0, 2.0, 2.0]
         # reflections from both indexed frames present and joinable
         joined = conn.execute(
             "SELECT COUNT(*) FROM reflections r JOIN frames f USING (frame_id)"

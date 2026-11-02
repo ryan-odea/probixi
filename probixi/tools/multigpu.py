@@ -18,7 +18,7 @@ PathLike = Union[str, Path]
 _CHUNK_MARKER = "----- Begin chunk -----"
 _SERIAL_PREFIX = "Image serial number:"
 _STREAM_VERSION_PREFIX = "CrystFEL stream format"
-_DB_DATA_TABLES = ("frames", "crystals", "reflections", "peaks")
+_DB_DATA_TABLES = ("frames", "crystals", "reflections", "peaks", "calibration")
 _DB_META_TABLES = ("geometry", "panels", "cell", "integration")
 
 __all__ = [
@@ -283,6 +283,8 @@ def run_block(
         offloader = DuckDBOffloader
         # each rank backfills only its own block's non-indexed frames
         offload_kwargs["frame_range"] = (lo, hi)
+        offload_kwargs["calibration"] = lambda: p.calibration_summary
+        offload_kwargs["rank"] = rank
     else:
         offloader = DataOffloader
     n_cellcal = 0
