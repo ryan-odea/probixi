@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import math
 import time
+import warnings
 from pathlib import Path
 from typing import Any, Literal, Optional, cast
 
@@ -53,6 +54,25 @@ def format_cell_calibration(cc) -> str:
     )
 
 
+def _parse_int_radius(value: Optional[str]) -> Optional[tuple[float, float, float]]:
+    """``R_DISK,R_IN,R_OUT`` in pixels, increasing and positive, or None."""
+    if value is None:
+        return None
+    try:
+        r_disk, r_in, r_out = (float(v) for v in value.split(","))
+    except ValueError:
+        raise click.BadParameter(
+            f"expected three comma-separated radii, got {value!r}",
+            param_hint="--int-radius",
+        ) from None
+    if not 0.0 < r_disk < r_in < r_out:
+        raise click.BadParameter(
+            f"radii must be positive and increasing, got {value!r}",
+            param_hint="--int-radius",
+        )
+    return r_disk, r_in, r_out
+
+
 def _run_multi_gpu(device_list: list, opts: dict, refine, integrate) -> None:
     from probixi.indexer import SeedConfig
     from probixi.tools.multigpu import run_data_parallel
@@ -70,6 +90,8 @@ def _run_multi_gpu(device_list: list, opts: dict, refine, integrate) -> None:
         "render_out",
         "no_refine_cell",
         "aperture",
+        "disk",
+        "int_radius",
     ):
         kw.pop(name)
     if kw["cell_file"] is None:
@@ -322,6 +344,26 @@ def _run_multi_gpu(device_list: list, opts: dict, refine, integrate) -> None:
     "background noise costs.",
 )
 @click.option(
+    "--disk",
+    type=click.Choice(["auto", "shell", "fixed"]),
+    default="auto",
+    show_default=True,
+    help="Signal disk across resolution: shell grows the disk with resolution, "
+    "from profiles stacked on the calibration lattices, and fixed integrates "
+    "every reflection with one disk. auto is shell for a .db output, which "
+    "records the pixel count of each disk, and fixed for a stream, whose header "
+    "states one disk.",
+)
+@click.option(
+    "--int-radius",
+    "int_radius",
+    default=None,
+    metavar="R_DISK,R_IN,R_OUT",
+    help="Disk, inner-annulus and outer-annulus radius in pixels, in place of "
+    "the calibrated radii. It fixes the disk. Give every part of a split run "
+    "the same radii.",
+)
+@click.option(
     "--cell-calibrate/--no-cell-calibrate",
     default=True,
     show_default=True,
@@ -370,6 +412,8 @@ def main(
     force_all: bool,
     no_refine_cell: bool,
     aperture: str,
+    disk: str,
+    int_radius: Optional[str],
     cell_calibrate: bool,
     cell_calibrate_after: int,
 ) -> None:
@@ -404,7 +448,21 @@ def main(
 
     device_list = _resolve_cli_devices(device, devices, gpus)
     refine_cfg = RefineConfig(cell=not no_refine_cell)
-    integrate_cfg = IntegrateConfig(aperture=aperture)
+    radii = _parse_int_radius(int_radius)
+    if radii is not None and disk == "shell":
+        raise click.UsageError("--int-radius fixes the disk; drop --disk shell")
+    is_stream = bool(output) and not peaks_only and not is_duckdb_path(output)
+    shell_disk = disk == "shell" or (disk == "auto" and radii is None and not is_stream)
+    if is_stream and not shell_disk:
+        warnings.warn(
+            "Stream output: every reflection is integrated with one disk, "
+            + ("the --int-radius disk" if radii is not None else "the calibrated one")
+            + ", because a stream header states a single --int-radius. The disk "
+            "that grows with resolution goes to a .db output, which records the "
+            "pixel count of each disk. For TorchSX, write a .db.",
+            stacklevel=1,
+        )
+    integrate_cfg = IntegrateConfig(aperture=aperture, shell_disk=shell_disk, radii=radii)
     if device_list is not None and len(device_list) > 1:
         _run_multi_gpu(device_list, opts, refine_cfg, integrate_cfg)
         return
@@ -641,6 +699,12 @@ def main(
             f"background model; --force-all to include them"
         )
     click.echo(f"Wrote {n} indexed frame(s), {stats.crystals} crystals to {output}")
+    scale = getattr(off, "model_var_scale", None)
+    if not quiet and scale is not None:
+        click.echo(
+            f"Model background variance scaled by k={scale:.3g} to the scatter "
+            f"past the crystals' diffraction limits"
+        )
 
 
 if __name__ == "__main__":

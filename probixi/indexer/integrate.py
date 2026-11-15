@@ -166,6 +166,12 @@ def radius_by_shell(
     return out
 
 
+def annulus_for_disk(r: Tensor, base) -> tuple[Tensor, Tensor, Tensor]:
+    r_in = torch.clamp(r + 1.0, min=base[1])
+    # r_out keeps the base annulus area
+    return r, r_in, (r_in * r_in + base[2] ** 2 - base[1] ** 2).sqrt()
+
+
 def radii_from_profile(
     profile: Tensor,
     floor: float = 0.02,

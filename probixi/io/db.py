@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import math
+import warnings
 from pathlib import Path
 from typing import TYPE_CHECKING, Optional, Union
 
@@ -118,6 +119,9 @@ _PEAK_COLUMNS = (
 )
 
 SCHEMA_VERSION = 1
+#: largest ``enrich_p`` of a lattice in the model-variance fit; the default of
+#: ``--enrich-alpha``, and the gate TorchSX applies to the database by default
+MODEL_VAR_ALPHA = 1e-3
 
 _SCHEMA = """
 CREATE TABLE geometry (
@@ -185,7 +189,12 @@ CREATE TABLE integration (
     r_bg              DOUBLE,
     adu_per_photon    DOUBLE,
     bg_annulus_pixels DOUBLE,
-    aperture          VARCHAR
+    aperture          VARCHAR,
+    bg_model_var_scale DOUBLE,
+    bg_model_var_dmin_A DOUBLE,
+    bg_model_var_ref VARCHAR,
+    bg_model_var_alpha DOUBLE,
+    bg_model_var_n_ref BIGINT
 );
 
 CREATE TABLE frames (
@@ -346,6 +355,13 @@ class DuckDBOffloader(_StreamWriter):
     rank : int, default 0
         Worker that processed these frames, stored in ``frames.rank`` and
         ``calibration.rank`` so each frame joins the calibration it used.
+    calibrate_model_var : bool, default True
+        Rescale ``background_model_var`` on exit with
+        :func:`calibrate_model_variance`. Multi-GPU ranks leave this to
+        :func:`~probixi.tools.multigpu.merge_dbs`.
+    calibrate_alpha : float or None, default 1e-3
+        Largest ``enrich_p`` of a lattice in that fit, independent of the
+        enrichment gate on the written lattices. None uses every lattice.
 
     Notes
     -----
@@ -370,6 +386,8 @@ class DuckDBOffloader(_StreamWriter):
         integration: Optional[dict] = None,
         calibration=None,
         rank: int = 0,
+        calibrate_model_var: bool = True,
+        calibrate_alpha: Optional[float] = MODEL_VAR_ALPHA,
     ):
         super().__init__(
             path,
@@ -384,6 +402,9 @@ class DuckDBOffloader(_StreamWriter):
         #: calibration dict (or a callable giving it), written on exit
         self.calibration = calibration
         self.rank = int(rank)
+        self.calibrate_model_var = bool(calibrate_model_var)
+        self.calibrate_alpha = calibrate_alpha
+        self.model_var_scale: Optional[float] = None
         self._crystal_rows: list[tuple] = []
         self._frame_range = frame_range
         self._conn = None
@@ -412,6 +433,10 @@ class DuckDBOffloader(_StreamWriter):
             self._emit_unindexed()
             self._flush()
             self._write_calibration()
+            if self.calibrate_model_var and exc[0] is None:
+                self.model_var_scale = calibrate_model_variance(
+                    self._conn, alpha=self.calibrate_alpha
+                )
             self._conn.execute(_INDEXES)
         finally:
             self._conn.close()
@@ -599,7 +624,8 @@ class DuckDBOffloader(_StreamWriter):
             r = self.integration
             radii = r.get("radii") or (None, None, None)
             self._conn.execute(
-                "INSERT INTO integration VALUES (?, ?, ?, ?, ?, ?)",
+                "INSERT INTO integration (r_peak, r_gap, r_bg, adu_per_photon, "
+                "bg_annulus_pixels, aperture) VALUES (?, ?, ?, ?, ?, ?)",
                 [
                     *(_as_float(x) for x in radii),
                     _as_float(r.get("adu_per_photon")),
@@ -1011,3 +1037,249 @@ def _unindexed_frame_row(
     row[_FRAME_COLUMNS.index("photon_energy_eV")] = energy
     row[_FRAME_COLUMNS.index("rank")] = int(rank)
     return tuple(row)
+
+
+MODEL_VAR_SAMPLE = 2_000_000
+MODEL_VAR_MIN_OBS = 1000
+MODEL_VAR_RANGE = (0.05, 20.0)
+
+
+def _robust_sd(z: np.ndarray) -> float:
+    return float(1.4826 * np.median(np.abs(z - np.median(z))))
+
+
+def fit_model_var_scale(
+    intensity_model: np.ndarray,
+    var_bg: np.ndarray,
+    gain: float,
+    *,
+    n_iter: int = 8,
+    min_obs: Optional[int] = None,
+) -> Optional[float]:
+    """Fit the factor k on the background variance of model-subtracted intensities.
+
+    With ``sigma^2 = k var_bg + gain * max(I_model, 0)``, k makes the robust
+    spread of ``I_model / sigma`` equal to one. The sample must carry little
+    signal, as reflections past their crystal's diffraction limit do.
+
+    Parameters
+    ----------
+    intensity_model : numpy.ndarray
+        ``intensity + n_pixels * background - background_model`` (ADU).
+    var_bg : numpy.ndarray
+        ``background_model_var * (1 + n_bg / n_pixels)`` (ADU^2).
+    gain : float
+        ADU per photon.
+    n_iter : int
+        Maximum number of fixed-point iterations.
+    min_obs : int, optional
+        Fewest usable reflections, :data:`MODEL_VAR_MIN_OBS` when None.
+
+    Returns
+    -------
+    float or None
+        k clamped to :data:`MODEL_VAR_RANGE`, or None with too few reflections.
+    """
+    im = np.asarray(intensity_model, dtype=np.float64)
+    vb = np.asarray(var_bg, dtype=np.float64)
+    ok = np.isfinite(im) & np.isfinite(vb) & (vb > 0)
+    im, vb = im[ok], vb[ok]
+    if im.size < (MODEL_VAR_MIN_OBS if min_obs is None else min_obs):
+        return None
+    poisson = float(gain) * np.clip(im, 0.0, None)
+    k = 1.0
+    for _ in range(n_iter):
+        s = _robust_sd(im / np.sqrt(k * vb + poisson))
+        if not s > 0:
+            return None
+        k_new = min(max(k * s * s, MODEL_VAR_RANGE[0]), MODEL_VAR_RANGE[1])
+        done = abs(k_new - k) < 1e-4 * k
+        k = k_new
+        if done:
+            break
+    return k
+
+
+RUN_LIMIT_QUANTILE = 0.1
+
+
+def run_resolution_limit(
+    conn, quantile: float = RUN_LIMIT_QUANTILE, alpha: Optional[float] = None
+) -> Optional[float]:
+    """Return the run's resolution in A, a quantile of the crystals' limits in d.
+
+    TorchSX uses this value over every lattice as its default ``--dmin``. With
+    ``alpha``, only lattices with ``enrich_p <= alpha`` count. The result is
+    None without such lattices.
+    """
+    tables = {r[0] for r in conn.execute("SHOW TABLES").fetchall()}
+    if "crystals" not in tables:
+        return None
+    gate, params = ("", []) if alpha is None else (" AND enrich_p <= ?", [float(alpha)])
+    row = conn.execute(
+        "SELECT quantile_cont(10.0 / diffraction_limit_nm_inv, ?) FROM crystals "
+        "WHERE diffraction_limit_nm_inv > 0" + gate,
+        [float(quantile), *params],
+    ).fetchone()
+    return float(row[0]) if row and row[0] else None
+
+
+_MODEL_VAR_COLUMNS = {
+    "bg_model_var_scale": "DOUBLE",
+    "bg_model_var_dmin_A": "DOUBLE",
+    "bg_model_var_ref": "VARCHAR",
+    "bg_model_var_alpha": "DOUBLE",
+    "bg_model_var_n_ref": "BIGINT",
+}
+
+
+def _add_model_var_columns(conn) -> None:
+    for col, typ in _MODEL_VAR_COLUMNS.items():
+        conn.execute(f"ALTER TABLE integration ADD COLUMN IF NOT EXISTS {col} {typ}")
+
+
+def calibrate_model_variance(
+    conn,
+    *,
+    d_min: Optional[float] = None,
+    sample: int = MODEL_VAR_SAMPLE,
+    seed: int = 1988,
+    alpha: Optional[float] = MODEL_VAR_ALPHA,
+) -> Optional[float]:
+    """Rescale ``reflections.background_model_var`` to the measured scatter.
+
+    Fits k with :func:`fit_model_var_scale` on the reflections past their own
+    crystal's diffraction limit, no finer than ``d_min``, with no masked or
+    overlapping pixels, on lattices with ``enrich_p <= alpha``. The default
+    ``d_min`` is :func:`run_resolution_limit` over every lattice. With fewer than
+    :data:`MODEL_VAR_MIN_OBS` such reflections, the fit uses every lattice and
+    warns. Multiplies ``background_model_var`` by k and records the fit in the
+    ``integration.bg_model_var_*`` columns. A database that already records a
+    scale is left unchanged.
+
+    Parameters
+    ----------
+    conn : duckdb.DuckDBPyConnection
+        Writable connection to a probixi database.
+    d_min : float, optional
+        Finest d (A) of the reference reflections.
+    sample : int
+        Maximum number of reflections in the fit, a repeatable reservoir sample.
+    seed : int
+        Sample seed.
+    alpha : float or None, default 1e-3
+        Largest ``enrich_p`` of a reference lattice. None uses every lattice.
+
+    Returns
+    -------
+    float or None
+        The scale in effect, or None when nothing could be fitted.
+    """
+    tables = {r[0] for r in conn.execute("SHOW TABLES").fetchall()}
+    if not {"integration", "reflections", "crystals"} <= tables:
+        return None
+    _add_model_var_columns(conn)
+    row = conn.execute(
+        "SELECT adu_per_photon, bg_annulus_pixels, bg_model_var_scale "
+        "FROM integration LIMIT 1"
+    ).fetchone()
+    if row is None:
+        return None
+    gain, n_bg, done = row
+    if done is not None:
+        return float(done)
+    if not n_bg or n_bg <= 0 or not gain or gain <= 0:
+        return None
+    cut = d_min if d_min is not None else run_resolution_limit(conn)
+    if not cut or cut <= 0:
+        return None
+    k = None
+    for a in (alpha, None) if alpha is not None else (None,):
+        gate, params = ("", []) if a is None else ("AND c.enrich_p <= ?", [float(a)])
+        ref = conn.execute(
+            f"""
+            SELECT im, vb FROM (
+                SELECT r.intensity + r.n_pixels * r.background - r.background_model AS im,
+                       r.background_model_var * (1 + ? / r.n_pixels) AS vb
+                FROM reflections r JOIN crystals c USING (crystal_id)
+                WHERE c.diffraction_limit_nm_inv > 0
+                  AND r.resolution_nm_inv > c.diffraction_limit_nm_inv
+                  AND r.resolution_nm_inv <= ? {gate}
+                  AND r.n_pixels > 0 AND r.background_model IS NOT NULL
+                  AND r.background_model_var > 0
+                  AND coalesce(r.n_masked, 0) = 0 AND coalesce(r.n_overlap, 0) = 0
+            ) AS past_limit
+            USING SAMPLE reservoir({int(sample)} ROWS) REPEATABLE ({int(seed)})
+            """,
+            [float(n_bg), 10.0 / float(cut), *params],
+        ).fetchnumpy()
+        k = fit_model_var_scale(ref["im"], ref["vb"], float(gain))
+        if k is not None:
+            break
+    if k is None:
+        return None
+    if a is None and alpha is not None:
+        warnings.warn(
+            f"Fewer than {MODEL_VAR_MIN_OBS} reference reflections lie on lattices "
+            f"with enrich_p <= {alpha:g}. The model variance is fitted on every lattice."
+        )
+    conn.execute(
+        "UPDATE reflections SET background_model_var = background_model_var * ? "
+        "WHERE background_model_var IS NOT NULL",
+        [k],
+    )
+    conn.execute(
+        "UPDATE integration SET bg_model_var_scale = ?, bg_model_var_dmin_A = ?, "
+        "bg_model_var_ref = ?, bg_model_var_alpha = ?, bg_model_var_n_ref = ?",
+        [
+            k,
+            float(cut),
+            "all" if a is None else "enrich_pass",
+            None if a is None else float(a),
+            int(ref["im"].size),
+        ],
+    )
+    return k
+
+
+def recalibrate_model_variance(
+    conn, *, alpha: Optional[float] = MODEL_VAR_ALPHA
+) -> Optional[float]:
+    """Undo the recorded model-variance scale and fit it again.
+
+    Divides ``background_model_var`` by ``integration.bg_model_var_scale``,
+    clears the record and calls :func:`calibrate_model_variance`, all in one
+    transaction.
+
+    Parameters
+    ----------
+    conn : duckdb.DuckDBPyConnection
+        Writable connection to a probixi database, outside a transaction.
+    alpha : float or None, default 1e-3
+        As for :func:`calibrate_model_variance`.
+
+    Returns
+    -------
+    float or None
+        The new scale, or None when nothing could be fitted.
+    """
+    conn.execute("BEGIN TRANSACTION")
+    try:
+        _add_model_var_columns(conn)
+        row = conn.execute(
+            "SELECT bg_model_var_scale FROM integration LIMIT 1"
+        ).fetchone()
+        if row and row[0]:
+            conn.execute(
+                "UPDATE reflections SET background_model_var = background_model_var / ? "
+                "WHERE background_model_var IS NOT NULL",
+                [row[0]],
+            )
+            cleared = ", ".join(f"{col} = NULL" for col in _MODEL_VAR_COLUMNS)
+            conn.execute(f"UPDATE integration SET {cleared}")
+        k = calibrate_model_variance(conn, alpha=alpha)
+        conn.execute("COMMIT")
+    except BaseException:
+        conn.execute("ROLLBACK")
+        raise
+    return k

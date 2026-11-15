@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import warnings
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Optional, Sequence, Union
@@ -11,6 +12,7 @@ from torch.multiprocessing.spawn import spawn
 
 from ..indexer import IntegrateConfig, RefineConfig, SeedConfig
 from ..io import DataLoader, DataOffloader, DuckDBOffloader, is_duckdb_path
+from ..io.db import MODEL_VAR_ALPHA
 from ..probixi import Probixi, auto_device
 
 PathLike = Union[str, Path]
@@ -18,6 +20,7 @@ PathLike = Union[str, Path]
 _CHUNK_MARKER = "----- Begin chunk -----"
 _SERIAL_PREFIX = "Image serial number:"
 _STREAM_VERSION_PREFIX = "CrystFEL stream format"
+_INT_RADIUS = "--int-radius="
 _DB_DATA_TABLES = ("frames", "crystals", "reflections", "peaks", "calibration")
 _DB_META_TABLES = ("geometry", "panels", "cell", "integration")
 
@@ -77,11 +80,26 @@ def _validate_cuda_devices(dev_list: Sequence[torch.device]) -> None:
         )
 
 
+def _header_radii(part: PathLike) -> Optional[str]:
+    part = Path(part)
+    if not part.exists():
+        return None
+    with part.open("r") as fh:
+        for line in fh:
+            if line.startswith(_CHUNK_MARKER):
+                return None
+            if _INT_RADIUS in line:
+                return line.split(_INT_RADIUS, 1)[1].split()[0]
+    return None
+
+
 def merge_streams(part_paths: Sequence[PathLike], output_path: PathLike) -> int:
     """Concatenate per-rank ``.stream`` files in order, renumbering image serials.
 
     The header comes from the first part that has one. Missing and empty parts
-    are skipped.
+    are skipped. Parts that calibrated different integration radii raise a
+    warning, and the header lists the radii of every part after the
+    ``--int-radius`` line of the first.
 
     Returns
     -------
@@ -90,6 +108,19 @@ def merge_streams(part_paths: Sequence[PathLike], output_path: PathLike) -> int:
     """
     serial = 0
     header_written = False
+    radii = {str(p): _header_radii(p) for p in part_paths}
+    radii = {k: v for k, v in radii.items() if v is not None}
+    mixed = len(set(radii.values())) > 1
+    if mixed:
+        warnings.warn(
+            "The parts calibrated different integration radii ("
+            + "; ".join(f"{Path(k).name}: {v}" for k, v in radii.items())
+            + "). A stream header holds one --int-radius, and the joined header "
+            "keeps the radii of the first part. Merging programs that rebuild "
+            "the noise from the header use the wrong disk for the other parts. "
+            "Write a .db output, which stores the pixel count of each disk.",
+            stacklevel=2,
+        )
     with Path(output_path).open("w") as out:
         for p in part_paths:
             part = Path(p)
@@ -106,6 +137,9 @@ def merge_streams(part_paths: Sequence[PathLike], output_path: PathLike) -> int:
                     if not in_chunks:
                         if not header_written and has_header:  # header from first part
                             out.write(line)
+                            if mixed and _INT_RADIUS in line:
+                                for k, v in radii.items():
+                                    out.write(f"probixi part radii {Path(k).name}: {v}\n")
                         continue
                     if line.startswith(_SERIAL_PREFIX):
                         serial += 1
@@ -117,7 +151,11 @@ def merge_streams(part_paths: Sequence[PathLike], output_path: PathLike) -> int:
     return serial
 
 
-def merge_dbs(part_paths: Sequence[PathLike], output_path: PathLike) -> int:
+def merge_dbs(
+    part_paths: Sequence[PathLike],
+    output_path: PathLike,
+    calibrate_alpha: Optional[float] = MODEL_VAR_ALPHA,
+) -> int:
     # union of the parts; metadata from the first readable one; returns frames indexed
     import duckdb
 
@@ -148,6 +186,7 @@ def merge_dbs(part_paths: Sequence[PathLike], output_path: PathLike) -> int:
                     conn.execute(f"INSERT INTO {tbl} SELECT * FROM {alias}.{tbl}")
             finally:
                 conn.execute(f"DETACH {alias}")
+        _db.calibrate_model_variance(conn, alpha=calibrate_alpha)
         conn.execute(  # serials renumbered in frame order across the parts
             "UPDATE frames SET serial = r.rn FROM ("
             "  SELECT frame_id, row_number() OVER (ORDER BY frame_index) AS rn"
@@ -285,6 +324,7 @@ def run_block(
         offload_kwargs["frame_range"] = (lo, hi)
         offload_kwargs["calibration"] = lambda: p.calibration_summary
         offload_kwargs["rank"] = rank
+        offload_kwargs["calibrate_model_var"] = False
     else:
         offloader = DataOffloader
     n_cellcal = 0

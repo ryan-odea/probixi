@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+import warnings
 
 import pytest
 import torch
@@ -137,6 +138,36 @@ def test_header_records_integration_radii(tmp_path, geometry_dict, cell):
 
     header = out.read_text().split("----- Begin chunk -----")[0].splitlines()
     assert "indexamajig --integration=rings-cen --int-radius=1.5,4,7.36187" in header
+
+
+def test_header_gives_largest_shell_disk(tmp_path, geometry_dict, cell):
+    out = tmp_path / "indexed.stream"
+    recipe = dict(radii=(2.0, 3.0, 6.87), shell_radii=[2.0, 2.0, 2.5, 2.5])
+    with pytest.warns(UserWarning, match="from 2 to 2.5 px"):
+        with DataOffloader(
+            out, geometry=geometry_dict, cell=cell, integration=recipe
+        ) as off:
+            off.write(_make_index_result(cell))
+
+    header = out.read_text().split("----- Begin chunk -----")[0].splitlines()
+    assert "indexamajig --integration=rings-cen --int-radius=2.5,3.5,7.1026" in header
+
+
+@pytest.mark.parametrize("shell", [[2.0, 2.0, 2.0], None])
+def test_header_keeps_base_radii_without_shell_growth(
+    tmp_path, geometry_dict, cell, shell
+):
+    out = tmp_path / "indexed.stream"
+    recipe = dict(radii=(2.0, 3.0, 6.87), shell_radii=shell)
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        with DataOffloader(
+            out, geometry=geometry_dict, cell=cell, integration=recipe
+        ) as off:
+            off.write(_make_index_result(cell))
+
+    header = out.read_text().split("----- Begin chunk -----")[0].splitlines()
+    assert "indexamajig --integration=rings-cen --int-radius=2,3,6.87" in header
 
 
 def test_header_omits_geometry_when_no_file(tmp_path, geometry_dict, cell):

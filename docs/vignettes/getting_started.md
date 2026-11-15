@@ -38,6 +38,8 @@ The device defaults to `auto`, which picks CUDA, then Apple MPS, then CPU.
 | `--enrich-gate` | off | Drop lattices whose predicted spots land on signal no more often than chance. Recommended on strong data ([Strong diffraction](good_diffraction.md)). |
 | `--enrich-alpha` | 0.001 | Largest chance probability a lattice may have under `--enrich-gate`. |
 | `--aperture` | `auto` | Integration disk. `snr` maximises the background-limited signal-to-noise ratio, `flux` captures the whole spot, and `auto` keeps `snr` unless it biases intensities differently between crystals by more than the extra background noise of the `flux` disk. |
+| `--disk` | `auto` | Signal disk across resolution. `shell` grows the disk with resolution for reflections integrated at their predicted position, and `fixed` integrates every reflection with one disk. `auto` is `shell` for a database and `fixed` for a stream, whose header states a single disk. |
+| `--int-radius` | calibrated | `R_DISK,R_IN,R_OUT` in pixels: disk, inner-annulus and outer-annulus radius, in place of the calibrated radii. It fixes the disk. Give every part of a split run the same radii. |
 | `--max-lattices` | 1 | Lattices to search per frame. Indexed peaks are removed between passes. |
 | `--cell-calibrate` / `--no-cell-calibrate` | on | Re-centre the target cell on the median refined cell at calibration and at most twice more during the run. |
 | `--cell-calibrate-after` | 200 | Accepted lattices pooled before each re-centring during the run. |

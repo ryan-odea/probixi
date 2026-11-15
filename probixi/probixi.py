@@ -98,7 +98,7 @@ _CITATION = r"""
 @software{odea_probixi,
   author  = {O'Dea, Ryan and Kepa, Michal and Weinert, Tobias},
   title   = {{probixi}: Self-Calibrating Probabilistic Peak Finding for Serial X-Ray Crystallographic Data},
-  version = {0.10.2},
+  version = {0.10.3},
   year    = {2026},
   url     = {https://github.com/ryan-odea/probixi}
 }
@@ -373,10 +373,13 @@ class Probixi:
 
         :meth:`calibrate` measures them from the radial profile of peaks on
         frames outside the seed set. None before calibration or with too few
-        peaks, in which case the indexer uses fixed radii.
+        peaks, in which case the indexer uses fixed radii. Radii given as
+        ``IntegrateConfig(radii=...)`` replace the measured ones.
         """
         if self.indexer is None:
             return None
+        if self.indexer.integrate.radii is not None:
+            return self.indexer._radii()
         return self.indexer._measured_radii
 
     @property
@@ -402,7 +405,10 @@ class Probixi:
 
         ``radii`` (disk, annulus_in, annulus_out) in pixels, ``adu_per_photon``,
         the local-background ``bg_annulus_pixels``, and the ``aperture`` rule, as
-        applied after :meth:`calibrate`. None without a cell.
+        applied after :meth:`calibrate`. ``shell_radii`` holds the per-shell disk
+        radii, or None before profile stacking and under
+        ``IntegrateConfig(shell_disk=False)``, where every reflection takes
+        ``radii``. None without a cell.
         """
         if self.indexer is None:
             return None
@@ -411,6 +417,11 @@ class Probixi:
             adu_per_photon=self.indexer._adu_per_photon(),
             bg_annulus_pixels=self.indexer._bg_annulus_pixels,
             aperture=self.indexer._aperture(),
+            shell_radii=(
+                list(self.indexer._radius_by_q[1])
+                if self.indexer._radius_by_q and self.indexer.integrate.shell_disk
+                else None
+            ),
         )
 
     @property

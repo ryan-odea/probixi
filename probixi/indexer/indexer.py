@@ -12,6 +12,7 @@ from ..peakfinding.peaks import PeakResult
 from .forward import detector_to_q
 from .integrate import (
     A_INV_TO_NM_INV,
+    annulus_for_disk,
     disk_overlap_counts,
     falloff_resolution_limit,
     integrate_rings,
@@ -420,6 +421,15 @@ class IntegrateConfig:
     aperture_tolerance : float
         ``"auto"`` only: between-crystal spread of the captured fraction above
         which ``"flux"`` is considered.
+    shell_disk : bool
+        Grow the signal disk with resolution, from the profiles stacked around
+        the predicted positions of the calibration lattices. False integrates
+        every reflection with one disk. A stream header states one disk, so a
+        stream needs False for its header to describe every reflection.
+    radii : tuple of float, optional
+        ``(disk, annulus_in, annulus_out)`` in pixels, in place of the radii
+        measured at calibration. Use it to give every part of a split run the
+        same disk.
     """
 
     enabled: bool = True
@@ -439,6 +449,8 @@ class IntegrateConfig:
     adu_per_photon: Optional[float] = None
     aperture: str = "auto"
     aperture_tolerance: float = 0.02
+    shell_disk: bool = True
+    radii: Optional[tuple[float, float, float]] = None
 
 
 @dataclass
@@ -1386,14 +1398,13 @@ class Indexer:
     def _reflection_radii(self, q: Tensor) -> tuple:
         # The learned shell radius for every reflection; the base disk until learned
         base = self._radii()
-        if self._radius_by_q is None:
+        if self._radius_by_q is None or not self.integrate.shell_disk:
             return base
         edges, shell = self._radius_by_q
         k = torch.bucketize(q, edges.to(q)).clamp(1, len(shell)) - 1
-        r = torch.tensor(shell, dtype=q.dtype, device=q.device)[k]
-        r_in = torch.clamp(r + 1.0, min=base[1])
-        # r_out keeps the base annulus area
-        return r, r_in, (r_in * r_in + base[2] ** 2 - base[1] ** 2).sqrt()
+        return annulus_for_disk(
+            torch.tensor(shell, dtype=q.dtype, device=q.device)[k], base
+        )
 
     def _stack_profiles(self, excess, var, valid, positions, pred) -> None:
         # Stacks excess, clipped at 10 sigma, around the predictions per |q| shell
@@ -1434,6 +1445,9 @@ class Indexer:
         return self._resolved_aperture or self.integrate.aperture
 
     def _radii(self) -> tuple[float, float, float]:
+        if self.integrate.radii is not None:
+            r_disk, r_in, r_out = (float(r) for r in self.integrate.radii)
+            return r_disk, r_in, r_out
         return self._measured_radii or FALLBACK_RADII
 
     def _adu_per_photon(self) -> float:
