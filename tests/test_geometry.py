@@ -193,3 +193,24 @@ def test_energy_keys_take_crystfel_units(tmp_path, line, expected):
         "0/corner_x = -5\n0/corner_y = -5\n"
     )
     assert read_geometry(path).wavelength == pytest.approx(expected)
+
+
+def test_read_geometry_reads_the_mask0_names(tmp_path):
+    body = (
+        "photon_energy = 9000\nclen = 0.1\nres = 10000\n{mask}"
+        "p0/min_fs = 0\np0/max_fs = 9\np0/min_ss = 0\np0/max_ss = 9\n"
+        "p0/corner_x = 0\np0/corner_y = 0\np0/fs = x\np0/ss = y\n"
+    )
+    old = "mask = /m\nmask_file = m.h5\nmask_good = 0x0\nmask_bad = 0xFF\n"
+    new = "mask0_data = /m\nmask0_file = m.h5\nmask0_goodbits = 0x0\nmask0_badbits = 0xFF\n"
+    specs = []
+    for i, mask in enumerate((old, new)):
+        path = tmp_path / f"g{i}.geom"
+        path.write_text(body.format(mask=mask))
+        specs.append(read_geometry(path).mask_spec)
+    assert specs[0] is not None
+    assert specs[0] == specs[1]
+    path = tmp_path / "two.geom"
+    path.write_text(body.format(mask=new + "mask1_data = /n\n"))
+    with pytest.warns(UserWarning, match="only mask0"):
+        read_geometry(path)

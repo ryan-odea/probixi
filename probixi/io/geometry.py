@@ -37,6 +37,13 @@ PANEL_REQUIRED = {"min_fs", "max_fs", "min_ss", "max_ss", "corner_x", "corner_y"
 MASK_REQUIRED = {"min_fs", "max_fs", "min_ss", "max_ss"}
 LAB_MASK_REQUIRED = {"min_x", "max_x", "min_y", "max_y"}
 _MASK_KEYS = ("mask", "mask_file", "mask_good", "mask_bad")
+# CrystFEL >= 0.10 names of the first mask, by their older names
+_MASK_ALIASES = {
+    "mask0_data": "mask",
+    "mask0_file": "mask_file",
+    "mask0_goodbits": "mask_good",
+    "mask0_badbits": "mask_bad",
+}
 
 
 @dataclass
@@ -109,7 +116,9 @@ class Geometry:
     data_layout : DataLayout, optional
         The ``data`` path and the ``dimN`` axis roles.
     mask_spec : MaskSpec, optional
-        Top-level ``mask``, ``mask_file``, ``mask_good`` and ``mask_bad``.
+        Top-level ``mask``, ``mask_file``, ``mask_good`` and ``mask_bad``, or
+        their CrystFEL 0.10 names ``mask0_data``, ``mask0_file``,
+        ``mask0_goodbits`` and ``mask0_badbits``.
     panel_layouts, panel_masks : dict
         Per-panel overrides of ``data_layout`` and ``mask_spec``.
     panel_flags : dict, optional
@@ -248,6 +257,9 @@ def read_geometry(path: PathLike) -> Geometry:
 
     dim_map = _collect_dims(parameters)
     data_layout = _build_data_layout(parameters.get("data"), dim_map)
+    extra = sorted(k for k in parameters if re.match(r"mask[1-9]\d*_", str(k)))
+    if extra:
+        warnings.warn(f"only mask0 is read; ignoring {', '.join(extra)}")
     mask_spec = _build_mask_spec(parameters)
     panel_layouts, panel_masks = _panel_overrides(per_name, panels, parameters, dim_map)
 
@@ -344,7 +356,17 @@ def _parse_mask_bits(value: object, default: int = 0) -> int:
     return int(str(value).strip(), 0)  # base 0 accepts 0x... hex
 
 
+def _with_mask_aliases(d: dict) -> dict:
+    # mask0_* entries fill the older keys that the file does not set
+    out = dict(d)
+    for new, old in _MASK_ALIASES.items():
+        if new in d and old not in d:
+            out[old] = d[new]
+    return out
+
+
 def _build_mask_spec(d: dict) -> Optional[MaskSpec]:
+    d = _with_mask_aliases(d)
     if not any(k in d for k in _MASK_KEYS):
         return None
     mask_path = d.get("mask")
@@ -374,8 +396,9 @@ def _panel_overrides(
             )
             if layout is not None:
                 layouts[name] = layout
-        if any(k in pdict for k in _MASK_KEYS):
-            merged = {k: pdict.get(k, parameters.get(k)) for k in _MASK_KEYS}
+        pmask, top = _with_mask_aliases(pdict), _with_mask_aliases(parameters)
+        if any(k in pmask for k in _MASK_KEYS):
+            merged = {k: pmask.get(k, top.get(k)) for k in _MASK_KEYS}
             spec = _build_mask_spec(merged)
             if spec is not None:
                 masks[name] = spec

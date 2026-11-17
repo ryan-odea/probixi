@@ -8,7 +8,7 @@
 2. A CrystFEL cell file. It only has to be approximate, because `probixi` re-centres it on the data.
 3. A list file of the HDF5 or CXI files to process.
 
-Any pixel mask stored with the data is read and combined with the masks `probixi` learns. The geometry's `mask` and `mask_file` say where the mask is stored; without `mask_file`, it is read from the first data file. A geometry that sets `mask_good` or `mask_bad` without a `mask` path, as Cheetah's SACLA geometries do, reads the NeXus pixel mask or Cheetah's `/metadata/pixelmask` from that file.
+Any pixel mask stored with the data is read and combined with the masks `probixi` learns. The geometry's `mask` and `mask_file` say where the mask is stored; without `mask_file`, it is read from the first data file. `probixi` also reads the CrystFEL 0.10 names of the first mask, `mask0_data`, `mask0_file`, `mask0_goodbits` and `mask0_badbits`; it ignores `mask1_*` and beyond with a warning. A geometry that sets `mask_good` or `mask_bad` without a `mask` path, as Cheetah's SACLA geometries do, reads the NeXus pixel mask or Cheetah's `/metadata/pixelmask` from that file.
 
 When the geometry reads the photon energy per event (`photon_energy = /%/photon_energy_ev`), each frame is indexed, predicted, and integrated at its own wavelength, and the stream and database record it per frame.
 
