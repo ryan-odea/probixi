@@ -132,7 +132,7 @@ def test_radius_by_shell_follows_the_stacked_profile():
     sharp = torch.tensor([100.0, 10, 0, 0, 0, 0, 0, 0, 0])
     broad = torch.tensor([30.0, 25, 15, 8, 0, 0, 0, 0, 0])
     flat = torch.zeros(9)
-    dip = -broad  # noise can stack negative beyond the diffraction limit
+    dip = -0.2 * broad  # noise can stack negative beyond the diffraction limit
     profiles = torch.stack([sharp, broad, flat, dip])
     counts = (n * 1e4).expand(4, 9)
     sums = profiles * counts
@@ -142,6 +142,21 @@ def test_radius_by_shell_follows_the_stacked_profile():
     assert radii[0] == 1.5
     assert radii[1] > 2.0
     assert radii[3] == radii[2] == radii[1]
+
+
+def test_radius_by_shell_stacks_each_shell_with_the_shells_beyond():
+    n = torch.tensor([1.0, 8, 12, 16, 32, 28, 40, 40, 48])
+    sharp = torch.tensor([100.0, 10, 0, 0, 0, 0, 0, 0, 0])
+    broad = torch.tensor([3.0, 2.5, 1.5, 0.8, 0, 0, 0, 0, 0])
+    counts = (n * 1e4).expand(3, 9)
+
+    def radii(profiles):
+        sums = torch.stack(profiles) * counts
+        return radius_by_shell(sums, counts, counts * 100.0, base=1.5)
+
+    # the weak blurred shell widens the disk only if the shells beyond agree
+    assert radii([sharp, broad, torch.zeros(9)])[1] > 2.0
+    assert radii([sharp, broad, sharp]) == [1.5, 1.5, 1.5]
 
 
 def test_integrate_rings_does_not_double_count_overlapping_disks():
