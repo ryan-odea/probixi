@@ -73,6 +73,25 @@ def _parse_int_radius(value: Optional[str]) -> Optional[tuple[float, float, floa
     return r_disk, r_in, r_out
 
 
+# Lattices searched per frame for a .db output under --max-lattices auto
+DB_MAX_LATTICES = 3
+
+
+def _parse_max_lattices(ctx, param, value):
+    # "auto" or a positive integer
+    text = str(value).strip().lower()
+    if text == "auto":
+        return "auto"
+    message = f"expected auto or a positive integer, got {value!r}"
+    try:
+        n = int(text)
+    except ValueError:
+        raise click.BadParameter(message) from None
+    if n < 1:
+        raise click.BadParameter(message)
+    return n
+
+
 def _run_multi_gpu(device_list: list, opts: dict, refine, integrate) -> None:
     from probixi.indexer import SeedConfig
     from probixi.tools.multigpu import run_data_parallel
@@ -185,10 +204,12 @@ def _run_multi_gpu(device_list: list, opts: dict, refine, integrate) -> None:
 )
 @click.option(
     "--max-lattices",
-    type=click.IntRange(min=1),
-    default=1,
+    default="auto",
     show_default=True,
-    help="Lattices to search per frame; indexed peaks are removed between passes.",
+    callback=_parse_max_lattices,
+    help="Lattices to search per frame; indexed peaks are removed between passes. "
+    "auto is 3 for a .db output, which records the enrichment of every lattice "
+    "for the merge to gate, and 1 otherwise.",
 )
 @click.option(
     "--recalibrate-every",
@@ -389,7 +410,7 @@ def main(
     start: Optional[int],
     stop: Optional[int],
     batch_size: int,
-    max_lattices: int,
+    max_lattices: int | str,
     recalibrate_every: Optional[int],
     device: Optional[str],
     devices: Optional[str],
@@ -452,6 +473,11 @@ def main(
     if radii is not None and disk == "shell":
         raise click.UsageError("--int-radius fixes the disk; drop --disk shell")
     is_stream = bool(output) and not peaks_only and not is_duckdb_path(output)
+    if max_lattices == "auto":
+        # A .db records enrich_p for every lattice, so the merge gates the extra ones
+        to_db = bool(output) and not peaks_only and is_duckdb_path(output)
+        max_lattices = DB_MAX_LATTICES if to_db else 1
+    opts["max_lattices"] = max_lattices
     shell_disk = disk == "shell" or (disk == "auto" and radii is None and not is_stream)
     if is_stream and not shell_disk:
         warnings.warn(
