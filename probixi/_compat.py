@@ -7,7 +7,7 @@ __all__ = ["SCHEMA_VERSION", "TORCHSX_VERSION", "torchsx_mismatch", "version_tup
 # Layout of the DuckDB output; 2 adds the rank columns and integration.bg_model_var_*
 SCHEMA_VERSION = 2
 # First TorchSX release whose reader understands SCHEMA_VERSION
-TORCHSX_VERSION = "0.2.4"
+TORCHSX_VERSION = "0.3.0"
 
 
 # Leading numeric fields of a version string: "0.10.3.dev1" -> (0, 10, 3)
