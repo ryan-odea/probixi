@@ -150,10 +150,8 @@ def radius_by_shell(
     z_min: float = 5.0,
 ) -> list[float]:
     n_ring = _ring_pixel_counts(sums.shape[1] - 1, sums.device)
-    # A shell's radius is the floor of every shell beyond it, so it is stacked with them
-    pooled = [t.double().flip(0).cumsum(0).flip(0) for t in (sums, counts, squares)]
     out, r = [], float(base)
-    for s, c, sq in zip(*pooled):
+    for s, c, sq in zip(sums.double(), counts.double(), squares.double()):
         p = s / c.clamp_min(1.0)
         se2 = (sq / c.clamp_min(1.0) - p * p).clamp_min(0.0) / c.clamp_min(1.0)
         p = p - p[k_max + 2 :].mean()  # baseline from the rings beyond k_max + 1
