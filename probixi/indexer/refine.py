@@ -229,7 +229,10 @@ def refine_cell(
         f = resid(theta)
         loss = float(f.square().sum())
         for _ in range(iters):
-            J = torch.autograd.functional.jacobian(resid, theta, vectorize=True)
+            # forward mode: one pass per parameter (at most 9), not one per residual (4 per indexed peak)
+            J = torch.autograd.functional.jacobian(
+                resid, theta, vectorize=True, strategy="forward-mode"
+            )
             g = J.transpose(-1, -2) @ f
             Hm = J.transpose(-1, -2) @ J
             damp = lam * torch.diag(torch.diagonal(Hm)) + 1e-18 * eye

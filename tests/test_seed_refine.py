@@ -359,3 +359,23 @@ def test_refine_cell_returns_none_when_underdetermined():
     hkl = torch.zeros(2, 3, dtype=DT)
     indexed = torch.ones(2, dtype=torch.bool)
     assert refine_cell(A0, q, hkl, indexed, target, 1e-3) is None
+
+
+def test_refine_cell_reference_builds_its_jacobian_in_forward_mode(monkeypatch):
+    # reverse mode costs one pass per residual (4 per indexed peak); forward mode one per parameter
+    from probixi.kernels import use_engine
+
+    seen = []
+    real = torch.autograd.functional.jacobian
+
+    def spy(func, inputs, **kw):
+        seen.append(kw.get("strategy"))
+        return real(func, inputs, **kw)
+
+    monkeypatch.setattr(torch.autograd.functional, "jacobian", spy)
+    target = CellParams(50.0, 60.0, 70.0, *(math.radians(90),) * 3, lattice_type="orthorhombic")
+    truth = CellParams(50.5, 60.6, 70.7, *(math.radians(90),) * 3, lattice_type="orthorhombic")
+    with use_engine("reference"):
+        out, _ = _refine_from_target(target, truth)
+    assert out is not None and seen and set(seen) == {"forward-mode"}
+    assert B_to_cell(out[0]).a == pytest.approx(50.5, rel=2e-3)
