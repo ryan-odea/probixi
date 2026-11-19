@@ -57,6 +57,8 @@ Frames that never indexed have `indexed = FALSE`, so the indexing rate is `SELEC
 
 TorchSX reads the database directly (`torchsx.train run.duckdb --spacegroup ...`).
 
+The database records `probixi.__version__`, the version of the source that wrote it. The two packages name each other's version. `probixi.SCHEMA_VERSION` (2) is the layout above, and `probixi.TORCHSX_VERSION` is the first TorchSX release that reads it. TorchSX holds the counterpart in `torchsx.SUPPORTED_DB_SCHEMA` and `torchsx.PROBIXI_VERSION`. Neither package depends on the other. Where both are installed, probixi warns before it writes a database that the installed TorchSX cannot read. Schema 1 is the layout without the `rank` columns and the `bg_model_var_*` columns.
+
 ### CXI peak export
 
 With `--peaks-only` and a directory as `-o`, `probixi` writes one `.cxi` per input file with the raw frames externally linked, a `peaks.lst`, and a companion `<geometry>_cxi.geom`, ready for `indexamajig --peaks=cxi`. With a `.db` file as `-o`, the peaks go into the database instead.

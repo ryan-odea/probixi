@@ -10,6 +10,8 @@ import duckdb
 import numpy as np
 import torch
 
+from .._compat import SCHEMA_VERSION, torchsx_mismatch
+from .._version import __version__
 from ..indexer.lattice import B_to_cell
 from .geometry import EV_ANGSTROM
 from .writer import (
@@ -118,7 +120,6 @@ _PEAK_COLUMNS = (
     "n_masked",
 )
 
-SCHEMA_VERSION = 1
 #: largest ``enrich_p`` of a lattice in the model-variance fit; the default of
 #: ``--enrich-alpha``, and the gate TorchSX applies to the database by default
 MODEL_VAR_ALPHA = 1e-3
@@ -417,6 +418,10 @@ class DuckDBOffloader(_StreamWriter):
         self._recip_scale: dict[str, float] = {}  # lambda0 / frame lambda, by frame id
 
     def __enter__(self) -> "DuckDBOffloader":
+        # One warning per run if the TorchSX installed next to probixi cannot read this schema
+        mismatch = torchsx_mismatch() if self.rank == 0 else None
+        if mismatch:
+            warnings.warn(mismatch, stacklevel=2)
         if self.path.exists():
             self.path.unlink()
         self._conn = duckdb.connect(str(self.path))
@@ -1013,12 +1018,8 @@ def _columns(names: tuple, rows: list) -> dict:
 
 
 def _probixi_version() -> Optional[str]:
-    try:
-        from importlib.metadata import version
-
-        return version("probixi")
-    except Exception:  # noqa: BLE001 - version is provenance only
-        return None
+    # The source tree's own version: installed metadata can belong to another checkout
+    return __version__
 
 
 def _as_float(value) -> Optional[float]:

@@ -831,3 +831,95 @@ def test_recalibrate_model_variance_reproduces_the_gated_fit(tmp_path):
         assert k == pytest.approx(calibrate_model_variance(fresh), rel=1e-9)
     finally:
         fresh.close()
+
+
+def _fake_torchsx(monkeypatch, supported=None, version="0.2.3"):
+    import sys
+    import types
+
+    pkg = types.ModuleType("torchsx")
+    pkg.__version__ = version
+    pkg.__path__ = []
+    monkeypatch.setitem(sys.modules, "torchsx", pkg)
+    if supported is None:
+        monkeypatch.setitem(sys.modules, "torchsx._compat", None)
+    else:
+        compat = types.ModuleType("torchsx._compat")
+        compat.SUPPORTED_DB_SCHEMA = supported
+        monkeypatch.setitem(sys.modules, "torchsx._compat", compat)
+
+
+def test_schema_version_and_torchsx_version_are_exported():
+    import probixi
+    from probixi._compat import version_tuple
+    from probixi.io import db
+
+    assert probixi.SCHEMA_VERSION == db.SCHEMA_VERSION == 2
+    assert version_tuple(probixi.TORCHSX_VERSION) >= (0, 2, 4)
+    assert version_tuple("0.10.3.dev1") == (0, 10, 3)
+    assert version_tuple(None) == ()
+
+
+def test_torchsx_mismatch_names_the_version_needed(monkeypatch):
+    import sys
+
+    from probixi._compat import SCHEMA_VERSION, TORCHSX_VERSION, torchsx_mismatch
+
+    # no TorchSX next to probixi
+    monkeypatch.setitem(sys.modules, "torchsx", None)
+    assert torchsx_mismatch() is None
+    # a TorchSX that reads this schema
+    _fake_torchsx(monkeypatch, supported=SCHEMA_VERSION)
+    assert torchsx_mismatch() is None
+    # a paired TorchSX that reads an older schema only
+    _fake_torchsx(monkeypatch, supported=SCHEMA_VERSION - 1, version="0.2.4")
+    assert f"schema {SCHEMA_VERSION - 1}" in torchsx_mismatch()
+    # a TorchSX from before the pairing
+    _fake_torchsx(monkeypatch, supported=None, version="0.2.3")
+    message = torchsx_mismatch()
+    assert "TorchSX 0.2.3" in message and f"TorchSX {TORCHSX_VERSION} or later" in message
+
+
+def test_offloader_warns_when_the_installed_torchsx_cannot_read_it(
+    geometry_dict, cell, tmp_path, monkeypatch, recwarn
+):
+    _fake_torchsx(monkeypatch, supported=None)
+    with pytest.warns(UserWarning, match="or later reads it"):
+        with DuckDBOffloader(tmp_path / "old.duckdb", geometry_dict, cell=cell):
+            pass
+    # the other ranks of a multi-GPU run stay silent, and so does a matching TorchSX
+    recwarn.clear()
+    with DuckDBOffloader(tmp_path / "rank1.duckdb", geometry_dict, cell=cell, rank=1):
+        pass
+    _fake_torchsx(monkeypatch, supported=2)
+    with DuckDBOffloader(tmp_path / "new.duckdb", geometry_dict, cell=cell):
+        pass
+    assert not [w for w in recwarn.list if "TorchSX" in str(w.message)]
+
+
+def test_installed_torchsx_agrees_with_this_probixi():
+    """Where TorchSX is installed, the two packages' constants name the same pairing."""
+    compat = pytest.importorskip("torchsx._compat")
+    import probixi
+    from probixi._compat import SCHEMA_VERSION, version_tuple
+
+    assert compat.SUPPORTED_DB_SCHEMA == SCHEMA_VERSION
+    assert version_tuple(probixi.__version__) >= version_tuple(compat.PROBIXI_VERSION)
+
+
+def test_version_is_the_source_trees_and_reaches_the_database(geometry_dict, cell, tmp_path):
+    import re
+    from pathlib import Path
+
+    import probixi
+
+    pyproject = (Path(__file__).resolve().parents[1] / "pyproject.toml").read_text()
+    assert re.search(r'^version = "([^"]+)"', pyproject, re.M).group(1) == probixi.__version__
+    out = tmp_path / "v.duckdb"
+    with DuckDBOffloader(out, geometry_dict, cell=cell, calibration={"gain": 1.0}):
+        pass
+    conn = duckdb.connect(str(out), read_only=True)
+    try:
+        assert conn.execute("SELECT probixi_version FROM calibration").fetchone()[0] == probixi.__version__
+    finally:
+        conn.close()
