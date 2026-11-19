@@ -272,3 +272,28 @@ def test_run_block_covers_disjoint_ranges_and_merges(tmp_path):
         if ln.startswith("Image serial")
     ]
     assert serials == list(range(1, len(serials) + 1))  # unique + monotonic
+
+
+def test_usable_cpus_follows_the_affinity_mask(monkeypatch):
+    import os
+
+    from probixi.tools import multigpu
+
+    monkeypatch.setattr(os, "sched_getaffinity", lambda pid: set(range(6)), raising=False)
+    monkeypatch.setattr(os, "cpu_count", lambda: 288)
+    assert multigpu.usable_cpus() == 6
+
+
+def test_cap_torch_threads_never_exceeds_the_usable_cores(monkeypatch):
+    from probixi.tools import multigpu
+
+    before = torch.get_num_threads()
+    try:
+        monkeypatch.setattr(multigpu, "usable_cpus", lambda: 1)
+        assert multigpu.cap_torch_threads() == 1 and torch.get_num_threads() == 1
+        torch.set_num_threads(before)
+        monkeypatch.setattr(multigpu, "usable_cpus", lambda: 10_000)
+        assert multigpu.cap_torch_threads() == before  # never raises the count
+        assert multigpu.cap_torch_threads(1) == 1  # an explicit limit wins
+    finally:
+        torch.set_num_threads(before)

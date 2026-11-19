@@ -254,6 +254,21 @@ def _remove_part(part: PathLike) -> None:
     Path(f"{part}.wal").unlink(missing_ok=True)
 
 
+def usable_cpus() -> int:
+    # cores this process may run on: the affinity mask (Slurm, taskset) where the OS has one, else every core
+    try:
+        return max(1, len(os.sched_getaffinity(0)))
+    except AttributeError:
+        return max(1, os.cpu_count() or 1)
+
+
+def cap_torch_threads(limit: Optional[int] = None) -> int:
+    # PyTorch starts one thread per core of the node; on a shared node that oversubscribes the allocated cores
+    n = min(torch.get_num_threads(), limit if limit and limit > 0 else usable_cpus())
+    torch.set_num_threads(n)
+    return n
+
+
 def run_block(
     rank: int,
     world_size: int,
@@ -450,7 +465,7 @@ def run_data_parallel(
     _validate_cuda_devices(dev_list)
     world = len(dev_list)
     if threads_per_worker is None and world > 1:
-        threads_per_worker = max(1, (os.cpu_count() or world) // world)
+        threads_per_worker = max(1, usable_cpus() // world)
 
     # resolve the absolute frame range once (metadata-only scan)
     loader = DataLoader(list_file, geometry_file=geometry_file, cell_file=cell_file)

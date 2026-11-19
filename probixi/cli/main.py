@@ -468,6 +468,10 @@ def main(
         click.echo()
 
     device_list = _resolve_cli_devices(device, devices, gpus)
+    if device_list is None or len(device_list) <= 1:
+        from probixi.tools.multigpu import cap_torch_threads
+
+        cap_torch_threads(threads_per_worker)  # several devices: each worker caps its own
     refine_cfg = RefineConfig(cell=not no_refine_cell)
     radii = _parse_int_radius(int_radius)
     if radii is not None and disk == "shell":
