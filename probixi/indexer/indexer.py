@@ -16,9 +16,12 @@ from .integrate import (
     disk_overlap_counts,
     falloff_resolution_limit,
     integrate_rings,
+    nearest_neighbour_distance,
     peak_resolution_limit,
     radius_by_shell,
     ring_sums,
+    scatter_floor_by_shell,
+    spot_disk_stats,
     spot_enrichment,
     unexplained_signal_p,
 )
@@ -703,6 +706,10 @@ class Indexer:
         # learned |q|-shell disk radii, and their profile sums
         self._radius_by_q: Optional[tuple[Tensor, list[float]]] = None
         self._profile_acc: Optional[list] = None
+        self._profile_spots: list[Tensor] = []
+        # flux radii while the snr disk is on trial, and the bound that ended the trial
+        self._flux_radii: Optional[tuple[float, float, float]] = None
+        self._scatter_floor: Optional[list[float]] = None
         self.set_target_cell(target_cell)
 
     def _geometry_at(self, frame_index: Optional[int]) -> dict:
@@ -1425,19 +1432,58 @@ class Indexer:
         k = shell.clamp(1, len(acc[0]) - 1) - 1
         for buf, v in zip(acc[1:], (total, counts, sq)):
             buf.index_add_(0, k.to(buf.device), v.to(buf))
+        if self._flux_radii is None:
+            return
+        # per spot, unclipped: disk sums, disk pixels, annulus variance and pixels
+        disk, pixels, bg_var, n_bg = spot_disk_stats(excess, positions, valid)
+        isolated = nearest_neighbour_distance(positions) >= 2.0 * 4.5 + 1.0
+        # the 4.5 px disk holds 69 pixels
+        whole = (n_bg >= 40) & (pixels[:, -1] >= 0.9 * 69.0)
+        row = torch.cat(
+            [
+                disk,
+                pixels,
+                bg_var[:, None],
+                n_bg[:, None],
+                k.to(disk)[:, None],
+                isolated.to(disk)[:, None],
+            ],
+            1,
+        )
+        self._profile_spots.append(row[whole.to(row.device)].float().cpu())
 
     def start_profile_stacking(self) -> None:
         """Stack profiles around the predictions from now on."""
         self._profile_acc = []
+        self._profile_spots = []
 
     def finish_profile_stacking(self) -> Optional[list[float]]:
         """Set and return the per-shell disk radii (px)."""
         acc, self._profile_acc = self._profile_acc, None
         if not acc or float(acc[2][:, 0].sum()) <= 0:
             return None
-        radii = radius_by_shell(
-            acc[1].cpu(), acc[2].cpu(), acc[3].cpu(), self._radii()[0]
-        )
+        stacks = [a.cpu() for a in acc[1:]]
+        radii = radius_by_shell(*stacks, self._radii()[0])
+        spots, self._profile_spots = self._profile_spots, []
+        if spots and self._flux_radii is not None and self.integrate.radii is None:
+            x = torch.cat(spots)
+            floor = scatter_floor_by_shell(
+                x[:, 0:4],
+                x[:, 4:8],
+                x[:, 8],
+                x[:, 9],
+                x[:, 10].long(),
+                x[:, 11] > 0,
+                len(radii),
+                adu_per_photon=self._adu_per_photon(),
+            )
+            if any(f > r for f, r in zip(floor, radii)):
+                # the disk in use loses a varying fraction of strong spots
+                self._measured_radii = self._flux_radii
+                self._resolved_aperture = "flux"
+                self._scatter_floor = floor
+                radii = radius_by_shell(*stacks, self._radii()[0])
+        self._flux_radii = None
         self._radius_by_q = (acc[0].float(), radii)
         return radii
 
