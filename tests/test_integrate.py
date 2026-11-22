@@ -7,7 +7,7 @@ import sim
 import torch
 
 from probixi.indexer import IndexResult, RefineConfig, SeedConfig
-from probixi.indexer.indexer import Indexer, IntegrateConfig
+from probixi.indexer.indexer import Indexer
 from probixi.indexer.integrate import (
     choose_aperture,
     disk_overlap_counts,
@@ -18,9 +18,7 @@ from probixi.indexer.integrate import (
     radii_from_profile,
     radius_by_shell,
     ring_sums,
-    scatter_floor_by_shell,
     snr_disk_radius,
-    spot_disk_stats,
     unexplained_signal_p,
 )
 
@@ -144,100 +142,6 @@ def test_radius_by_shell_follows_the_stacked_profile():
     assert radii[0] == 1.5
     assert radii[1] > 2.0
     assert radii[3] == radii[2] == radii[1]
-
-
-def test_spot_disk_stats_sums_disks_above_the_annulus_background():
-    torch.manual_seed(0)
-    excess = torch.randn(SHAPE) * 2.0 + 5.0
-    excess[30:33, 30:33] += 100.0  # 3x3 spot, inside the 1.5 px disk
-    disk, pixels, bg_var, n_bg = spot_disk_stats(excess, torch.tensor([[31.0, 31.0]]))
-    assert pixels[0].tolist() == [9.0, 21.0, 37.0, 69.0]
-    assert disk[0].tolist() == pytest.approx([900.0] * 4, abs=80.0)
-    assert float(bg_var[0]) == pytest.approx(4.0, rel=0.4)
-    assert float(n_bg[0]) == 128.0
-
-
-def _spot_sums(signal, capture, bg_var, seed):
-    # the 1.5 px disk holds `capture` of each signal, the larger disks all of it
-    g = torch.Generator().manual_seed(seed)
-    n = len(signal)
-    pixels = torch.tensor([9.0, 21.0, 37.0, 69.0]).expand(n, 4)
-    frac = torch.ones(n, 4)
-    frac[:, 0] = capture
-    noise = torch.randn(n, 4, generator=g) * (pixels * bg_var).sqrt()
-    return signal[:, None] * frac + noise, pixels, torch.full((n,), bg_var)
-
-
-def test_scatter_floor_widens_the_disk_where_the_captured_fraction_varies():
-    n = 2000
-    g = torch.Generator().manual_seed(1)
-    strong = torch.full((n,), 5000.0)
-    varying = 0.5 + 0.5 * torch.rand(n, generator=g)
-    mixed = torch.cat([torch.full((60,), 3e4), torch.full((20000,), 100.0)])
-    parts = [
-        _spot_sums(strong, varying, 1.0, 2),  # strong spots, varying loss
-        _spot_sums(strong, torch.full((n,), 0.9), 1.0, 3),  # the same, steady loss
-        _spot_sums(strong * 0.01, varying, 1.0, 4),  # too weak to measure the loss
-        # few strong spots among many that the background limits
-        _spot_sums(mixed, 0.5 + 0.5 * torch.rand(20060, generator=g), 1e3, 5),
-    ]
-    disk, pixels, bg_var = (torch.cat(x) for x in zip(*parts))
-    shell = torch.tensor([0] * n + [1] * n + [2] * n + [3] * 20060)
-    floor = scatter_floor_by_shell(
-        disk,
-        pixels,
-        bg_var,
-        torch.full((len(disk),), 128.0),
-        shell,
-        torch.ones(len(disk), dtype=torch.bool),
-        4,
-    )
-    assert floor == [2.5, 1.5, 0.0, 1.5]
-
-
-def _indexer_on_snr_trial(capture, profile=(100.0, 10, 0, 0, 0, 0, 0, 0, 0)):
-    # after seed indexing: stacked profiles, 2000 strong spots in shell 0
-    n = 2000
-    disk, pixels, bg_var = _spot_sums(torch.full((n,), 5000.0), capture, 1.0, 6)
-    cols = [bg_var, torch.full((n,), 128.0), torch.zeros(n), torch.ones(n)]
-    ring = torch.tensor([1.0, 8, 12, 16, 32, 28, 40, 40, 48])
-    profile = torch.tensor(profile)
-    counts = (ring * 1e4).expand(12, 9)
-    sums = profile * counts
-    ix = Indexer.__new__(Indexer)
-    ix.integrate = IntegrateConfig()
-    ix._measured_gain = ix._geometry_gain = None
-    ix._measured_radii, ix._flux_radii = (1.5, 4.0, 7.4), (3.0, 4.0, 7.4)
-    ix._resolved_aperture, ix._scatter_floor, ix._radius_by_q = "snr", None, None
-    edges = torch.linspace(0.0, 1.0, 13)
-    ix._profile_acc = [edges, sums, counts, counts * 100.0 + sums * profile]
-    ix._profile_spots = [torch.cat([disk, pixels] + [c[:, None] for c in cols], 1)]
-    return ix
-
-
-def test_seed_lattices_overturn_an_snr_disk_that_loses_a_varying_fraction():
-    g = torch.Generator().manual_seed(7)
-    ix = _indexer_on_snr_trial(0.5 + 0.5 * torch.rand(2000, generator=g))
-    radii = ix.finish_profile_stacking()
-    assert ix._aperture() == "flux" and ix._radii()[0] == 3.0
-    assert radii == [3.0] * 12 and ix._scatter_floor[0] == 2.5
-
-
-def test_seed_lattices_keep_an_snr_base_whose_shell_disk_is_wide_enough():
-    # the stacked profile already widens every shell beyond the bound
-    g = torch.Generator().manual_seed(7)
-    broad = (30.0, 25, 15, 8, 0, 0, 0, 0, 0)
-    ix = _indexer_on_snr_trial(0.5 + 0.5 * torch.rand(2000, generator=g), broad)
-    radii = ix.finish_profile_stacking()
-    assert ix._aperture() == "snr" and ix._radii()[0] == 1.5
-    assert min(radii) >= 2.5
-
-
-def test_seed_lattices_keep_an_snr_disk_with_a_steady_loss():
-    ix = _indexer_on_snr_trial(torch.full((2000,), 0.9))
-    radii = ix.finish_profile_stacking()
-    assert ix._aperture() == "snr" and ix._scatter_floor is None
-    assert radii == [1.5] * 12
 
 
 def test_integrate_rings_does_not_double_count_overlapping_disks():

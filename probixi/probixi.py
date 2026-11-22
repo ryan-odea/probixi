@@ -392,8 +392,7 @@ class Probixi:
         ``spread_z``, the ``noise_ratio`` of flux to snr per-observation variance
         when the spread is significant (flux wins only below 1), both radii, and
         the ``reason``. An early exit, on too few peaks or crystals, carries only
-        the keys measured before it. ``scatter_floor`` holds the per-shell lower
-        bounds on the disk radius when the seed lattices overturned an snr choice.
+        the keys measured before it.
         """
         diag = getattr(self, "_aperture_diag", None)
         if diag is None or self.indexer is None:
@@ -927,8 +926,6 @@ class Probixi:
             )
             self.indexer._resolved_aperture = aperture
             self._aperture_diag = diag
-            # the snr disk is tried again at the predictions of the seed lattices
-            self.indexer._flux_radii = flux if aperture == "snr" else None
             # inputs to the aperture choice, kept for offline inspection
             self._aperture_data = dict(
                 sums=torch.cat(sums).cpu(),
@@ -1248,13 +1245,6 @@ class Probixi:
                 stacklevel=2,
             )
         self.predicted_radii = self.indexer.finish_profile_stacking()
-        floor = getattr(self.indexer, "_scatter_floor", None)
-        if floor is not None:
-            self._aperture_diag = dict(
-                getattr(self, "_aperture_diag", None) or {},
-                scatter_floor=floor,
-                reason="snr disk's loss varies between spots at the predictions",
-            )
         cells = [c.cell for r in results for c in r.crystals]
         self._frame_scales.clear()
         if self.cell_calibrate and len(cells) >= max(

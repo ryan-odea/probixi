@@ -8,7 +8,6 @@ from torch import Tensor
 
 A_INV_TO_NM_INV = 10.0
 MIN_ANNULUS_PIXELS = 10  # fewest pixels for an empirical background estimate
-STILL_SCATTER = 0.3  # relative scatter of a still that no disk removes
 
 
 @torch.no_grad()
@@ -164,77 +163,6 @@ def radius_by_shell(
             if float(S[k]) > z_min * math.sqrt(float(V[k])):
                 r = max(r, k + 1.5)
         out.append(r)
-    return out
-
-
-@torch.no_grad()
-def spot_disk_stats(
-    excess: Tensor,
-    positions: Tensor,
-    pixel_valid: Tensor | None = None,
-    k_max: int = 4,
-) -> tuple[Tensor, Tensor, Tensor, Tensor]:
-    # Per position: sum less background and pixel count of each disk k + 0.5,
-    # k = 1..k_max, and pixel variance and pixel count of the rings beyond k_max + 1
-    total, counts, sq = ring_sums(
-        excess, positions, pixel_valid=pixel_valid, max_radius=k_max + 4, squares=True
-    )
-    total, counts, sq = total.double(), counts.double(), sq.double()
-    n_bg = counts[:, k_max + 2 :].sum(1)
-    s_bg = total[:, k_max + 2 :].sum(1)
-    bg = s_bg / n_bg.clamp_min(1.0)
-    bg_var = (sq[:, k_max + 2 :].sum(1) - s_bg * bg) / (n_bg - 1.0).clamp_min(1.0)
-    pixels = torch.cumsum(counts, 1)[:, 1 : k_max + 1]
-    disk = torch.cumsum(total, 1)[:, 1 : k_max + 1] - pixels * bg[:, None]
-    return disk, pixels, bg_var.clamp_min(0.0), n_bg
-
-
-def scatter_floor_by_shell(
-    disk: Tensor,
-    pixels: Tensor,
-    bg_var: Tensor,
-    n_bg: Tensor,
-    shell: Tensor,
-    isolated: Tensor,
-    n_shell: int,
-    adu_per_photon: float = 1.0,
-    scatter: float = STILL_SCATTER,
-    tol: float = 0.02,
-    min_isig: float = 10.0,
-    min_strong: int = 50,
-) -> list[float]:
-    # Per shell the smallest disk radius within tol of the least predicted merged
-    # error; 0.0 where fewer than min_strong strong isolated spots measure the capture
-    disk, pixels = disk.double(), pixels.double()
-    bg_var, n_bg = bg_var.double(), n_bg.double().clamp_min(1.0)
-    n_k = disk.shape[1]
-    g = float(adu_per_photon)
-    back = pixels * bg_var[:, None] * (1.0 + pixels / n_bg[:, None])
-    var = back + g * disk.clamp_min(0.0)
-    ref, var_ref = disk[:, -1], var[:, -1]
-    strong = isolated & (ref > 0) & (ref >= min_isig * var_ref.clamp_min(1e-12).sqrt())
-    out = []
-    for s in range(n_shell):
-        m = shell == s
-        ms = m & strong
-        total = disk[m].sum(0)
-        if int(ms.sum()) < min_strong or float(total[-1]) <= 0:
-            out.append(0.0)
-            continue
-        # spread of the captured fraction between spots, beyond their noise
-        f = disk[ms] / ref[ms, None]
-        cov = pixels[ms] * (bg_var[ms] * (1.0 + pixels[ms, -1] / n_bg[ms]))[:, None]
-        cov = cov + g * disk[ms].clamp_min(0.0)
-        noise = var[ms] - 2.0 * f * cov + f * f * var_ref[ms, None]
-        noise = (noise / ref[ms, None] ** 2).clamp_min(0.0).mean(0)
-        spread = (f.var(0) - noise).clamp_min(0.0) / f.mean(0).square().clamp_min(1e-6)
-        spread[-1] = 0.0
-        c = (total / total[-1]).clamp(1e-3, 1.5)
-        signal = ref[m].clamp_min(0.0)[:, None]
-        v = back[m] / c**2 + g * signal / c + (spread + scatter**2) * signal**2
-        loss = v.sqrt().sum(0)
-        k = int(torch.nonzero(loss <= (1.0 + tol) * loss.min())[0])
-        out.append(k + 1.5)
     return out
 
 
