@@ -30,6 +30,7 @@ def parse_axis_vector(spec: object) -> Optional[tuple[float, float]]:
 
 EV_ANGSTROM = 12398.419843320026  # hc in eV Å
 _CLEN_MM_THRESHOLD_M = 2.0  # an HDF5 clen above this is in mm
+_ENERGY_UNITS = {"eV": 1.0, "keV": 1e3}  # the first is the unit of a bare value
 
 DETECTOR_KEYS = ("detector", "detector_type", "type")
 FLAG_KEYS = ("flag_lessthan", "flag_morethan", "flag_equal")
@@ -107,9 +108,11 @@ class Geometry:
         ``fs = +x`` and ``ss = +y``.
     wavelength : float, optional
         Wavelength in Å, from ``wavelength`` or ``photon_energy``. ``None`` until
-        an HDF5-path photon energy is read from the data.
+        an HDF5-path photon energy is read from the data. The path takes a
+        CrystFEL unit, as in ``photon_energy = /LCLS/photon_energy_eV eV``.
     pixel_size : float, optional
-        Pixel size in m, ``1 / res``.
+        Pixel size in m, ``1 / res``. A panel's own ``res`` overrides the
+        top-level one, and every panel has to give the same value.
     adu_per_photon : float, optional
         Gain in ADU per photon, from ``adu_per_photon`` or
         ``adu_per_eV * photon_energy`` when both are numbers.
@@ -186,6 +189,8 @@ def read_geometry(path: PathLike) -> Geometry:
     ------
     FileNotFoundError
         If ``path`` does not exist.
+    ValueError
+        If the panels differ in ``res``.
     """
     path = Path(path)
     if not path.is_file():
@@ -274,7 +279,7 @@ def read_geometry(path: PathLike) -> Geometry:
         distance=distance,
         beam_center=_beam_center(panels),
         wavelength=_wavelength(parameters),
-        pixel_size=_pixel_size(parameters),
+        pixel_size=_pixel_size(parameters, panels),
         adu_per_photon=_adu_per_photon(parameters),
         data_layout=data_layout,
         mask_spec=mask_spec,
@@ -427,14 +432,36 @@ def _wavelength(parameters: dict) -> Optional[float]:
 
 
 def _photon_energy(parameters: dict) -> Optional[float]:
-    return _with_unit(parameters.get("photon_energy"), {"eV": 1.0, "keV": 1e3})
+    return _with_unit(parameters.get("photon_energy"), _ENERGY_UNITS)
 
 
-def _pixel_size(parameters: dict) -> Optional[float]:
-    res = parameters.get("res")  # pixels per metre
-    if isinstance(res, (int, float)) and res > 0:
-        return 1.0 / float(res)
-    return None
+def energy_path(value: str) -> tuple[str, float]:
+    # "<HDF5 path> <unit>" -> (path, factor to eV); a bare path is in eV
+    path, _, unit = value.strip().rpartition(" ")
+    if path and unit in _ENERGY_UNITS:
+        return path.strip(), _ENERGY_UNITS[unit]
+    return value.strip(), 1.0
+
+
+def _pixel_size(parameters: dict, panels: dict[str, dict]) -> Optional[float]:
+    # res is in pixels per metre; a panel's own res overrides the top-level one
+    top = parameters.get("res")
+    values = [p.get("res", top) for p in panels.values()] or [top]
+    res = sorted(
+        {
+            float(v)
+            for v in values
+            if isinstance(v, (int, float)) and not isinstance(v, bool) and v > 0
+        }
+    )
+    if not res:
+        return None
+    if res[-1] - res[0] > 1e-6 * res[0]:
+        raise ValueError(
+            f"geometry: the panels differ in res ({res[0]:g} to {res[-1]:g}); "
+            "probixi takes one pixel size for the whole detector"
+        )
+    return 1.0 / res[0]
 
 
 def _adu_per_photon(parameters: dict) -> Optional[float]:
@@ -549,8 +576,9 @@ def _resolve_clen(f: h5py.File, path: str, geometry: Geometry) -> Optional[float
     return metres + _mean_coffset(geometry.panels, geometry.parameters)
 
 
-def _resolve_wavelength(f: h5py.File, path: str) -> Optional[float]:
+def _resolve_wavelength(f: h5py.File, value: str) -> Optional[float]:
+    path, to_ev = energy_path(value)
     ev = _dataset_mean(f, path)
     if ev is None or ev <= 0:
         return None
-    return EV_ANGSTROM / ev
+    return EV_ANGSTROM / (ev * to_ev)

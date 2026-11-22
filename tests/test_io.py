@@ -230,6 +230,36 @@ def test_event_list_preserves_order_and_physical_identity(tmp_path, geometry_dic
     ]
 
 
+def test_per_event_photon_energy_path_takes_a_unit(tmp_path):
+    import h5py
+
+    from probixi.io.geometry import EV_ANGSTROM
+    from probixi.probixi import _frame_wavelengths
+
+    h5_path = tmp_path / "run.h5"
+    kev = (9.0, 9.01, 9.02)
+    with h5py.File(h5_path, "w") as f:
+        for name, frame, e in zip(("tag-1", "tag-2", "tag-3"), _frames(3, 8, 6), kev):
+            f[f"{name}/data"] = frame
+            f[f"{name}/photon_energy_kev"] = e
+    geom = tmp_path / "kev.geom"
+    geom.write_text(
+        "clen = 0.05\nres = 20000\ndata = /%/data\n"
+        "photon_energy = /%/photon_energy_kev keV\n"
+        "p0/min_fs = 0\np0/max_fs = 5\np0/min_ss = 0\np0/max_ss = 7\n"
+        "p0/corner_x = -3\np0/corner_y = -4\n"
+    )
+    lst = tmp_path / "run.lst"
+    lst.write_text(f"{h5_path}\n")
+    loader = DataLoader(lst, geom)
+    assert loader.files[str(h5_path)].photon_energy_eV == pytest.approx(
+        [1e3 * e for e in kev]
+    )
+    assert _frame_wavelengths(loader.metadata) == pytest.approx(
+        [EV_ANGSTROM / (1e3 * e) for e in kev]
+    )
+
+
 def test_per_event_data_path_reads_groups_and_named_events(tmp_path, geometry_dict):
     from types import SimpleNamespace
 

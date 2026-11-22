@@ -74,6 +74,23 @@ def test_resolves_hdf5_clen_and_wavelength_from_data_file(tmp_path):
     assert d["wavelength"] == pytest.approx(1.0)
 
 
+@pytest.mark.parametrize(
+    "unit, stored",
+    [(" eV", EV_ANGSTROM), (" keV", EV_ANGSTROM / 1e3), ("", EV_ANGSTROM)],
+)
+def test_photon_energy_path_takes_a_crystfel_unit(tmp_path, unit, stored):
+    # LCLS geometries write "photon_energy = /LCLS/photon_energy_eV eV"
+    geom = _lcls_geom(tmp_path, clen="0.1", photon_energy=ENERGY_PATH + unit)
+    values = np.full(4, stored, dtype=np.float64)
+    values[3] = np.nan  # shots without a reading do not enter the mean
+    _, lst = sim.write_cxi_run(
+        tmp_path, _frames(4, 8, 6), extra_datasets={ENERGY_PATH: values}
+    )
+    g = DataLoader(lst, geom).metadata.geometry
+    assert g.wavelength == pytest.approx(1.0, rel=1e-6)
+    assert g.to_dict()["wavelength"] == pytest.approx(1.0, rel=1e-6)
+
+
 def test_clen_already_in_metres_is_not_rescaled(tmp_path):
     # a clen path holding a plausible metre value (|value| <= 2 m) is used as-is
     geom = _lcls_geom(tmp_path, coffset=0.0)

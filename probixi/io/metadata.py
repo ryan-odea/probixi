@@ -10,7 +10,7 @@ import hdf5plugin  # noqa: F401  (registers bitshuffle)
 from .assemble import PanelPlacement, assembled_frame_shape, build_placements
 from .cbf import read_cbf_header
 from .cell import CellParams
-from .geometry import Geometry, match_events
+from .geometry import Geometry, energy_path, match_events
 
 PathLike = Union[str, Path]
 
@@ -41,7 +41,8 @@ class H5Info:
     events : list[str], optional
         Names that ``%`` stands for, one frame each.
     photon_energy_eV : list[float], optional
-        Per-event photon energies in eV from a ``photon_energy = /%/...`` path.
+        Per-event photon energies in eV from a ``photon_energy = /%/...`` path,
+        with or without a unit after it.
     """
 
     filename: str
@@ -213,7 +214,8 @@ def _scan_events(path: Path, pattern: str, geometry: Geometry) -> H5Info:
             raise ValueError(f"no datasets match {pattern!r} in {path}")
         shape = tuple(int(s) for s in f[pattern.replace("%", events[0])].shape)
         if isinstance(energy, str) and "%" in energy:
-            energies = [float(f[energy.replace("%", n)][()]) for n in events]
+            e_path, to_ev = energy_path(energy)
+            energies = [float(f[e_path.replace("%", n)][()]) * to_ev for n in events]
     if len(shape) != 2:
         raise ValueError(f"per-event dataset {pattern!r} is {len(shape)}D, not 2D")
     return H5Info(

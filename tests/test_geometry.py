@@ -195,6 +195,50 @@ def test_energy_keys_take_crystfel_units(tmp_path, line, expected):
     assert read_geometry(path).wavelength == pytest.approx(expected)
 
 
+_PANEL = (
+    "{name}/min_fs = 0\n{name}/max_fs = 9\n"
+    "{name}/min_ss = {ss}\n{name}/max_ss = {ss9}\n"
+    "{name}/corner_x = -5\n{name}/corner_y = -5\n"
+)
+
+
+@pytest.mark.parametrize(
+    "top, panel_res, expected",
+    [
+        ("", (13333.3, 13333.3), 1.0 / 13333.3),  # only the panels carry res
+        ("res = 10000\n", (13333.3, 13333.3), 1.0 / 13333.3),  # panels override
+        ("res = 10000\n", (None, None), 1.0 / 10000),
+        ("res = 13333.3\n", (13333.3, None), 1.0 / 13333.3),
+    ],
+)
+def test_pixel_size_reads_res_from_the_panels(tmp_path, top, panel_res, expected):
+    body = f"photon_energy = 9000\nclen = 0.1\n{top}"
+    for i, res in enumerate(panel_res):
+        body += _PANEL.format(name=f"p{i}", ss=10 * i, ss9=10 * i + 9)
+        if res is not None:
+            body += f"p{i}/res = {res}\n"
+    path = tmp_path / "res.geom"
+    path.write_text(body)
+    geom = read_geometry(path)
+    assert geom.pixel_size == pytest.approx(expected)
+    assert geom.to_dict()["pixel_size"] == pytest.approx(expected)
+
+
+def test_panels_that_differ_in_res_stop_the_read(tmp_path):
+    body = "photon_energy = 9000\nclen = 0.1\n"
+    for i, res in enumerate((13333.3, 10000)):
+        body += _PANEL.format(name=f"p{i}", ss=10 * i, ss9=10 * i + 9)
+        body += f"p{i}/res = {res}\n"
+    path = tmp_path / "mixed.geom"
+    path.write_text(body)
+    with pytest.raises(ValueError, match="differ in res"):
+        read_geometry(path)
+    # a top-level res does not hide one panel that overrides it
+    path.write_text("res = 13333.3\n" + body.replace("p0/res = 13333.3\n", ""))
+    with pytest.raises(ValueError, match="differ in res"):
+        read_geometry(path)
+
+
 def test_read_geometry_reads_the_mask0_names(tmp_path):
     body = (
         "photon_energy = 9000\nclen = 0.1\nres = 10000\n{mask}"

@@ -12,6 +12,10 @@ Any pixel mask stored with the data is read and combined with the masks `probixi
 
 When the geometry reads the photon energy per event (`photon_energy = /%/photon_energy_ev`), each frame is indexed, predicted, and integrated at its own wavelength, and the stream and database record it per frame.
 
+`photon_energy` takes a number or an HDF5 path, each with an optional CrystFEL unit: `photon_energy = 9.5 keV` and `photon_energy = /LCLS/photon_energy_eV eV` both work. A value without a unit is in eV. A path that names one dataset for the whole file gives the mean of its finite entries.
+
+The pixel size comes from `res`. A geometry may set `res` at the top level, per panel, or both; a panel's own value overrides the top-level one. `probixi` takes one pixel size for the whole detector and stops when the panels differ.
+
 `--mask FILE` (or `Probixi(mask_file=...)`) reads the mask from `FILE` instead, for a mask that lives in an HDF5 master file while the list names the data files, or a `mask_file` that has moved. `probixi` reads the geometry's `mask` dataset if `FILE` has it, and otherwise the NeXus `/entry/instrument/detector/pixel_mask` or the same mask under `detectorSpecific/`. A NeXus pixel is bad when any flag bit is set, unless the geometry sets `mask_good` or `mask_bad`. An explicit `--mask` that cannot be read stops the run; an unreadable geometry mask gives a warning, and the run continues without it.
 
 ## Frame reading and decompression
