@@ -7,8 +7,6 @@ from .model import NoiseStats
 
 
 class PixelNoise(NoiseStats):
-    # Pixel estimator of the blend; also owns the dead-pixel mask
-
     valid_mask: Tensor
 
     def __init__(

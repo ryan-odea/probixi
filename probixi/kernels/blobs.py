@@ -350,7 +350,7 @@ def extract(finder, binary, scores, frame_index, mask):
     if K == 0:
         return empty()
     if K > KCAP or finder.size_min < 1:
-        return None  # None hands the frame to the torch path
+        return None  # the torch path takes this frame
     nodes = 256 if K <= 256 else 1024 if K <= 1024 else 4096
     lanes = min(nodes, BCAP)
     warps = 4 if nodes <= 256 else 8 if nodes <= 1024 else 16

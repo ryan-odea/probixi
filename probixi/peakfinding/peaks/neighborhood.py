@@ -66,7 +66,6 @@ def _sep_correlate(x4d: Tensor, a: Tensor, pad_mode: str = "constant") -> Tensor
     return F.conv2d(tc, kc)
 
 
-# cached separable ones-kernels for the box filter, keyed (radius, device, dtype)
 _BOX_KERNEL_CACHE: dict = {}
 
 

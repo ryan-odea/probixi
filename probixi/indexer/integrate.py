@@ -92,7 +92,7 @@ def ring_sums(
     )
     if pixel_valid is not None:
         ok &= pixel_valid.flatten()[flat]
-    # Stamp corners beyond max_radius are already excluded by ok, so clamping is safe
+    # ok already excludes stamp corners beyond max_radius, so the clamp is safe
     index = rbin.clamp(0, max_radius).expand_as(flat)
     values = torch.where(ok, excess.flatten()[flat], 0.0)
 
@@ -404,7 +404,6 @@ def integrate_rings(
     if pixel_valid is not None:
         ok &= pixel_valid.flatten()[flat]
     pixels = raw.flatten()[flat]
-    # background level and spread from the annulus
     bgmask = ok & (radius >= r_in**2) & (radius <= r_out**2)
     nb = bgmask.sum(1)
     background = torch.where(bgmask, pixels, 0).sum(1) / nb.clamp_min(1)
@@ -484,7 +483,7 @@ def peak_resolution_limit(
     snr: Tensor | None = None,
     snr_floor: float = 0.0,
 ) -> float:
-    # Per-crystal diffraction limit from a percentile of the indexed peaks' |q|.
+    # Diffraction limit from a quantile of the peaks' |q|, in the unit of the input
     if percentile <= 0.0 or peak_resolution.numel() == 0:
         return float("inf")
     vals = peak_resolution

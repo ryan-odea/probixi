@@ -733,7 +733,6 @@ class Probixi:
         )
 
     def _static_mask(self, frame: Tensor, frame_size: tuple[int, int]) -> Tensor:
-        # A priori bad: >= max_adu, flag_* values, panel edges, bad regions, stored mask
         mask = torch.ones(frame_size, dtype=torch.bool, device=frame.device)
         geom = self.loader.metadata.geometry
         max_adu = geom.parameters.get("max_adu") if geom else None
@@ -1045,8 +1044,8 @@ class Probixi:
         batch_size : int, default 15
             Frames folded in between snapshots.
         **kwargs
-            Forwarded to the noise model's diagnostics (``fps``, ``cmap``,
-            ``dpi``, ``max_radius``, ``figsize``).
+            Forwarded to the noise model's diagnostics (``fps``, ``dpi``,
+            ``max_radius``, ``figsize``).
 
         Returns
         -------
@@ -1765,7 +1764,6 @@ def _panel_boxes(geom, frame_size: tuple[int, int]) -> Optional[list]:
 
 
 def _mask_panel_edges(mask: Tensor, geom) -> None:
-    # mask ``mask_edge_pixels`` pixels around the border of every panel
     n = geom.parameters.get("mask_edge_pixels")
     if not isinstance(n, (int, float)) or isinstance(n, bool):
         return

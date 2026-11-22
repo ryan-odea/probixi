@@ -214,8 +214,7 @@ def scan_h5(path: PathLike, geometry: Optional[Geometry] = None) -> H5Info:
 def _stack_energies(
     path: Path, geometry: Geometry, n_frames: int
 ) -> Optional[list[float]]:
-    # One energy (eV) per frame of a stacked file; None unless the geometry's
-    # photon_energy names a dataset with exactly one entry per frame
+    # None unless photon_energy names a dataset with one entry per frame; in eV
     energy = geometry.parameters.get("photon_energy")
     if not isinstance(energy, str) or "%" in energy:
         return None
@@ -293,7 +292,6 @@ def _validate_placements(
 
 
 def _find_frame_dataset(h5file: h5py.File) -> tuple[str, tuple]:
-    # The first 3-D dataset in visit order is the frame stack
     found: dict = {}
 
     def visitor(name, obj):

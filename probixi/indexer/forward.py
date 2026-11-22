@@ -18,7 +18,7 @@ _PANEL_FIELDS = itemgetter(
 def _panel_bases(
     geometry: dict, device: Optional[torch.device], dtype: torch.dtype
 ) -> Optional[Tensor]:
-    # TODO: support tilted panels; all panels are taken as coplanar at z = clen
+    # Assumes every panel is coplanar at z = clen; panel tilt is not modelled
     panels = geometry.get("panels") or {}
     try:
         return _panel_tensor(tuple(map(_PANEL_FIELDS, panels.values())), device, dtype)

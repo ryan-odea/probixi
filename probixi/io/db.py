@@ -120,8 +120,7 @@ _PEAK_COLUMNS = (
     "n_masked",
 )
 
-#: largest ``enrich_p`` of a lattice in the model-variance fit; the default of
-#: ``--enrich-alpha``, and the gate TorchSX applies to the database by default
+#: largest enrich_p in the model-variance fit; --enrich-alpha default, TorchSX gate
 MODEL_VAR_ALPHA = 1e-3
 
 _SCHEMA = """
@@ -334,7 +333,8 @@ class DuckDBOffloader(_StreamWriter):
     cell : CellParams, optional
         Target cell, written to the ``cell`` table.
     geometry_file : str or Path, optional
-        Geometry file stored verbatim in ``geometry.geometry_file``.
+        Geometry file stored in ``geometry.geometry_file``, with ``clen`` moved by
+        any camera-length fit.
     files : dict, optional
         Loader file map. It resolves frame indices to file and event, and lists
         the frames that never indexed, which get ``indexed = FALSE``. Without it,
@@ -344,7 +344,7 @@ class DuckDBOffloader(_StreamWriter):
         Only frames in it receive unindexed rows, as ``--start``/``--stop`` and
         multi-GPU blocks require. ``None`` covers every file-event.
     indexer_name : str, default "probixi"
-        Accepted for parity with :class:`DataOffloader`; not stored.
+        Accepted for parity with :class:`DataOffloader`; the database omits it.
     panel : str, default "0"
         Panel name for peaks and reflections outside every geometry panel.
     integration : dict, optional
@@ -400,7 +400,6 @@ class DuckDBOffloader(_StreamWriter):
         )
         self.cell = cell
         self.integration = integration
-        #: calibration dict (or a callable giving it), written on exit
         self.calibration = calibration
         self.rank = int(rank)
         self.calibrate_model_var = bool(calibrate_model_var)
@@ -418,7 +417,7 @@ class DuckDBOffloader(_StreamWriter):
         self._recip_scale: dict[str, float] = {}  # lambda0 / frame lambda, by frame id
 
     def __enter__(self) -> "DuckDBOffloader":
-        # One warning per run if the TorchSX installed next to probixi cannot read this schema
+        # Rank 0 alone warns when the installed TorchSX cannot read this schema
         mismatch = torchsx_mismatch() if self.rank == 0 else None
         if mismatch:
             warnings.warn(mismatch, stacklevel=2)
@@ -978,14 +977,12 @@ class DuckDBOffloader(_StreamWriter):
 
 
 def _to_array(t, n: int = 0, dtype=np.float64) -> np.ndarray:
-    # Optional tensor -> array, or zeros(n) when it was not recorded
     if t is None:
         return np.zeros(n, dtype=dtype)
     return t.detach().cpu().numpy().astype(dtype)
 
 
 def _reflection_extras(result) -> tuple:
-    # (n_pixels, background_model, background_model_var) lists; () if not integrated
     cols = (
         result.predicted_n_pixels,
         result.predicted_bg_model,
@@ -1057,30 +1054,7 @@ def fit_model_var_scale(
     n_iter: int = 8,
     min_obs: Optional[int] = None,
 ) -> Optional[float]:
-    """Fit the factor k on the background variance of model-subtracted intensities.
-
-    With ``sigma^2 = k var_bg + gain * max(I_model, 0)``, k makes the robust
-    spread of ``I_model / sigma`` equal to one. The sample must carry little
-    signal, as reflections past their crystal's diffraction limit do.
-
-    Parameters
-    ----------
-    intensity_model : numpy.ndarray
-        ``intensity + n_pixels * background - background_model`` (ADU).
-    var_bg : numpy.ndarray
-        ``background_model_var * (1 + n_bg / n_pixels)`` (ADU^2).
-    gain : float
-        ADU per photon.
-    n_iter : int
-        Maximum number of fixed-point iterations.
-    min_obs : int, optional
-        Fewest usable reflections, :data:`MODEL_VAR_MIN_OBS` when None.
-
-    Returns
-    -------
-    float or None
-        k clamped to :data:`MODEL_VAR_RANGE`, or None with too few reflections.
-    """
+    # sigma^2 = k var_bg + gain max(I, 0), in ADU; the sample must carry little signal
     im = np.asarray(intensity_model, dtype=np.float64)
     vb = np.asarray(var_bg, dtype=np.float64)
     ok = np.isfinite(im) & np.isfinite(vb) & (vb > 0)
@@ -1107,12 +1081,7 @@ RUN_LIMIT_QUANTILE = 0.1
 def run_resolution_limit(
     conn, quantile: float = RUN_LIMIT_QUANTILE, alpha: Optional[float] = None
 ) -> Optional[float]:
-    """Return the run's resolution in A, a quantile of the crystals' limits in d.
-
-    TorchSX uses this value over every lattice as its default ``--dmin``. With
-    ``alpha``, only lattices with ``enrich_p <= alpha`` count. The result is
-    None without such lattices.
-    """
+    # Run resolution in Å, a quantile in d of the crystals' limits; TorchSX's --dmin
     tables = {r[0] for r in conn.execute("SHOW TABLES").fetchall()}
     if "crystals" not in tables:
         return None
@@ -1147,35 +1116,7 @@ def calibrate_model_variance(
     seed: int = 1988,
     alpha: Optional[float] = MODEL_VAR_ALPHA,
 ) -> Optional[float]:
-    """Rescale ``reflections.background_model_var`` to the measured scatter.
-
-    Fits k with :func:`fit_model_var_scale` on the reflections past their own
-    crystal's diffraction limit, no finer than ``d_min``, with no masked or
-    overlapping pixels, on lattices with ``enrich_p <= alpha``. The default
-    ``d_min`` is :func:`run_resolution_limit` over every lattice. With fewer than
-    :data:`MODEL_VAR_MIN_OBS` such reflections, the fit uses every lattice and
-    warns. Multiplies ``background_model_var`` by k and records the fit in the
-    ``integration.bg_model_var_*`` columns. A database that already records a
-    scale is left unchanged.
-
-    Parameters
-    ----------
-    conn : duckdb.DuckDBPyConnection
-        Writable connection to a probixi database.
-    d_min : float, optional
-        Finest d (A) of the reference reflections.
-    sample : int
-        Maximum number of reflections in the fit, a repeatable reservoir sample.
-    seed : int
-        Sample seed.
-    alpha : float or None, default 1e-3
-        Largest ``enrich_p`` of a reference lattice. None uses every lattice.
-
-    Returns
-    -------
-    float or None
-        The scale in effect, or None when nothing could be fitted.
-    """
+    # k comes from unmasked reflections past their crystal's limit with d >= d_min (Å)
     tables = {r[0] for r in conn.execute("SHOW TABLES").fetchall()}
     if not {"integration", "reflections", "crystals"} <= tables:
         return None
@@ -1257,7 +1198,7 @@ def recalibrate_model_variance(
     conn : duckdb.DuckDBPyConnection
         Writable connection to a probixi database, outside a transaction.
     alpha : float or None, default 1e-3
-        As for :func:`calibrate_model_variance`.
+        Largest ``enrich_p`` of a reference lattice. None uses every lattice.
 
     Returns
     -------

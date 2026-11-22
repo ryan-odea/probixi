@@ -7,7 +7,7 @@ from typing import Optional
 import torch
 from torch import Tensor
 
-# cached frame-invariant index grids, keyed by (H, W, device, dtype)
+# frame-invariant index grids
 _COORD_CACHE: dict = {}
 
 
@@ -309,7 +309,6 @@ def compute_blob_stats(
     )
     intensity_sigma = var_sum.sqrt()
 
-    # per-blob maxima of (excess, z[, response])
     max_src = [flat_excess, flat_z]
     if response is not None:
         max_src.append(response.flatten()[fg])
@@ -351,7 +350,6 @@ def compute_blob_stats(
     bbox_c1 = bbox_hi[:, 1].to(torch.long)
 
     intensity_mean = intensity_sum / size_f
-    # peakedness = max / mean (>= 1), undefined and set to 0 for a non-positive mean
     peakedness = torch.where(
         intensity_mean > 1e-12,
         intensity_max / intensity_mean.clamp_min(1e-12),

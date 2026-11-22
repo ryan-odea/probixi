@@ -21,7 +21,6 @@ PathLike = Union[str, Path]
 
 
 def _iter_single(frames: Iterable[Tensor]):
-    # Flatten (N, H, W) batches into single (H, W) frames; pass 2-D through.
     for item in frames:
         if isinstance(item, Tensor) and item.ndim == 3:
             for sub in item:
@@ -44,7 +43,6 @@ class _Snapshot:
 
 
 def _radial_profile(img, beam_yx, bin_width: float):
-    # Azimuthal mean of an assembled physical image
     h, w = img.shape
     yy = np.arange(h)[:, None] - float(beam_yx[0])
     xx = np.arange(w)[None, :] - float(beam_yx[1])
@@ -117,7 +115,6 @@ def animate_noise_diagnostics(
     assemble=None,
     assembled_beam=None,
 ) -> Path:
-    # Drive model over frames in batches and write a diagnostic GIF
     if batch_size < 1:
         raise ValueError("batch_size must be >= 1")
 
@@ -135,7 +132,7 @@ def animate_noise_diagnostics(
             )
             snaps.append(snap)
             pending = 0
-    if pending > 0:  # trailing partial batch
+    if pending > 0:
         snap, prev_mean = _capture(
             model, len(snaps) + 1, seen, prev_mean, assemble, assembled_beam
         )

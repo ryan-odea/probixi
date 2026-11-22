@@ -14,7 +14,7 @@ PanelSpec = Union[
 
 
 class PanelNoise(NoiseStats):
-    # Panel-mean estimator, frame-wide for one panel; panel_map is -1 outside panels
+    # panel_map is -1 outside every panel
 
     panel_map: Tensor
     pixels_per_panel: Tensor

@@ -4,7 +4,7 @@ from typing import Optional
 
 __all__ = ["SCHEMA_VERSION", "TORCHSX_VERSION", "torchsx_mismatch", "version_tuple"]
 
-# Layout of the DuckDB output; 2 adds the rank columns and integration.bg_model_var_*
+# Layout version of the DuckDB output
 SCHEMA_VERSION = 2
 # First TorchSX release whose reader understands SCHEMA_VERSION
 TORCHSX_VERSION = "0.3.0"

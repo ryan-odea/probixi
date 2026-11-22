@@ -19,7 +19,7 @@ def _pct(num: int, denom: int) -> str:
 def _resolve_cli_devices(
     device: Optional[str], devices: Optional[str], gpus: Optional[int]
 ) -> Optional[list]:
-    # Device list from --device/--devices/--gpus; None keeps the single-device path
+    # None keeps the single-device path
     import torch
 
     explicit = bool(device) and device.strip().lower() != "auto"
@@ -55,7 +55,7 @@ def format_cell_calibration(cc) -> str:
 
 
 def _parse_int_radius(value: Optional[str]) -> Optional[tuple[float, float, float]]:
-    """``R_DISK,R_IN,R_OUT`` in pixels, increasing and positive, or None."""
+    # R_DISK,R_IN,R_OUT in pixels
     if value is None:
         return None
     try:
@@ -78,7 +78,6 @@ DB_MAX_LATTICES = 3
 
 
 def _parse_max_lattices(ctx, param, value):
-    # "auto" or a positive integer
     text = str(value).strip().lower()
     if text == "auto":
         return "auto"
@@ -464,14 +463,14 @@ def main(
 
     if not quiet:
         click.echo("If you use probixi, please cite:")
-        citation()  # the current entry from GitHub, else the bundled one
+        citation()
         click.echo()
 
     device_list = _resolve_cli_devices(device, devices, gpus)
     if device_list is None or len(device_list) <= 1:
         from probixi.tools.multigpu import cap_torch_threads
 
-        cap_torch_threads(threads_per_worker)  # several devices: each worker caps its own
+        cap_torch_threads(threads_per_worker)  # multi-device workers cap their own
     refine_cfg = RefineConfig(cell=not no_refine_cell)
     radii = _parse_int_radius(int_radius)
     if radii is not None and disk == "shell":

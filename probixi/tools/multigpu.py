@@ -135,7 +135,7 @@ def merge_streams(part_paths: Sequence[PathLike], output_path: PathLike) -> int:
                     if line.startswith(_CHUNK_MARKER):
                         in_chunks = True
                     if not in_chunks:
-                        if not header_written and has_header:  # header from first part
+                        if not header_written and has_header:
                             out.write(line)
                             if mixed and _INT_RADIUS in line:
                                 for k, v in radii.items():
@@ -255,7 +255,7 @@ def _remove_part(part: PathLike) -> None:
 
 
 def usable_cpus() -> int:
-    # cores this process may run on: the affinity mask (Slurm, taskset) where the OS has one, else every core
+    # cores this process may use: the affinity mask (Slurm, taskset), else every core
     try:
         return max(1, len(os.sched_getaffinity(0)))
     except AttributeError:
@@ -263,7 +263,7 @@ def usable_cpus() -> int:
 
 
 def cap_torch_threads(limit: Optional[int] = None) -> int:
-    # PyTorch starts one thread per core of the node; on a shared node that oversubscribes the allocated cores
+    # torch starts one thread per core of the node, more than a shared node allocates
     n = min(torch.get_num_threads(), limit if limit and limit > 0 else usable_cpus())
     torch.set_num_threads(n)
     return n
@@ -445,9 +445,17 @@ def run_data_parallel(
         Frame range of the whole run, start inclusive and stop exclusive.
     seed_frames : int, default 32
         Seed frames for calibration, ``n_seed`` of :meth:`Probixi.calibrate`.
+    target_noise_peaks : float, optional, default 5.0
+        Noise budget of :meth:`Probixi.calibrate`. None skips the threshold
+        calibration and keeps ``mf_threshold``.
+    panel : str, default "0"
+        Panel name for peaks outside every geometry panel, as for
+        :class:`DataOffloader`.
     enrich_gate : bool, default False
         Keep only lattices whose chance probability ``enrich_p`` is at most
         ``enrich_alpha``.
+    enrich_alpha : float, default 1e-3
+        Threshold of ``enrich_gate``; ignored without it.
     threads_per_worker : int, optional
         CPU threads per worker. With several devices the default divides the
         CPU count between them.

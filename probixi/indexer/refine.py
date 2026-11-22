@@ -229,7 +229,7 @@ def refine_cell(
         f = resid(theta)
         loss = float(f.square().sum())
         for _ in range(iters):
-            # forward mode: one pass per parameter (at most 9), not one per residual (4 per indexed peak)
+            # forward mode: one pass per parameter (<= 9), not per residual (4 per peak)
             J = torch.autograd.functional.jacobian(
                 resid, theta, vectorize=True, strategy="forward-mode"
             )

@@ -186,7 +186,6 @@ def _escapes(d: np.ndarray, candidates: np.ndarray) -> tuple[np.ndarray, np.ndar
 
 
 def _payload(d: np.ndarray, pos: np.ndarray, width: np.ndarray) -> np.ndarray:
-    # Value carried by each escape token
     raw = d.view(np.uint8)[np.minimum(pos[:, None] + np.arange(1, 15), d.size - 1)]
 
     def le(lo, hi, kind):

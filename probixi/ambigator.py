@@ -515,7 +515,6 @@ class Ambigator:
         return group, len(_GROUPS)
 
     def _refresh_cells(self, conn, flipped: str) -> None:
-        # recompute cell parameters from the reindexed reciprocal axes
         stars = [f"{s}star_{x}" for s in "abc" for x in "xyz"]
         fetched = conn.execute(
             f"SELECT crystal_id, {', '.join(stars)} FROM crystals WHERE {flipped} "

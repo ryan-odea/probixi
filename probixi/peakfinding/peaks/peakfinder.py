@@ -421,7 +421,6 @@ class PeakFinder:
         if not self.local_background:
             if flux:
                 assert gain is not None and read_var is not None
-                # Photon-transfer floor read_var + gain*level
                 floor = self.flux_var_floor * var0
                 base = read_var + gain * mean0.clamp_min(0.0)
                 return mean0, torch.maximum(base, floor).clamp_min(1e-12)

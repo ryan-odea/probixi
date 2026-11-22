@@ -62,7 +62,6 @@ def build_placements(geometry: Geometry) -> Optional[list[PanelPlacement]]:
 
 
 def assembled_frame_shape(placements: list[PanelPlacement]) -> tuple[int, int]:
-    # Data-space (H, W) spanning every panel rectangle
     h = max(p.max_ss for p in placements) + 1
     w = max(p.max_fs for p in placements) + 1
     return (int(h), int(w))
@@ -148,7 +147,7 @@ NEXUS_MASK_PATHS = (
 
 
 def _apply_mask_bits(raw: np.ndarray, mask_good: int, mask_bad: int) -> np.ndarray:
-    # CrystFEL rule: good when every mask_good bit is set and no mask_bad bit is
+    # CrystFEL's mask_good / mask_bad rule
     m = np.asarray(raw)
     if not np.issubdtype(m.dtype, np.unsignedinteger):
         m = m.astype(np.uint64)

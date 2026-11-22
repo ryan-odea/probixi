@@ -19,7 +19,7 @@ _AXIS_RE = re.compile(r"([+-]?[0-9]*\.?[0-9]+(?:[eE][+-]?[0-9]+)?)\s*([xy])")
 
 
 def parse_axis_vector(spec: object) -> Optional[tuple[float, float]]:
-    # z components are ignored; None when the spec has neither x nor y
+    # Ignores z components
     if not isinstance(spec, str):
         return None
     comps = {axis: float(val) for val, axis in _AXIS_RE.findall(spec)}
@@ -362,7 +362,6 @@ def _parse_mask_bits(value: object, default: int = 0) -> int:
 
 
 def _with_mask_aliases(d: dict) -> dict:
-    # mask0_* entries fill the older keys that the file does not set
     out = dict(d)
     for new, old in _MASK_ALIASES.items():
         if new in d and old not in d:
@@ -444,7 +443,7 @@ def energy_path(value: str) -> tuple[str, float]:
 
 
 def _pixel_size(parameters: dict, panels: dict[str, dict]) -> Optional[float]:
-    # res is in pixels per metre; a panel's own res overrides the top-level one
+    # res is in pixels per metre
     top = parameters.get("res")
     values = [p.get("res", top) for p in panels.values()] or [top]
     res = sorted(
@@ -496,7 +495,6 @@ def _flag_value(value: str) -> Optional[int]:
 
 
 def resolve_dynamic_fields(geometry: Geometry, data_file: PathLike) -> Geometry:
-    # Fill in HDF5-path-valued clen/photon_energy from the data file
     clen_path = geometry.parameters.get("clen")
     pe_path = geometry.parameters.get("photon_energy")
     need_clen = geometry.distance is None and isinstance(clen_path, str)
@@ -523,7 +521,7 @@ def resolve_dynamic_fields(geometry: Geometry, data_file: PathLike) -> Geometry:
 
 
 def match_events(f: h5py.File, pattern: str) -> list[str]:
-    # Natural-sorted names n under the "%" parent that hold a dataset at n + rest
+    # The natural order of the names defines the event index
     parent, _, rest = pattern.partition("%")
     if "%" in rest:
         raise ValueError(f"more than one '%' in {pattern!r} is not supported")
@@ -538,7 +536,6 @@ def match_events(f: h5py.File, pattern: str) -> list[str]:
 
 
 def _dataset_mean(f: h5py.File, path: str) -> Optional[float]:
-    # A per-event ("%") path is averaged over every event
     paths = [path]
     if "%" in path:
         paths = [path.replace("%", n) for n in match_events(f, path)]

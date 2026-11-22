@@ -38,8 +38,7 @@ MIN_PEAKS_PER_LATTICE = 6
 FALLBACK_RADII = (3.0, 4.0, 7.36)
 
 
-#: a found peak within this distance (px) explains a prediction; only the
-#: enrichment test uses it, predictions are never moved
+# px within which a found peak explains a prediction, for the enrichment test only
 EXPLAINED_RADIUS_PX = 5.0
 
 
@@ -72,7 +71,7 @@ class IndexStats:
 
     @property
     def index_rate_of_hits(self) -> float:
-        """Indexed solutions per hit (0 when no hits)."""
+        """Indexed frames per hit (0 when no hits)."""
         return self.indexed / self.hits if self.hits else 0.0
 
 
@@ -109,7 +108,7 @@ class IndexResult:
     sigmas : Tensor
         (N,) 1-sigma uncertainty on each intensity.
     loss_history : Tensor
-        Per-iteration refinement loss (excluded from repr).
+        Per-iteration refinement loss summed over the batch (excluded from repr).
     predicted_hkl : Tensor, optional
         (M, 3) Miller indices of all reflections predicted to diffract on this
         frame, or None if prediction/integration was not run.
@@ -400,13 +399,13 @@ class IntegrateConfig:
     resolution_min_refl : int
         Fewest measured reflections for a falloff estimate.
     resolution_percentile : float
-        Quantile of the indexed peaks' ``|q|`` used as the diffraction limit
+        Quantile of the frame's peaks' ``|q|`` used as the diffraction limit
         when neither the second-highest indexed peak nor the falloff crossing is
         available. ``<= 0`` reports no limit. Every reflection is integrated to
         the detector edge whatever the limit, so the merge sets the cutoff.
     resolution_snr_floor : float
         Smallest peak ``I/sigma`` counted by ``resolution_percentile``; ``<= 0``
-        counts every indexed peak, as does a crystal with none above the floor.
+        counts every peak, as does a crystal with none above the floor.
     adu_per_photon : float, optional
         Gain for the shot-noise term of ``sigma(I)``. ``None`` takes the
         measured photon-transfer gain, else the geometry's
@@ -797,9 +796,10 @@ class Indexer:
             ``positions_by_frame``; zeros when omitted.
         weights_by_frame : dict of int -> Tensor, optional
             Per-peak detection posteriors, which weight seeding and refinement.
-        peak_bg_by_frame, peak_npix_by_frame, peak_nmask_by_frame : dict of int -> Tensor, optional
-            Per-peak background sum (ADU), pixel count, and mask-bordering pixel
-            count, carried onto the result for the writers.
+        peak_bg_by_frame, peak_npix_by_frame, peak_nmask_by_frame : dict, optional
+            Per-frame tensors of each peak's background sum (ADU), pixel count,
+            and mask-bordering pixel count, carried onto the result for the
+            writers.
 
         Returns
         -------
@@ -902,7 +902,6 @@ class Indexer:
             self.seed.top_directions,
             self.seed.max_candidates,
         )
-        # Widens the search on frames with few peaks
         if (
             self.seed.adaptive_sparse
             and int(q_seed.shape[0]) < self.seed.sparse_peak_threshold
@@ -1038,7 +1037,6 @@ class Indexer:
         return A_r, hkl_r, indexed_r, n_r, rmsd_r
 
     def _positions_from_frame(self, r: PeakResult) -> tuple[Optional[Tensor], ...]:
-        # Pull kept peak-blob centroids and photometry off a PeakResult
         stats = r.kept_stats
         positions = torch.stack([stats.row_centroid, stats.col_centroid], dim=-1).to(
             device=self.device, dtype=self.dtype
@@ -1115,9 +1113,9 @@ class Indexer:
             ``positions_by_frame``.
         frame_rotations : dict of int -> Tensor, optional
             Per-frame (3, 3) lab-to-crystal rotations.
-        peak_bg_by_frame, peak_npix_by_frame, peak_nmask_by_frame : dict of int -> Tensor, optional
-            Per-peak photometry as for :meth:`index_frames`, removed with the
-            peaks so each lattice keeps its own.
+        peak_bg_by_frame, peak_npix_by_frame, peak_nmask_by_frame : dict, optional
+            Per-frame per-peak photometry as for :meth:`index_frames`, removed
+            with the peaks so each lattice keeps its own.
         maps_by_frame : dict of int -> tuple, optional
             Per-frame ``(excess, var, mask, mean)`` maps. With ``enrich_alpha``,
             each lattice is integrated and gated as it is found; a rejected
@@ -1159,7 +1157,6 @@ class Indexer:
             next_remaining = {}
             for i, result in results.items():
                 previous = output.setdefault(i, [])
-                # Skips a lattice found again, in any setting
                 if any(_same_lattice(r.A, result.A) for r in previous):
                     continue
                 maps = (maps_by_frame or {}).get(i)

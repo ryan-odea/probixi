@@ -21,8 +21,8 @@ if TYPE_CHECKING:
 PathLike = Union[str, Path]
 
 STREAM_VERSION = "CrystFEL stream format 2.3"
-A_INV_TO_NM_INV = 10.0  # 1 A^-1 = 10 nm^-1
-A_TO_NM = 0.1  # 1 A = 0.1 nm
+A_INV_TO_NM_INV = 10.0
+A_TO_NM = 0.1
 DEFAULT_PROFILE_RADIUS_NM_INV = 0.002
 PROFILE_RADIUS_RMSD_FACTOR = 0.6
 PROFILE_RADIUS_MIN_NM_INV = 0.0005
@@ -55,7 +55,6 @@ def _profile_radius_nm_inv(rmsd_a_inv: float) -> float:
 
 
 def _reflection_flags(result) -> tuple:
-    # (n_pixels_total, n_masked, n_overlap) lists, zeros if unrecorded; () if none
     cols = (
         result.predicted_n_pixels_total,
         result.predicted_n_masked,
@@ -243,7 +242,6 @@ class _StreamWriter:
         return self._resolution_nm_inv_many([(row, col)])[0]
 
     def _panel_for(self, fs: float, ss: float) -> str:
-        # Panel containing (fs, ss), else the fallback name
         for name, min_fs, max_fs, min_ss, max_ss in self._panels:
             if min_fs <= fs <= max_fs and min_ss <= ss <= max_ss:
                 return name
@@ -390,7 +388,6 @@ class DataOffloader(_StreamWriter):
         bstar = [A[r][1] * A_INV_TO_NM_INV for r in range(3)]
         cstar = [A[r][2] * A_INV_TO_NM_INV for r in range(3)]
 
-        # Predicted-and-integrated lattice when available, else observed peaks
         if result.predicted_hkl is not None:
             assert (
                 result.predicted_positions is not None
@@ -479,7 +476,7 @@ class DataOffloader(_StreamWriter):
 
 
 def _resolution_line(recip_nm_inv: float) -> str:
-    # CrystFEL "<X> nm^-1 or <Y> A" from 1/d in nm^-1 (d_A = 10 / recip)
+    # CrystFEL prints 1/d in nm^-1 and d in Å
     if recip_nm_inv <= 0.0:
         return "0.000000 nm^-1 or inf A"
     d_angstrom = 10.0 / recip_nm_inv
@@ -489,7 +486,6 @@ def _resolution_line(recip_nm_inv: float) -> str:
 def _panel_bounds(
     panels: Optional[dict],
 ) -> list[tuple[str, int, int, int, int]]:
-    # Flatten panels to (name, min_fs, max_fs, min_ss, max_ss)
     out: list[tuple[str, int, int, int, int]] = []
     if not panels:
         return out

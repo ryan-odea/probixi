@@ -446,7 +446,6 @@ def _read_batches(entries, chosen, lo, hi, strict, decoder_for):
 def iter_gpu_frames(
     loader, chosen, lo, hi, device, dtype, batch_size, prefetch, kernel, strict
 ):
-    # Decoded frames are re-batched to batch_size in input order
     q, stop = queue.Queue(max(1, prefetch)), threading.Event()
     sentinel = object()
     decoders = {}

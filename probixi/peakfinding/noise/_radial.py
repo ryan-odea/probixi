@@ -8,7 +8,7 @@ from .model import NoiseStats
 
 
 class RotationalNoise(NoiseStats):
-    # Radial estimator: annuli of bin_width px about beam_center (row, col)
+    # Annuli of bin_width px about beam_center (row, col)
 
     bin_idx: Tensor
     pixels_per_bin: Tensor

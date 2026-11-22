@@ -102,7 +102,7 @@ class TiledPanelProjector:
                 and mask.is_contiguous()
                 and mask.device == frame.device
             )
-        # Mask counts are reused until either mask is replaced or mutated.
+        # reuse the mask counts until either mask changes
         key = (
             tensor_key(p.valid_mask),
             tensor_key(mask) if mask is not None else None,

@@ -206,7 +206,7 @@ def _split_entry(entry: str) -> tuple[str, Optional[str], Optional[int]]:
 
 
 def _scan_cbf_files(paths: Sequence[str]) -> dict:
-    # Threaded header reads overlap filesystem waits; a failed scan returns its error
+    # Threads overlap the filesystem waits of the header reads
     paths = [path for path in dict.fromkeys(paths) if is_cbf(path)]
 
     def scan(path):
@@ -271,7 +271,7 @@ def _iter_file_frames(info, f_lo, f_hi, pool, window, stop, fast_state):
             dset = node
             decoder = _bshuf_lz4_decoder(dset, info.frame_shape)
             if decoder is not None:
-                # The direct-chunk decoder is checked once per run against h5py
+                # One h5py read per run checks the direct-chunk decoder
                 raw0 = None if fast_state["checked"] else _read_chunk(dset, f_lo)
                 if raw0 is not None:
                     fast_state["ok"] = bool(
@@ -313,7 +313,6 @@ def _read_cbf_raw(path):
 
 
 def _stage(buf, pin):
-    # Pack the data bytes of the CBF entries of buf into one pinned buffer
     raws = [e for e in buf if isinstance(e, tuple)]
     if not raws:
         return buf, None, None
@@ -329,7 +328,6 @@ def _stage(buf, pin):
 
 
 def _device_frames(item, kernel, device, dtype):
-    # Frames of one staged item on the device, in order
     buf, stage, lens = item
     if stage is not None:
         stage = stage.to(device, non_blocking=True)
@@ -366,7 +364,6 @@ def _device_frames(item, kernel, device, dtype):
 
 
 def _iter_cbf(entries, chosen, lo, hi, pool, window, read=read_cbf):
-    # Decoded frames of the selected CBF entries in order, ``window`` files ahead
     paths, offset = [], 0
     for name in chosen:
         info = entries[name]
@@ -506,8 +503,9 @@ def iter_frames(
     Notes
     -----
     On CUDA with Triton and nvCOMP, chunks that hold one whole frame, including
-    whole-frame VDS mappings, are copied compressed and decoded on the device;
-    other layouts are decoded by HDF5. CBF byte-offset data are decoded on the
+    whole-frame VDS mappings, are copied compressed and decoded on the device.
+    CPU threads inflate Deflate chunks, unless one entry mixes filter pipelines.
+    HDF5 decodes other layouts. CBF byte-offset data are decoded on the
     device and other CBF data on the CPU. A selection that includes a CBF file
     reads its HDF5 files without the compressed transfer.
     :func:`probixi.kernels.use_engine` forces a backend.
