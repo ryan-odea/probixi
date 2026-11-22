@@ -91,6 +91,58 @@ def test_photon_energy_path_takes_a_crystfel_unit(tmp_path, unit, stored):
     assert g.to_dict()["wavelength"] == pytest.approx(1.0, rel=1e-6)
 
 
+def test_stacked_file_gives_each_frame_its_photon_energy(tmp_path):
+    from probixi.io.writer import DataOffloader
+    from probixi.probixi import _frame_wavelengths
+
+    geom = _lcls_geom(tmp_path, clen="0.1", photon_energy=ENERGY_PATH + " eV")
+    ev = np.array([9000.0, 9090.0, np.nan, 8910.0])
+    cxi, lst = sim.write_cxi_run(
+        tmp_path, _frames(4, 8, 6), extra_datasets={ENERGY_PATH: ev}
+    )
+    loader = DataLoader(lst, geom)
+    mean = EV_ANGSTROM / 9000.0  # wavelength of the mean of the three readings
+    assert loader.metadata.geometry.wavelength == pytest.approx(mean, rel=1e-6)
+    (info,) = loader.files.values()
+    assert info.photon_energy_eV == pytest.approx(list(ev), nan_ok=True)
+    # the frame without a reading takes the wavelength of the geometry
+    expected = [EV_ANGSTROM / 9000.0, EV_ANGSTROM / 9090.0, mean, EV_ANGSTROM / 8910.0]
+    assert _frame_wavelengths(loader.metadata) == pytest.approx(expected, rel=1e-6)
+    g = loader.metadata.geometry.to_dict()
+    writer = DataOffloader(tmp_path / "x.stream", g, files=loader.files)
+    assert [
+        line
+        for i in range(4)
+        for line in writer._peak_search_lines(i, [], [], 0, "x")
+        if line.startswith("photon_energy_eV")
+    ] == [f"photon_energy_eV = {e:.2f}" for e in (9000.0, 9090.0, 9000.0, 8910.0)]
+
+    # a list of events keeps each frame with its own reading
+    lst.write_text(f"{cxi} //3\n{cxi} //0\n")
+    picked = DataLoader(lst, geom)
+    assert _frame_wavelengths(picked.metadata) == pytest.approx(
+        [EV_ANGSTROM / 8910.0, EV_ANGSTROM / 9000.0], rel=1e-6
+    )
+
+
+def test_energy_dataset_of_another_length_gives_the_mean(tmp_path):
+    from probixi.probixi import _frame_wavelengths
+
+    geom = _lcls_geom(tmp_path, clen="0.1", photon_energy=ENERGY_PATH)
+    _, lst = sim.write_cxi_run(
+        tmp_path,
+        _frames(4, 8, 6),
+        extra_datasets={ENERGY_PATH: np.array([9000.0, 9100.0])},
+    )
+    loader = DataLoader(lst, geom)
+    (info,) = loader.files.values()
+    assert info.photon_energy_eV is None
+    assert _frame_wavelengths(loader.metadata) is None
+    assert loader.metadata.geometry.wavelength == pytest.approx(
+        EV_ANGSTROM / 9050.0, rel=1e-6
+    )
+
+
 def test_clen_already_in_metres_is_not_rescaled(tmp_path):
     # a clen path holding a plausible metre value (|value| <= 2 m) is used as-is
     geom = _lcls_geom(tmp_path, coffset=0.0)

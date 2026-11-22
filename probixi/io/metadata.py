@@ -6,6 +6,7 @@ from typing import Optional, Union
 
 import h5py
 import hdf5plugin  # noqa: F401  (registers bitshuffle)
+import numpy as np
 
 from .assemble import PanelPlacement, assembled_frame_shape, build_placements
 from .cbf import read_cbf_header
@@ -41,8 +42,10 @@ class H5Info:
     events : list[str], optional
         Names that ``%`` stands for, one frame each.
     photon_energy_eV : list[float], optional
-        Per-event photon energies in eV from a ``photon_energy = /%/...`` path,
-        with or without a unit after it.
+        One photon energy per event in eV: from a per-event
+        ``photon_energy = /%/...`` path, or from a dataset that holds one entry
+        per frame of a stacked file. An entry that is not finite marks an event
+        without a reading; it takes the wavelength of the geometry.
     """
 
     filename: str
@@ -178,6 +181,7 @@ def scan_h5(path: PathLike, geometry: Optional[Geometry] = None) -> H5Info:
             frame_shape=(int(raw_shape[1]), int(raw_shape[2])),
             raw_shape=raw_shape,
             placements=None,
+            photon_energy_eV=_stack_energies(path, geometry, int(raw_shape[0])),
         )
 
     placements = build_placements(geometry)
@@ -190,6 +194,7 @@ def scan_h5(path: PathLike, geometry: Optional[Geometry] = None) -> H5Info:
                 frame_shape=(int(raw_shape[1]), int(raw_shape[2])),
                 raw_shape=raw_shape,
                 placements=None,
+                photon_energy_eV=_stack_energies(path, geometry, int(raw_shape[0])),
             )
         raise ValueError(f"could not derive panel layout for {path}")
     n_frames = int(raw_shape[layout.event_axis]) if layout.event_axis is not None else 1
@@ -202,7 +207,25 @@ def scan_h5(path: PathLike, geometry: Optional[Geometry] = None) -> H5Info:
         frame_shape=frame_shape,
         raw_shape=raw_shape,
         placements=placements,
+        photon_energy_eV=_stack_energies(path, geometry, n_frames),
     )
+
+
+def _stack_energies(
+    path: Path, geometry: Geometry, n_frames: int
+) -> Optional[list[float]]:
+    # One energy (eV) per frame of a stacked file; None unless the geometry's
+    # photon_energy names a dataset with exactly one entry per frame
+    energy = geometry.parameters.get("photon_energy")
+    if not isinstance(energy, str) or "%" in energy:
+        return None
+    e_path, to_ev = energy_path(energy)
+    with h5py.File(path, "r") as f:
+        node = f.get(e_path)
+        if not isinstance(node, h5py.Dataset) or node.size != n_frames:
+            return None
+        values = np.asarray(node[()], dtype=np.float64).ravel() * to_ev
+    return [float(v) for v in values]
 
 
 def _scan_events(path: Path, pattern: str, geometry: Geometry) -> H5Info:
