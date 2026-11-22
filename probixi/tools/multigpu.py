@@ -139,7 +139,9 @@ def merge_streams(part_paths: Sequence[PathLike], output_path: PathLike) -> int:
                             out.write(line)
                             if mixed and _INT_RADIUS in line:
                                 for k, v in radii.items():
-                                    out.write(f"probixi part radii {Path(k).name}: {v}\n")
+                                    out.write(
+                                        f"probixi part radii {Path(k).name}: {v}\n"
+                                    )
                         continue
                     if line.startswith(_SERIAL_PREFIX):
                         serial += 1

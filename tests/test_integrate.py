@@ -14,7 +14,6 @@ from probixi.indexer.integrate import (
     falloff_resolution_limit,
     integrate_rings,
     nearest_neighbour_distance,
-    radial_profile,
     radii_from_profile,
     radius_by_shell,
     ring_sums,
@@ -23,6 +22,14 @@ from probixi.indexer.integrate import (
 )
 
 SHAPE = (64, 64)
+
+
+def radial_profile(excess, positions, pixel_valid=None, max_radius=16):
+    # median over peaks of each ring's mean excess, as _learn_integration_radii stacks it
+    if len(positions) == 0:
+        return excess.new_zeros(max_radius + 1)
+    total, counts, _ = ring_sums(excess, positions, pixel_valid, max_radius)
+    return (total / counts.clamp_min(1.0)).median(dim=0).values
 
 
 def _flat_frame(background: float, sigma: float = 0.0):

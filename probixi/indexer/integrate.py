@@ -107,20 +107,6 @@ def ring_sums(
     )
 
 
-@torch.no_grad()
-def radial_profile(
-    excess: Tensor,
-    positions: Tensor,
-    pixel_valid: Tensor | None = None,
-    max_radius: int = 16,
-) -> Tensor:
-    # Median over peaks of each ring's mean excess, (max_radius + 1,)
-    if len(positions) == 0:
-        return excess.new_zeros(max_radius + 1)
-    total, counts, _ = ring_sums(excess, positions, pixel_valid, max_radius)
-    return (total / counts.clamp_min(1.0)).median(dim=0).values
-
-
 def _ring_pixel_counts(max_radius: int, device) -> Tensor:
     off = torch.arange(-max_radius, max_radius + 1, device=device)
     dr, dc = torch.meshgrid(off, off, indexing="ij")

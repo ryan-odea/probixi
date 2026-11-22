@@ -351,9 +351,9 @@ def _looks_like_bad_region(name: str, data: dict) -> bool:
     return any(k.startswith(("min_", "max_")) for k in data)
 
 
-def _parse_mask_bits(value: object, default: int = 0) -> int:
+def _parse_mask_bits(value: object) -> int:
     if value is None:
-        return int(default)
+        return 0
     if isinstance(value, bool):
         return int(value)
     if isinstance(value, int):
@@ -378,8 +378,8 @@ def _build_mask_spec(d: dict) -> Optional[MaskSpec]:
     return MaskSpec(
         mask_file=str(mask_file) if mask_file is not None else None,
         mask_path=str(mask_path) if mask_path is not None else None,
-        mask_good=_parse_mask_bits(d.get("mask_good"), 0),
-        mask_bad=_parse_mask_bits(d.get("mask_bad"), 0),
+        mask_good=_parse_mask_bits(d.get("mask_good")),
+        mask_bad=_parse_mask_bits(d.get("mask_bad")),
     )
 
 

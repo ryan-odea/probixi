@@ -117,7 +117,7 @@ def test_parse_mask_bits_handles_hex_and_int():
     assert _parse_mask_bits("0xFFFFFFFF") == 0xFFFFFFFF
     assert _parse_mask_bits("0x0") == 0
     assert _parse_mask_bits(65535) == 65535
-    assert _parse_mask_bits(None, default=7) == 7
+    assert _parse_mask_bits(None) == 0
 
 
 def test_multipanel_layout_has_fixed_panel_selectors(multipanel_geom_file):

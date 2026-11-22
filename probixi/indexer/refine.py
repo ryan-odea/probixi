@@ -103,14 +103,9 @@ def _B_from_params(p: Tensor) -> Tensor:
     return torch.linalg.inv(M).transpose(-1, -2)
 
 
-def _assign_hkls(
-    A: Tensor, q: Tensor, q_tolerance: float, khat: Optional[Tensor] = None
-) -> tuple[Tensor, Tensor]:
-    # khat (N, 3), when given, drops the residual along the scattered beam from the test
+def _assign_hkls(A: Tensor, q: Tensor, q_tolerance: float) -> tuple[Tensor, Tensor]:
     hkl = torch.round(q @ torch.linalg.inv(A).transpose(-1, -2))
     d = hkl @ A.transpose(-1, -2) - q
-    if khat is not None:
-        d = d - (d * khat).sum(-1, keepdim=True) * khat
     indexed = d.norm(dim=-1) < q_tolerance
     return hkl, indexed
 

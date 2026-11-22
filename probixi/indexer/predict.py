@@ -25,11 +25,9 @@ class PredictedReflections:
         return int(self.hkl.shape[0])
 
 
-def _centering_mask(hkl: Tensor, centering: str | None) -> Tensor:
+def _centering_mask(hkl: Tensor, centering: str) -> Tensor:
     n = hkl.shape[0]
     keep_all = torch.ones(n, dtype=torch.bool, device=hkl.device)
-    if not centering:
-        return keep_all
     c = centering.strip().upper()[:1]
     h = hkl[:, 0].round().to(torch.long)  # noqa: E741
     k = hkl[:, 1].round().to(torch.long)  # noqa: E741

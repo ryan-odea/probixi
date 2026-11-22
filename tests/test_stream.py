@@ -345,8 +345,8 @@ def test_peak_resolution_uses_panel_geometry(tmp_path):
     # mirror pixels are at one scattering angle, so one 1/d
     for ss in range(4):
         for fs in range(4):
-            a = w._resolution_nm_inv(float(ss), float(fs))
-            b = w._resolution_nm_inv(float(ss + 4), float(fs))
+            a = w._resolution_nm_inv_many([(float(ss), float(fs))])[0]
+            b = w._resolution_nm_inv_many([(float(ss + 4), float(fs))])[0]
             assert a == pytest.approx(b, rel=1e-5), f"({ss}, {fs}) vs ({ss + 4}, {fs})"
 
     # and the value is the geometry's: panel 0 (0, 0) sits at lab (+10, -1.5) px
@@ -357,7 +357,7 @@ def test_peak_resolution_uses_panel_geometry(tmp_path):
         * math.sin(0.5 * math.atan2(r_m, float(g["clen"])))
         / (float(g["wavelength"]) * 0.1)
     )
-    assert w._resolution_nm_inv(0.0, 0.0) == pytest.approx(want, rel=1e-5)
+    assert w._resolution_nm_inv_many([(0.0, 0.0)])[0] == pytest.approx(want, rel=1e-5)
 
 
 def test_peak_resolution_is_not_array_radius(tmp_path):
@@ -374,7 +374,9 @@ def test_peak_resolution_is_not_array_radius(tmp_path):
         * math.sin(0.5 * math.atan2(math.hypot(dr, dc), float(g["clen"])))
         / (float(g["wavelength"]) * 0.1)
     )
-    assert w._resolution_nm_inv(row, col) != pytest.approx(array_form, rel=1e-3)
+    assert w._resolution_nm_inv_many([(row, col)])[0] != pytest.approx(
+        array_form, rel=1e-3
+    )
 
 
 def test_resolution_many_matches_scalar(tmp_path):
@@ -382,7 +384,7 @@ def test_resolution_many_matches_scalar(tmp_path):
     w = _writer_for(geom.to_dict())
     pos = [(0.0, 0.0), (2.0, 3.0), (6.0, 1.0)]
     assert w._resolution_nm_inv_many(pos) == pytest.approx(
-        [w._resolution_nm_inv(r, c) for r, c in pos], rel=1e-6
+        [w._resolution_nm_inv_many([(r, c)])[0] for r, c in pos], rel=1e-6
     )
     assert w._resolution_nm_inv_many([]) == []
 

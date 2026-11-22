@@ -26,22 +26,6 @@ def gaussian_kernel_2d(
     return k / k.sum()
 
 
-def gaussian_kernel_1d(
-    size: int,
-    sigma: float,
-    device: Optional[torch.device] = None,
-    dtype: torch.dtype = torch.float32,
-) -> Tensor:
-    # 1D factor of the separable Gaussian; outer(a, a) == gaussian_kernel_2d
-    if size < 1 or size % 2 != 1:
-        raise ValueError("size must be a positive odd integer")
-    if sigma <= 0:
-        raise ValueError("sigma must be > 0")
-    ax = torch.arange(size, dtype=dtype, device=device) - (size - 1) / 2.0
-    g1 = torch.exp(-0.5 * (ax / sigma) ** 2)
-    return g1 / g1.sum()
-
-
 def _separable_1d(kernel: Tensor) -> Tensor:
     # 1D factor of a separable kernel K = outer(a, a): a = K[:, c] / sqrt(K[c, c])
     c = kernel.shape[0] // 2

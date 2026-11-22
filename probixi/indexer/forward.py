@@ -59,15 +59,6 @@ def _panel_tensor(
     return torch.tensor(rows, device=device, dtype=dtype)
 
 
-def _panel_model_bases(
-    geometry: dict, device: Optional[torch.device], dtype: torch.dtype
-) -> Optional[Tensor]:
-    # None without panels or when one lacks fs/ss; callers then use the beam-centre map
-    if not (geometry.get("panels") or {}):
-        return None
-    return _panel_bases(geometry, device, dtype)
-
-
 def _geometry_constants(
     geometry: dict,
     device: Optional[torch.device] = None,
@@ -165,7 +156,7 @@ def detector_to_q(
     device = positions.device
     g = _geometry_constants(geometry, device=device, dtype=dtype)
     pos = positions.to(device=device, dtype=dtype)
-    bases = _panel_model_bases(geometry, device, dtype)
+    bases = _panel_bases(geometry, device, dtype)
 
     kernel = _kernel(pos, dtype)
     if kernel is not None:
@@ -234,7 +225,7 @@ def q_to_detector(
         if R.shape != (3, 3):
             raise ValueError("frame_rotation must be (3, 3)")
         qv = qv @ R.transpose(-1, -2)
-    bases = _panel_model_bases(geometry, device, dtype)
+    bases = _panel_bases(geometry, device, dtype)
     kernel = _kernel(qv, dtype)
     if kernel is not None:
         return kernel.project(qv, bases, g["packed"])

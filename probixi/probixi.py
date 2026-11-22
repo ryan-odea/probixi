@@ -925,18 +925,6 @@ class Probixi:
             )
             self.indexer._resolved_aperture = aperture
             self._aperture_diag = diag
-            # inputs to the aperture choice, kept for offline inspection
-            self._aperture_data = dict(
-                sums=torch.cat(sums).cpu(),
-                squares=torch.cat(sqs).cpu(),
-                counts=torch.cat(cnts).cpu(),
-                q=torch.cat(qs).cpu(),
-                nn_dist=torch.cat(nns).cpu(),
-                frame=torch.cat(frames).cpu(),
-                radii_snr=snr,
-                radii_flux=flux,
-                adu_per_photon=self.indexer._adu_per_photon(),
-            )
             return snr if aperture == "snr" else flux
         return radii_from_profile(profile, snr=aperture != "flux")
 
@@ -1114,7 +1102,6 @@ class Probixi:
             ``var_scale``, ...).
         """
         seed_indices: list[int] = []
-        self.blank_seed_floor = None
         self.n_blank_seeds_dropped = 0
         seed: Union[Sized, Iterable[Tensor]]
         if seed_frames is not None:
@@ -1124,7 +1111,6 @@ class Probixi:
             levels = [self._frame_level(f) for f in self._frames_at(cand)]
             floor = _blank_seed_floor(levels, self.seed_level_frac)
             keep = [i for i, lv in zip(cand, levels) if lv >= floor]
-            self.blank_seed_floor = floor
             self.n_blank_seeds_dropped = len(cand) - len(keep)
             if len(keep) < max(4, n_seed // 4):
                 warnings.warn(

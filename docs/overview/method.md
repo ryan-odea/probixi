@@ -333,7 +333,7 @@ where $r_{\text{size}} = 5\times10^{-5}\ \text{Å}^{-1}$ is the domain-size term
 
 ### 7.1 Learning the aperture
 
-Integration radii are not configured. They are read off the data once, after calibration (`_learn_integration_radii`, `probixi.py`). Peaks from a seeded random sample of frames (more than 32 frames and at least 200 peaks, or 4000 peaks under `--aperture auto`, from at most 512 frames outside the seed set) are stacked into a radial profile of the excess (`radial_profile`, `indexer/integrate.py`): for ring $b = \operatorname{round}\sqrt{\delta r^2 + \delta c^2} \le 16$ around each peak centroid, $\bar E_i(b)$ is the mean excess on that ring and
+Integration radii are not configured. They are read off the data once, after calibration (`_learn_integration_radii`, `probixi.py`). Peaks from a seeded random sample of frames (more than 32 frames and at least 200 peaks, or 4000 peaks under `--aperture auto`, from at most 512 frames outside the seed set) are stacked into a radial profile of the excess (`ring_sums`, `indexer/integrate.py`): for ring $b = \operatorname{round}\sqrt{\delta r^2 + \delta c^2} \le 16$ around each peak centroid, $\bar E_i(b)$ is the mean excess on that ring and
 
 $$
 P(b) = \operatorname{med}_i\,\bar E_i(b), \qquad p(b) = P(b) - \min_b P(b), \qquad b = 0, \dots, 16 .

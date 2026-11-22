@@ -244,16 +244,6 @@ def test_gaussian_kernel_2d_rejects_even_size():
         gaussian_kernel_2d(4, 1.0)
 
 
-def test_gaussian_kernel_1d_is_outer_product_factor():
-    from probixi.peakfinding.peaks.neighborhood import gaussian_kernel_1d
-
-    for size, sigma in [(5, 1.0), (7, 1.4), (15, 2.4)]:
-        a = gaussian_kernel_1d(size, sigma, dtype=torch.float32)
-        k2 = gaussian_kernel_2d(size, sigma, dtype=torch.float32)
-        assert torch.allclose(torch.outer(a, a), k2, atol=1e-6)
-        assert float(a.sum()) == pytest.approx(1.0, abs=1e-6)
-
-
 def test_separable_convs_match_dense_conv2d():
     # separable 1-D passes equal the dense 2-D convolution, reflect-padded corners too
     import torch.nn.functional as F

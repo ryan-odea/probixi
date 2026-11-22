@@ -491,7 +491,9 @@ def main(
             "pixel count of each disk. For TorchSX, write a .db.",
             stacklevel=1,
         )
-    integrate_cfg = IntegrateConfig(aperture=aperture, shell_disk=shell_disk, radii=radii)
+    integrate_cfg = IntegrateConfig(
+        aperture=aperture, shell_disk=shell_disk, radii=radii
+    )
     if device_list is not None and len(device_list) > 1:
         _run_multi_gpu(device_list, opts, refine_cfg, integrate_cfg)
         return

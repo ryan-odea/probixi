@@ -114,7 +114,6 @@ class Decoder:
         self.stride = (frame_bytes + 255) // 256 * 256
         self.options = Options(2)  # CUDA SM backend, available on pre-Blackwell GPUs
         self.align = Alignments(1, 1, 1)
-        self.codec = codec
         self.scratch = None
         self.temp = None
         if codec is not None:

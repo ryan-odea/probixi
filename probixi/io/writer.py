@@ -238,9 +238,6 @@ class _StreamWriter:
         )
         return (torch.linalg.vector_norm(q, dim=-1) * A_INV_TO_NM_INV).tolist()
 
-    def _resolution_nm_inv(self, row: float, col: float) -> float:
-        return self._resolution_nm_inv_many([(row, col)])[0]
-
     def _panel_for(self, fs: float, ss: float) -> str:
         for name, min_fs, max_fs, min_ss, max_ss in self._panels:
             if min_fs <= fs <= max_fs and min_ss <= ss <= max_ss:
