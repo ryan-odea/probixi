@@ -279,7 +279,9 @@ def test_usable_cpus_follows_the_affinity_mask(monkeypatch):
 
     from probixi.tools import multigpu
 
-    monkeypatch.setattr(os, "sched_getaffinity", lambda pid: set(range(6)), raising=False)
+    monkeypatch.setattr(
+        os, "sched_getaffinity", lambda pid: set(range(6)), raising=False
+    )
     monkeypatch.setattr(os, "cpu_count", lambda: 288)
     assert multigpu.usable_cpus() == 6
 

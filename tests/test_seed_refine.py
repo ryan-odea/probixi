@@ -369,8 +369,12 @@ def test_refine_cell_reference_builds_its_jacobian_in_forward_mode(monkeypatch):
         return real(func, inputs, **kw)
 
     monkeypatch.setattr(torch.autograd.functional, "jacobian", spy)
-    target = CellParams(50.0, 60.0, 70.0, *(math.radians(90),) * 3, lattice_type="orthorhombic")
-    truth = CellParams(50.5, 60.6, 70.7, *(math.radians(90),) * 3, lattice_type="orthorhombic")
+    target = CellParams(
+        50.0, 60.0, 70.0, *(math.radians(90),) * 3, lattice_type="orthorhombic"
+    )
+    truth = CellParams(
+        50.5, 60.6, 70.7, *(math.radians(90),) * 3, lattice_type="orthorhombic"
+    )
     with use_engine("reference"):
         out, _ = _refine_from_target(target, truth)
     assert out is not None and seen and set(seen) == {"forward-mode"}

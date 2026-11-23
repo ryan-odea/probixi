@@ -866,7 +866,9 @@ def test_torchsx_mismatch_names_the_version_needed(monkeypatch):
     # a TorchSX from before the pairing
     _fake_torchsx(monkeypatch, supported=None, version="0.2.3")
     message = torchsx_mismatch()
-    assert "TorchSX 0.2.3" in message and f"TorchSX {TORCHSX_VERSION} or later" in message
+    assert (
+        "TorchSX 0.2.3" in message and f"TorchSX {TORCHSX_VERSION} or later" in message
+    )
 
 
 def test_offloader_warns_when_the_installed_torchsx_cannot_read_it(
@@ -896,19 +898,27 @@ def test_installed_torchsx_agrees_with_this_probixi():
     assert version_tuple(probixi.__version__) >= version_tuple(compat.PROBIXI_VERSION)
 
 
-def test_version_is_the_source_trees_and_reaches_the_database(geometry_dict, cell, tmp_path):
+def test_version_is_the_source_trees_and_reaches_the_database(
+    geometry_dict, cell, tmp_path
+):
     import re
     from pathlib import Path
 
     import probixi
 
     pyproject = (Path(__file__).resolve().parents[1] / "pyproject.toml").read_text()
-    assert re.search(r'^version = "([^"]+)"', pyproject, re.M).group(1) == probixi.__version__
+    assert (
+        re.search(r'^version = "([^"]+)"', pyproject, re.M).group(1)
+        == probixi.__version__
+    )
     out = tmp_path / "v.duckdb"
     with DuckDBOffloader(out, geometry_dict, cell=cell, calibration={"gain": 1.0}):
         pass
     conn = duckdb.connect(str(out), read_only=True)
     try:
-        assert conn.execute("SELECT probixi_version FROM calibration").fetchone()[0] == probixi.__version__
+        assert (
+            conn.execute("SELECT probixi_version FROM calibration").fetchone()[0]
+            == probixi.__version__
+        )
     finally:
         conn.close()

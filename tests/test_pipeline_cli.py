@@ -286,7 +286,9 @@ def test_cli_stream_takes_one_disk_and_says_so(tmp_path, run_files, geom_path):
     # a stream header states one disk, so the CLI integrates every reflection with it
     lst_path, _, _ = run_files
     out = tmp_path / "indexed.stream"
-    with pytest.warns(UserWarning, match="Stream output: every reflection is integrated"):
+    with pytest.warns(
+        UserWarning, match="Stream output: every reflection is integrated"
+    ):
         result = _cli_run(out, lst_path, geom_path, "--int-radius", "2.5,4,7.5")
     assert result.exit_code == 0, result.output
     header = out.read_text().split("----- Begin chunk -----")[0]
@@ -309,7 +311,11 @@ def test_shell_disk_off_and_given_radii_fix_the_disk(run_files, geom_path):
     from probixi.indexer import IntegrateConfig
 
     lst_path, _, _ = run_files
-    kw = dict(list_file=str(lst_path), geometry_file=str(geom_path), cell_file=str(CELL_FIXTURE))
+    kw = dict(
+        list_file=str(lst_path),
+        geometry_file=str(geom_path),
+        cell_file=str(CELL_FIXTURE),
+    )
     q = torch.tensor([0.05, 0.2, 0.4])
     grown = (torch.tensor([0.0, 0.1, 0.3, float("inf")]), [2.0, 2.5, 3.5])
 
@@ -326,7 +332,9 @@ def test_shell_disk_off_and_given_radii_fix_the_disk(run_files, geom_path):
     assert fixed.integration_recipe["shell_radii"] is None
     assert fixed.integration_recipe["radii"] == (2.0, 3.0, 6.87)
 
-    given = Probixi(**kw, integrate=IntegrateConfig(shell_disk=False, radii=(3.0, 4.0, 7.0)))
+    given = Probixi(
+        **kw, integrate=IntegrateConfig(shell_disk=False, radii=(3.0, 4.0, 7.0))
+    )
     given.indexer._measured_radii = (2.0, 3.0, 6.87)
     assert given.indexer._reflection_radii(q) == (3.0, 4.0, 7.0)
     assert given.integration_radii == (3.0, 4.0, 7.0)
