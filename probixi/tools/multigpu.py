@@ -227,7 +227,7 @@ class BlockConfig:
     calibration_seed: int = 0
     seed_frames: int = 32
     random_seed: int = 1988
-    target_noise_peaks: Optional[float] = 5.0
+    target_noise_peaks: Union[float, str, None] = 5.0
     noise_mode: str = "online"
     warmup_frames: int = 16
     noise_decay: float = 1.0
@@ -406,7 +406,7 @@ def run_data_parallel(
     recalibrate_every: Optional[int] = None,
     seed_frames: int = 32,
     random_seed: int = 1988,
-    target_noise_peaks: Optional[float] = 5.0,
+    target_noise_peaks: Union[float, str, None] = 5.0,
     noise_mode: str = "online",
     warmup_frames: int = 16,
     noise_decay: float = 1.0,
@@ -445,9 +445,10 @@ def run_data_parallel(
         Frame range of the whole run, start inclusive and stop exclusive.
     seed_frames : int, default 32
         Seed frames for calibration, ``n_seed`` of :meth:`Probixi.calibrate`.
-    target_noise_peaks : float, optional, default 5.0
-        Noise budget of :meth:`Probixi.calibrate`. None skips the threshold
-        calibration and keeps ``mf_threshold``.
+    target_noise_peaks : float, "auto" or None, default 5.0
+        Noise budget of :meth:`Probixi.calibrate`. ``"auto"`` scales the budget
+        with the valid pixels. None skips the threshold calibration and keeps
+        ``mf_threshold``.
     panel : str, default "0"
         Panel name for peaks outside every geometry panel, as for
         :class:`DataOffloader`.

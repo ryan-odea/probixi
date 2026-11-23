@@ -133,3 +133,4 @@ def test_cli_multi_gpu_forwards_every_option(tmp_path, monkeypatch):
     )
     assert res.exit_code == 0, res.output
     assert seen["frame_screen_frac"] == 0.0
+    assert seen["target_noise_peaks"] == "auto"

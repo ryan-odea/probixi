@@ -118,6 +118,8 @@ def _run_multi_gpu(device_list: list, opts: dict, refine, integrate) -> None:
         raise click.UsageError("-o/--output is required for multi-GPU indexing")
     if kw.pop("force_all"):
         kw["frame_screen_frac"] = 0.0
+    if kw["target_noise_peaks"] is None:
+        kw["target_noise_peaks"] = "auto"
     run_data_parallel(
         kw.pop("list_file"),
         kw.pop("geometry_file"),
