@@ -55,7 +55,6 @@ from .peakfinding.noise import (
     background_fluctuation_ratio,
     calibrate_noise,
     calibrate_threshold,
-    fit_eigen_background,
     fit_photon_transfer,
 )
 from .peakfinding.noise.model import value_ok
@@ -1058,7 +1057,6 @@ class Probixi:
         self,
         n_seed: int = 32,
         seed_frames: Optional[Iterable[Tensor]] = None,
-        eigen_modes: int = 0,
         target_noise_peaks: Union[float, str, None] = "auto",
         threshold_opts: Optional[dict] = None,
         **opts,
@@ -1080,8 +1078,6 @@ class Probixi:
         seed_frames : iterable of torch.Tensor, optional
             Calibration frames replacing the random draw; a generator is copied
             into a list first.
-        eigen_modes : int, default 0
-            Low-rank background modes to fit; 0 fits none.
         target_noise_peaks : float, "auto" or None, default "auto"
             Noise budget: expected noise detections per signal-free frame;
             ``"auto"`` is 1.25 per million valid pixels. None keeps
@@ -1130,7 +1126,6 @@ class Probixi:
             )
         self._calibration_options = dict(
             n_seed=n_seed,
-            eigen_modes=eigen_modes,
             target_noise_peaks=target_noise_peaks,
             threshold_opts=threshold_opts,
             **opts,
@@ -1159,8 +1154,6 @@ class Probixi:
             self.finder.flux_variance = self.flux_variance
         if self.flux_variance:
             fit_photon_transfer(self.noise)
-        if eigen_modes > 0:
-            fit_eigen_background(self.noise, seed, n_modes=eigen_modes)
         if target_noise_peaks is not None:
             topts = dict(threshold_opts or {})
             topts.setdefault("flux_variance", self.flux_variance)

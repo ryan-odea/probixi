@@ -169,9 +169,6 @@ class NoiseModel(nn.Module):
     read_var, gain : float or None
         Photon-transfer fit ``var = read_var + gain * level``, set by
         :func:`fit_photon_transfer`.
-    eigen_modes : Tensor or None
-        ``(n_modes, H, W)`` background eigen-images, set by
-        :func:`fit_eigen_background`.
     var_scale : float
         Scale on the per-pixel standard deviation that gives the calibrated
         background unit variance.
@@ -258,7 +255,6 @@ class NoiseModel(nn.Module):
         # None updates every source; pixel always updates (clip and mask read it)
         self.active_update_sources: Optional[set] = None
         self.var_scale: float = 1.0
-        self.eigen_modes: Optional[Tensor] = None
         self.read_var: Optional[float] = None
         self.gain: Optional[float] = None
 

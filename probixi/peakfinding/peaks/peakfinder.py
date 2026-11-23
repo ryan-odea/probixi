@@ -371,30 +371,12 @@ class PeakFinder:
         return cache
 
     @torch.no_grad()
-    def _eigen_correction(
-        self, residual: Tensor, var0: Tensor, modes: Tensor, mask: Tensor
-    ) -> Tensor:
-        # project the clipped residual onto the orthonormal eigen modes
-        cap = 5.0 * var0.sqrt()
-        clipped = torch.minimum(residual, cap) * mask
-        if residual.ndim == 2:
-            coeffs = (modes * clipped).sum(dim=(-2, -1))  # (r,)
-            return torch.einsum("r,rhw->hw", coeffs, modes)
-        coeffs = torch.einsum("rhw,bhw->br", modes, clipped)  # (B, r)
-        return torch.einsum("br,rhw->bhw", coeffs, modes)
-
-    @torch.no_grad()
     def _effective_background(
         self, frame: Tensor, pred: dict[str, Tensor]
     ) -> tuple[Tensor, Tensor]:
-        # Per-frame (mean, var) after the eigen, local-annulus, and flux corrections
+        # Per-frame (mean, var) after the local-annulus and flux corrections
         mean0 = pred["mean"]
         var0 = pred["var"].clamp_min(1e-12)
-        modes = getattr(self.noise, "eigen_modes", None)
-        if modes is not None:
-            mean0 = mean0 + self._eigen_correction(
-                frame - mean0, var0, modes, pred["mask"]
-            )
         gain = self.noise.gain
         read_var = self.noise.read_var
         flux = self.flux_variance and gain is not None
@@ -459,7 +441,6 @@ class PeakFinder:
             and len(self._mf_kernels) == 3
             and [k.shape[0] for k in self._mf_kernels]
             == sorted(k.shape[0] for k in self._mf_kernels)
-            and self.noise.eigen_modes is None
             and min(frame.shape) > self._kernel.shape[-1] // 2
         )
         kernel = select("score", supported)

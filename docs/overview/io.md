@@ -20,7 +20,7 @@ The pixel size comes from `res`. A geometry may set `res` at the top level, per 
 
 ## Frame reading and decompression
 
-Frames are read lazily on a background thread, a few batches ahead of the GPU. On CUDA with the `gpu` extra, bitshuffle-LZ4 datasets chunked one frame per chunk are decompressed on the GPU, and the frames never pass through host memory. Other codecs, and every codec without the extra, are decompressed by CPU threads.
+Frames are read lazily on a background thread, a few batches ahead of the GPU. On CUDA with the `gpu` extra, bitshuffle-LZ4 datasets chunked one frame per chunk are decompressed on the GPU, and the frames never pass through host memory. Other codecs, and every codec without the extra, are decompressed on the CPU.
 
 ## Outputs
 
