@@ -392,3 +392,17 @@ def test_warmup_masks_stuck_pixels_whose_variance_is_only_rounding():
         nm.update(f)
     assert not bool(nm.valid_mask[5, 7])
     assert bool(nm.valid_mask[9, 9]) and bool(nm.valid_mask[0, 0])
+
+
+def test_per_frame_prediction_follows_each_frame():
+    from probixi.peakfinding.peaks.peakfinder import PeakFinder
+
+    shape = (48, 48)
+    nm = NoiseModel(shape, mode="per_frame", dtype=DTYPE)
+    finder = PeakFinder(nm)
+    nm.update(torch.full(shape, 100.0, dtype=DTYPE))
+    first = finder._pred()["mean"].clone()
+    nm.update(torch.full(shape, 300.0, dtype=DTYPE))
+    second = finder._pred()["mean"]
+    assert float(first.mean()) == pytest.approx(100.0, rel=1e-4)
+    assert float(second.mean()) == pytest.approx(300.0, rel=1e-4)

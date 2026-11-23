@@ -250,6 +250,7 @@ class NoiseModel(nn.Module):
         self._mask_committed = False
         # frames seen; version bumped whenever valid_mask changes
         self._n_host = 0
+        self._n_updates = 0
         self._mask_version = 0
         self.calibrated_weights: Optional[dict[str, float]] = None
         # None updates every source; pixel always updates (clip and mask read it)
@@ -313,6 +314,7 @@ class NoiseModel(nn.Module):
         if active is None or "panel" in active:
             self.panel.update(frame_for_stats, mask=feed_mask)
         self._n_host += 1
+        self._n_updates += 1
         n = self._n_host
         if (
             self.mode == "online"

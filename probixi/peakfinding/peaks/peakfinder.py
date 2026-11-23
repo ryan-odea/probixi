@@ -346,7 +346,7 @@ class PeakFinder:
 
     def _pred(self) -> dict[str, Tensor]:
         # prediction cached per model update
-        key = self.noise._n_host
+        key = self.noise._n_updates
         cache = self._pred_cache
         if self._pred_key != key or cache is None:
             cache = self.noise.predict(combination=self.combination)
