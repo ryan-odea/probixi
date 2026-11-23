@@ -120,6 +120,7 @@ def test_calibrate_returns_result_and_sets_threshold_calibration(run_files, geom
     assert 0.0 < result.prior_peak < 1.0
     assert result.var_scale > 0.0
     assert isinstance(px.threshold_calibration, ThresholdCalibration)
+    assert px.calibration_summary["cell"][3:] == pytest.approx((90, 90, 120), abs=1)
     # calibrating installs the learned matched-filter threshold on the finder
     assert px.finder.mf_threshold == pytest.approx(px.threshold_calibration.threshold)
 

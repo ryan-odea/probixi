@@ -457,7 +457,12 @@ class Probixi:
             cell=(
                 None
                 if cell is None
-                else (cell.a, cell.b, cell.c, cell.alpha, cell.beta, cell.gamma)
+                else (
+                    cell.a,
+                    cell.b,
+                    cell.c,
+                    *(math.degrees(x) for x in (cell.alpha, cell.beta, cell.gamma)),
+                )
             ),
         )
 
