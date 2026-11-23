@@ -107,8 +107,6 @@ class IndexResult:
         (N,) integrated peak intensity (ADU), aligned with ``positions``.
     sigmas : Tensor
         (N,) 1-sigma uncertainty on each intensity.
-    loss_history : Tensor
-        Per-iteration refinement loss summed over the batch (excluded from repr).
     predicted_hkl : Tensor, optional
         (M, 3) Miller indices of all reflections predicted to diffract on this
         frame, or None if prediction/integration was not run.
@@ -191,7 +189,6 @@ class IndexResult:
     positions: Tensor
     intensities: Tensor
     sigmas: Tensor
-    loss_history: Tensor = field(repr=False)
     predicted_hkl: Optional[Tensor] = None
     predicted_positions: Optional[Tensor] = None
     predicted_intensities: Optional[Tensor] = None
@@ -855,7 +852,6 @@ class Indexer:
             lr=self.refine.lr,
             max_iters=self.refine.max_iters,
             reassign_every=self.refine.reassign_every,
-            min_indexed=self.refine.min_indexed,
             weights_per_frame=[s[4] for s in seeded] if has_weights else None,
         )
 
@@ -992,7 +988,6 @@ class Indexer:
                 positions=positions,
                 intensities=intensities,
                 sigmas=sigmas,
-                loss_history=result.history,
                 peak_background_sum=peak_bg,
                 peak_n_pixels=peak_npix,
                 peak_n_masked=peak_nmask,

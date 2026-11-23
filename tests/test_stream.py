@@ -48,7 +48,6 @@ def _make_index_result(cell) -> IndexResult:
         positions=positions,
         intensities=intensities,
         sigmas=sigmas,
-        loss_history=torch.zeros(1, dtype=torch.float32),
         scale=None,
     )
 
@@ -442,7 +441,7 @@ def test_crystal_writes_the_stream_limit_without_the_falloff_diagnostic(
     out = tmp_path / "indexed.stream"
     result = _with_prediction(_make_index_result(cell))
     result.diffraction_limit = 3.2  # highest indexed peak, nm^-1
-    result.falloff_limit = 2.5  # I/sigma crossing: database only
+    result.falloff_limit = 2.5  # I/sigma crossing: an attribute only, never written
     with DataOffloader(out, geometry=geometry_dict, cell=cell) as off:
         off.write(result)
     crystal = _section(

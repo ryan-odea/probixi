@@ -6,7 +6,6 @@ import torch
 from torch import Tensor, nn
 
 from ...kernels import select
-from ._drift import DriftDiagnostics
 
 #: ADU^2; warmup variance <= this marks a dead pixel (stuck ~1e-13, live >= ~0.01)
 DEAD_PIXEL_VAR = 1e-5
@@ -153,8 +152,6 @@ class NoiseModel(nn.Module):
     warmup_frames : int
         Frames before the dead-pixel mask is committed and the ``shrinkage`` blend
         reaches the pixel mean.
-    drift_log_every : int
-        Frames between drift records.
     robust_update : bool
         Clip each frame from above before it updates the statistics; online mode only.
     robust_k : float
@@ -187,7 +184,6 @@ class NoiseModel(nn.Module):
         :meth:`CalibrationResult.apply`.
     """
 
-    n_frames: Tensor
     valid_mask: Tensor
     static_mask: Tensor
 
@@ -201,7 +197,6 @@ class NoiseModel(nn.Module):
         radial_bin_width: float = 2.0,
         panels: Optional[PanelSpec] = None,
         warmup_frames: int = 16,
-        drift_log_every: int = 1,
         robust_update: bool = True,
         robust_k: float = 5.0,
         robust_min_frames: int = 4,
@@ -215,8 +210,8 @@ class NoiseModel(nn.Module):
             raise ValueError("mode must be 'online' or 'per_frame'")
         if not 0.0 < decay <= 1.0:
             raise ValueError("decay must be in (0, 1]")
-        if warmup_frames < 1 or drift_log_every < 1:
-            raise ValueError("warmup_frames and drift_log_every must be >= 1")
+        if warmup_frames < 1:
+            raise ValueError("warmup_frames must be >= 1")
         if robust_k <= 0:
             raise ValueError("robust_k must be > 0")
 
@@ -224,7 +219,6 @@ class NoiseModel(nn.Module):
         self.mode = mode
         self.decay = float(decay)
         self.warmup_frames = int(warmup_frames)
-        self.drift_log_every = int(drift_log_every)
         self.robust_update = bool(robust_update)
         self.robust_k = float(robust_k)
         self.robust_min_frames = int(robust_min_frames)
@@ -252,9 +246,6 @@ class NoiseModel(nn.Module):
             dtype=dtype,
         )
 
-        self.register_buffer(
-            "n_frames", torch.zeros((), dtype=torch.long, device=device)
-        )
         # static mask keeps bad pixels out of the radial and panel means from frame 1
         if valid_mask is not None:
             static = valid_mask.to(dtype=torch.bool, device=device)
@@ -268,16 +259,12 @@ class NoiseModel(nn.Module):
         self.register_buffer("static_mask", static.clone())
         self.register_buffer("valid_mask", static.clone())
 
-        self.drift = DriftDiagnostics()
-        self.record_drift = True
-        self._prev_mean: Optional[Tensor] = None
-        self._prev_var: Optional[Tensor] = None
         self._mask_committed = False
-        # host mirror of n_frames; version bumped whenever valid_mask changes
+        # frames seen; version bumped whenever valid_mask changes
         self._n_host = 0
         self._mask_version = 0
         self.calibrated_weights: Optional[dict[str, float]] = None
-        # None updates every source; pixel always updates (clip, mask, drift read it)
+        # None updates every source; pixel always updates (clip and mask read it)
         self.active_update_sources: Optional[set] = None
         self.var_scale: float = 1.0
         self.eigen_modes: Optional[Tensor] = None
@@ -338,7 +325,6 @@ class NoiseModel(nn.Module):
             self.rotational.update(frame_for_stats, mask=feed_mask)
         if active is None or "panel" in active:
             self.panel.update(frame_for_stats, mask=feed_mask)
-        self.n_frames += 1
         self._n_host += 1
         n = self._n_host
         if (
@@ -347,12 +333,6 @@ class NoiseModel(nn.Module):
             and n >= self.warmup_frames
         ):
             self._commit_mask()
-        if (
-            self.record_drift
-            and self.mode == "online"
-            and n % self.drift_log_every == 0
-        ):
-            self._record_drift(n)
 
     def set_active_update_sources(self, sources: Optional[Iterable[str]]) -> None:
         """Update only ``sources`` plus ``pixel`` per frame; ``None`` updates all."""
@@ -515,20 +495,15 @@ class NoiseModel(nn.Module):
         self.pixel.reset()
         self.rotational.reset()
         self.panel.reset()
-        self.n_frames.zero_()
         self._n_host = 0
         self.valid_mask.copy_(self.static_mask)
         self._mask_version += 1
-        self.drift = DriftDiagnostics()
-        self._prev_mean = None
-        self._prev_var = None
         self._mask_committed = False
 
     def _soft_reset(self) -> None:
         self.pixel.reset()
         self.rotational.reset()
         self.panel.reset()
-        self.n_frames.zero_()
         self._n_host = 0
 
     @torch.no_grad()
@@ -537,44 +512,6 @@ class NoiseModel(nn.Module):
         self.valid_mask.copy_(self.pixel.valid_mask & self.static_mask)
         self._mask_version += 1
         self._mask_committed = True
-
-    @torch.no_grad()
-    def _record_drift(self, step: int) -> None:
-        mean = self.pixel.mean()
-        var = self.pixel.var().clamp_min(1e-12)
-        n_masked_t = (~self.valid_mask).sum()
-        if self._prev_mean is None or self._prev_var is None:
-            zero = mean.new_zeros(())
-            mean_shift = var_ratio = kl = zero
-        else:
-            prev_mean, prev_var = self._prev_mean, self._prev_var.clamp_min(1e-12)
-            valid = self.valid_mask
-            denom = valid.sum().clamp_min(1).to(mean.dtype)
-            mean_shift = (((mean - prev_mean).abs()) * valid).sum() / denom
-            var_ratio = (torch.log(var / prev_var) * valid).sum() / denom
-            # per-pixel KL(N(mu, s^2) || N(mu_p, s_p^2)), averaged over valid pixels
-            kl_map = 0.5 * (
-                torch.log(prev_var / var)
-                + (var + (mean - prev_mean) ** 2) / prev_var
-                - 1.0
-            )
-            kl = (kl_map * valid).sum() / denom
-
-        ms, vr, klv, nm = (
-            torch.stack([mean_shift, var_ratio, kl, n_masked_t.to(mean_shift.dtype)])
-            .cpu()
-            .tolist()
-        )
-        self.drift.step.append(step)
-        self.drift.mean_shift.append(ms)
-        self.drift.var_ratio_log.append(vr)
-        self.drift.kl_gaussian.append(klv)
-        self.drift.effective_n.append(
-            float(step) if self.decay == 1.0 else 1.0 / self.decay
-        )
-        self.drift.n_masked.append(int(nm))
-        self._prev_mean = mean.detach().clone()
-        self._prev_var = var.detach().clone()
 
     def _coerce(self, frame: Tensor) -> Tensor:
         if not isinstance(frame, Tensor):

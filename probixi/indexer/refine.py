@@ -21,7 +21,6 @@ class RefineResult:
     soft_score: Tensor
     indexed: Tensor
     hkl: Tensor
-    history: Tensor
 
 
 def _axis_angle_to_rotation(omega: Tensor) -> Tensor:
@@ -288,7 +287,6 @@ def _empty_refine_result(device, dtype) -> RefineResult:
         soft_score=torch.zeros(0, dtype=dtype, device=device),
         indexed=torch.zeros(0, 0, dtype=torch.bool, device=device),
         hkl=torch.zeros(0, 0, 3, dtype=torch.long, device=device),
-        history=torch.zeros(0, dtype=torch.float32),
     )
 
 
@@ -299,7 +297,6 @@ def refine_multiframe_known_B(
     lr: float = 1e-3,
     max_iters: int = 200,
     reassign_every: int = 10,
-    min_indexed: int = 6,
     weights_per_frame: Optional[list[Optional[Tensor]]] = None,
 ) -> list[RefineResult]:
     # Pads to (F, K_max) candidates and (F, N_max) peaks for one batched Adam run
@@ -331,7 +328,6 @@ def refine_multiframe_known_B(
             lr=lr,
             max_iters=max_iters,
             reassign_every=reassign_every,
-            min_indexed=min_indexed,
             weights_per_frame=weights_per_frame,
         )
     use_soft = weights_per_frame is not None
@@ -368,7 +364,6 @@ def refine_multiframe_known_B(
     omega = torch.zeros(F, K_max, 3, dtype=dtype, device=device, requires_grad=True)
     optim = torch.optim.Adam([omega], lr=lr)
 
-    history: list[float] = []
     with torch.no_grad():
         hkl, indexed = _assign_hkls_padded(
             A_anchor,
@@ -403,13 +398,7 @@ def refine_multiframe_known_B(
         # Weights each inlier residual by its detection posterior c_i
         wmask = mask * w_pad.unsqueeze(1) if use_soft else mask
         per_w = wmask.sum(dim=-1).clamp_min(1.0)
-        per_loss = (sq * wmask).sum(dim=-1) / per_w
-        # degen is constant in omega: it marks the loss history, not the gradient
-        degen = (mask.sum(dim=-1) < min_indexed).to(dtype)
-        per_loss = (per_loss + degen) * cand_mask_f
-        loss = per_loss.sum()
-        loss_val = float(loss.detach().item())
-        history.append(loss_val)
+        loss = ((sq * wmask).sum(dim=-1) / per_w * cand_mask_f).sum()
 
         optim.zero_grad(set_to_none=True)
         loss.backward()
@@ -436,7 +425,6 @@ def refine_multiframe_known_B(
         else:
             soft_score = n_indexed.to(dtype)
 
-    history_tensor = torch.tensor(history, dtype=torch.float32)
     results: list[RefineResult] = []
     for f in range(F):
         K_f, N_f = K_per[f], N_per[f]
@@ -448,7 +436,6 @@ def refine_multiframe_known_B(
                 soft_score=soft_score[f, :K_f],
                 indexed=indexed[f, :K_f, :N_f],
                 hkl=hkl[f, :K_f, :N_f],
-                history=history_tensor,
             )
         )
     return results

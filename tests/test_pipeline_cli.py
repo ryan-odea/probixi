@@ -620,11 +620,17 @@ def test_blank_screen_withholds_only_empty_frames(tmp_path, geom_path):
     assert px.screened_frames == [len(frames) - 1]
 
 
-def test_zero_frames_are_dropped_from_the_seed_draw(tmp_path, geom_path):
+def test_zero_frames_are_dropped_from_the_seed_draw(tmp_path, geom_path, monkeypatch):
+    import probixi.probixi as pipeline
+
     rng = np.random.default_rng(8)
     frames = rng.poisson(0.7, size=(N_NOISE + 8, DET, DET)).astype(np.float32)
     frames[:3] = 0.0
     _, lst = sim.write_run(tmp_path / "zeros", frames)
     px = _build_pipeline(lst, geom_path)
+    draws, source = [], pipeline._FrameSource
+    monkeypatch.setattr(
+        pipeline, "_FrameSource", lambda p, idx: draws.append(list(idx)) or source(p, idx)
+    )
     px.calibrate(n_seed=len(frames) - 3, target_noise_peaks=5.0)
-    assert px.n_blank_seeds_dropped == 3
+    assert sorted(draws[0]) == list(range(3, len(frames)))

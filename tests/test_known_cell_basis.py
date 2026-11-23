@@ -44,7 +44,6 @@ def test_known_cell_candidate_preserves_basis(geometry_dict, device, angles):
         soft_score=A.new_tensor([6]),
         indexed=torch.ones((1, 6), dtype=torch.bool, device=device),
         hkl=hkl[None],
-        history=A.new_zeros(1),
     )
     r = idx._build_indexing_result(
         rr, frame_index=0, n_peaks=6, positions=A.new_zeros((6, 2))

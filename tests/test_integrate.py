@@ -225,7 +225,6 @@ def _result(cell, positions: torch.Tensor, keep: torch.Tensor) -> IndexResult:
         positions=positions,
         intensities=torch.ones(n),
         sigmas=torch.ones(n),
-        loss_history=torch.zeros(1),
     )
     r.predicted_hkl = torch.zeros((int(keep.sum()), 3))
     r.predicted_positions = positions[keep]

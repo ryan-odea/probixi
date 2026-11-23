@@ -13,23 +13,17 @@ _COORD_CACHE: dict = {}
 
 def _coord_grids(
     H: int, W: int, device: torch.device, dtype: torch.dtype
-) -> tuple[Tensor, Tensor, Tensor, Tensor]:
+) -> tuple[Tensor, Tensor]:
     key = (H, W, device, dtype)
     got = _COORD_CACHE.get(key)
     if got is None:
         flat_rows = (
-            torch.arange(H, device=device, dtype=torch.long)
-            .view(-1, 1)
-            .expand(H, W)
-            .flatten()
+            torch.arange(H, device=device, dtype=dtype).view(-1, 1).expand(H, W)
         )
         flat_cols = (
-            torch.arange(W, device=device, dtype=torch.long)
-            .view(1, -1)
-            .expand(H, W)
-            .flatten()
+            torch.arange(W, device=device, dtype=dtype).view(1, -1).expand(H, W)
         )
-        got = (flat_rows, flat_cols, flat_rows.to(dtype), flat_cols.to(dtype))
+        got = (flat_rows.flatten(), flat_cols.flatten())
         _COORD_CACHE[key] = got
     return got
 
@@ -243,7 +237,7 @@ def compute_blob_stats(
     )
     w = flat_excess.clamp_min(0)
 
-    _, _, grid_rows_f, grid_cols_f = _coord_grids(H, W, device, dtype)
+    grid_rows_f, grid_cols_f = _coord_grids(H, W, device, dtype)
     rows = grid_rows_f[fg]
     cols = grid_cols_f[fg]
 

@@ -14,11 +14,10 @@ from .rocking import rocking_radius
 
 @dataclass
 class PredictedReflections:
-    # One frame: hkl (M, 3), (row, col) (M, 2), q = A @ hkl, |S| - 1, and |q| in A^-1
+    # One frame: hkl (M, 3), (row, col) (M, 2), q = A @ hkl, and |q| in A^-1
     hkl: Tensor
     positions: Tensor
     q: Tensor
-    excitation_error: Tensor
     resolution: Tensor
 
     def __len__(self) -> int:
@@ -113,11 +112,10 @@ def predict_reflections(
     else:
         keep = (qn <= q_max) & (Sz > 0) & (eps.abs() < partiality_threshold)
     keep = torch.where(keep)[0]
-    hkl, q, qn, eps = hkl[keep], q[keep], qn[keep], eps[keep]
+    hkl, q, qn = hkl[keep], q[keep], qn[keep]
     if hkl.shape[0] == 0:
-        empty = q.new_empty(0)
         return PredictedReflections(
-            hkl.to(torch.long), q.new_empty(0, 2), q, empty, empty
+            hkl.to(torch.long), q.new_empty(0, 2), q, q.new_empty(0)
         )
 
     positions = q_to_detector(q, geometry, dtype=dtype)
@@ -130,19 +128,12 @@ def predict_reflections(
             & (cols <= frame_shape[1] - 1)
         )
         on = torch.where(on)[0]
-        hkl, positions, q, qn, eps = (
-            hkl[on],
-            positions[on],
-            q[on],
-            qn[on],
-            eps[on],
-        )
+        hkl, positions, q, qn = hkl[on], positions[on], q[on], qn[on]
 
     return PredictedReflections(
         hkl=hkl.to(torch.long),
         positions=positions,
         q=q,
-        excitation_error=eps,
         resolution=qn,
     )
 

@@ -44,7 +44,6 @@ def _make_index_result(cell, frame_index: int = 0) -> IndexResult:
         positions=positions,
         intensities=intensities,
         sigmas=sigmas,
-        loss_history=torch.zeros(1, dtype=torch.float32),
         scale=0.97,
         scale_sigma=0.01,
     )

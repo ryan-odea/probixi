@@ -30,8 +30,6 @@ class H5Info:
         Frames this entry selects.
     frame_shape : tuple[int, ...]
         Assembled frame shape ``(ss, fs)`` in data space.
-    raw_shape : tuple[int, ...]
-        Shape of the stored array before assembly.
     placements : list[PanelPlacement], optional
         Panel placements when frames are assembled from the stored array;
         ``None`` for a plain ``(N, ss, fs)`` stack, which is read by slicing.
@@ -52,7 +50,6 @@ class H5Info:
     dataset: str
     n_frames: int
     frame_shape: tuple[int, ...]
-    raw_shape: tuple[int, ...] = ()
     placements: Optional[list[PanelPlacement]] = None
     event_start: int = 0
     source_n_frames: Optional[int] = None
@@ -70,8 +67,6 @@ class CbfInfo:
         ``.cbf``, ``.cbf.gz`` or ``.cbf.bz2`` file.
     frame_shape : tuple[int, ...]
         Image shape ``(ss, fs)``.
-    dtype : str
-        Decoded pixel type, for example ``"int32"``.
     n_frames : int, default 1
         Always 1.
     event_start : int, default 0
@@ -83,7 +78,6 @@ class CbfInfo:
 
     filename: str
     frame_shape: tuple[int, ...]
-    dtype: str
     n_frames: int = 1
     event_start: int = 0
     source_n_frames: Optional[int] = None
@@ -111,8 +105,6 @@ class Metadata:
         Distinct source files.
     n_frames : int
         Frames over all entries.
-    entry_point : int, optional
-        Starting frame offset; :class:`DataLoader` does not set it.
     """
 
     files: dict = field(default_factory=dict)
@@ -121,7 +113,6 @@ class Metadata:
     frame_size: Optional[tuple] = None
     n_files: int = 0
     n_frames: int = 0
-    entry_point: Optional[int] = None
 
     @property
     def distance(self) -> Optional[float]:
@@ -134,7 +125,6 @@ def scan_cbf(path: PathLike) -> CbfInfo:
     return CbfInfo(
         filename=str(Path(path)),
         frame_shape=header.shape,
-        dtype=header.dtype.name,
     )
 
 
@@ -153,7 +143,6 @@ def scan_h5(path: PathLike, geometry: Optional[Geometry] = None) -> H5Info:
             dataset=dataset_path,
             n_frames=int(shape[0]),
             frame_shape=tuple(shape[1:]),
-            raw_shape=tuple(shape),
             placements=None,
         )
 
@@ -179,7 +168,6 @@ def scan_h5(path: PathLike, geometry: Optional[Geometry] = None) -> H5Info:
             dataset=str(layout.data_path),
             n_frames=int(raw_shape[0]),
             frame_shape=(int(raw_shape[1]), int(raw_shape[2])),
-            raw_shape=raw_shape,
             placements=None,
             photon_energy_eV=_stack_energies(path, geometry, int(raw_shape[0])),
         )
@@ -192,7 +180,6 @@ def scan_h5(path: PathLike, geometry: Optional[Geometry] = None) -> H5Info:
                 dataset=str(layout.data_path),
                 n_frames=int(raw_shape[0]),
                 frame_shape=(int(raw_shape[1]), int(raw_shape[2])),
-                raw_shape=raw_shape,
                 placements=None,
                 photon_energy_eV=_stack_energies(path, geometry, int(raw_shape[0])),
             )
@@ -205,7 +192,6 @@ def scan_h5(path: PathLike, geometry: Optional[Geometry] = None) -> H5Info:
         dataset=str(layout.data_path),
         n_frames=n_frames,
         frame_shape=frame_shape,
-        raw_shape=raw_shape,
         placements=placements,
         photon_energy_eV=_stack_energies(path, geometry, n_frames),
     )
@@ -245,7 +231,6 @@ def _scan_events(path: Path, pattern: str, geometry: Geometry) -> H5Info:
         dataset=pattern,
         n_frames=len(events),
         frame_shape=shape,
-        raw_shape=shape,
         events=events,
         photon_energy_eV=energies,
     )

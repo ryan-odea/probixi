@@ -32,7 +32,6 @@ EV_ANGSTROM = 12398.419843320026  # hc in eV Å
 _CLEN_MM_THRESHOLD_M = 2.0  # an HDF5 clen above this is in mm
 _ENERGY_UNITS = {"eV": 1.0, "keV": 1e3}  # the first is the unit of a bare value
 
-DETECTOR_KEYS = ("detector", "detector_type", "type")
 FLAG_KEYS = ("flag_lessthan", "flag_morethan", "flag_equal")
 PANEL_REQUIRED = {"min_fs", "max_fs", "min_ss", "max_ss", "corner_x", "corner_y"}
 MASK_REQUIRED = {"min_fs", "max_fs", "min_ss", "max_ss"}
@@ -97,8 +96,6 @@ class Geometry:
     bad_regions : list[BadRegion]
         Masked regions, in data space (``min_fs`` ...) or the lab frame
         (``min_x`` ...).
-    detector_type : str, optional
-        Declared detector type.
     distance : float, optional
         Detector distance in m, ``clen`` plus the mean ``coffset``. ``None`` until
         an HDF5-path ``clen`` is read from the data.
@@ -122,8 +119,8 @@ class Geometry:
         Top-level ``mask``, ``mask_file``, ``mask_good`` and ``mask_bad``, or
         their CrystFEL 0.10 names ``mask0_data``, ``mask0_file``,
         ``mask0_goodbits`` and ``mask0_badbits``.
-    panel_layouts, panel_masks : dict
-        Per-panel overrides of ``data_layout`` and ``mask_spec``.
+    panel_layouts : dict
+        Per-panel overrides of ``data_layout``. A per-panel mask is not read.
     panel_flags : dict, optional
         Per panel, the ``flag_lessthan``, ``flag_morethan`` and ``flag_equal``
         entries as ``(key, value)`` in file order, with integer values as in
@@ -134,7 +131,6 @@ class Geometry:
     parameters: dict
     panels: dict[str, dict]
     bad_regions: list[BadRegion] = field(default_factory=list)
-    detector_type: Optional[str] = None
     distance: Optional[float] = None
     beam_center: Optional[tuple[float, float]] = None
     wavelength: Optional[float] = None
@@ -143,7 +139,6 @@ class Geometry:
     data_layout: Optional["DataLayout"] = None
     mask_spec: Optional["MaskSpec"] = None
     panel_layouts: dict[str, "DataLayout"] = field(default_factory=dict)
-    panel_masks: dict[str, "MaskSpec"] = field(default_factory=dict)
     panel_flags: Optional[dict[str, list[tuple[str, int]]]] = None
 
     def to_dict(self) -> dict:
@@ -266,16 +261,12 @@ def read_geometry(path: PathLike) -> Geometry:
     if extra:
         warnings.warn(f"only mask0 is read; ignoring {', '.join(extra)}")
     mask_spec = _build_mask_spec(parameters)
-    panel_layouts, panel_masks = _panel_overrides(per_name, panels, parameters, dim_map)
+    panel_layouts = _panel_overrides(per_name, panels, parameters, dim_map)
 
     return Geometry(
         parameters=parameters,
         panels=panels,
         bad_regions=bad_regions,
-        detector_type=next(
-            (parameters[k] for k in DETECTOR_KEYS if k in parameters),
-            None,
-        ),
         distance=distance,
         beam_center=_beam_center(panels),
         wavelength=_wavelength(parameters),
@@ -284,7 +275,6 @@ def read_geometry(path: PathLike) -> Geometry:
         data_layout=data_layout,
         mask_spec=mask_spec,
         panel_layouts=panel_layouts,
-        panel_masks=panel_masks,
         panel_flags={k: v for k, v in panel_flags.items() if v} or None,
     )
 
@@ -388,9 +378,9 @@ def _panel_overrides(
     panels: dict[str, dict],
     parameters: dict,
     dim_map: dict[int, object],
-) -> tuple[dict[str, DataLayout], dict[str, MaskSpec]]:
+) -> dict[str, DataLayout]:
     layouts: dict[str, DataLayout] = {}
-    masks: dict[str, MaskSpec] = {}
+    masked = []
     for name in panels:
         pdict = per_name.get(name, {})
         pdims = _collect_dims(pdict)
@@ -400,13 +390,11 @@ def _panel_overrides(
             )
             if layout is not None:
                 layouts[name] = layout
-        pmask, top = _with_mask_aliases(pdict), _with_mask_aliases(parameters)
-        if any(k in pmask for k in _MASK_KEYS):
-            merged = {k: pmask.get(k, top.get(k)) for k in _MASK_KEYS}
-            spec = _build_mask_spec(merged)
-            if spec is not None:
-                masks[name] = spec
-    return layouts, masks
+        if any(k in _with_mask_aliases(pdict) for k in _MASK_KEYS):
+            masked.append(name)
+    if masked:
+        warnings.warn(f"per-panel masks are not read; ignoring those of {', '.join(masked)}")
+    return layouts
 
 
 def _with_unit(value, units: dict[str, float]) -> Optional[float]:

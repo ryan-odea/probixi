@@ -1102,7 +1102,6 @@ class Probixi:
             ``var_scale``, ...).
         """
         seed_indices: list[int] = []
-        self.n_blank_seeds_dropped = 0
         seed: Union[Sized, Iterable[Tensor]]
         if seed_frames is not None:
             seed = seed_frames if isinstance(seed_frames, Sized) else list(seed_frames)
@@ -1111,7 +1110,6 @@ class Probixi:
             levels = [self._frame_level(f) for f in self._frames_at(cand)]
             floor = _blank_seed_floor(levels, self.seed_level_frac)
             keep = [i for i, lv in zip(cand, levels) if lv >= floor]
-            self.n_blank_seeds_dropped = len(cand) - len(keep)
             if len(keep) < max(4, n_seed // 4):
                 warnings.warn(
                     f"calibration: only {len(keep)} of {len(cand)} seed "
@@ -1120,7 +1118,6 @@ class Probixi:
                     stacklevel=2,
                 )
                 keep = cand
-                self.n_blank_seeds_dropped = 0
             seed_indices = keep[:n_seed]
             seed = _FrameSource(self, seed_indices)
         else:
@@ -1309,7 +1306,6 @@ class Probixi:
             offset = 0
             for item in frames:
                 self._ensure_built(item)
-                self.noise.record_drift = False
                 blank = (
                     update_noise
                     and floor is not None

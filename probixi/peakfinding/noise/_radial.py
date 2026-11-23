@@ -12,7 +12,6 @@ class RotationalNoise(NoiseStats):
 
     bin_idx: Tensor
     pixels_per_bin: Tensor
-    valid_mask: Tensor
 
     def __init__(
         self,
@@ -55,21 +54,12 @@ class RotationalNoise(NoiseStats):
 
         bin_idx = torch.floor(radius / self.bin_width).long().clamp_min(0)
         n_bins = int(bin_idx.max().item()) + 1
-        self.n_bins = n_bins
 
         super().__init__((n_bins,), mode, decay, device, dtype)
 
         pixels_per_bin = torch.bincount(bin_idx.flatten(), minlength=n_bins).to(dtype)
         self.register_buffer("bin_idx", bin_idx)
         self.register_buffer("pixels_per_bin", pixels_per_bin)
-        self.register_buffer(
-            "valid_mask",
-            torch.ones(self.frame_size, dtype=torch.bool, device=device),
-        )
-
-    def reset(self) -> None:
-        super().reset()
-        self.valid_mask.fill_(True)
 
     def _project(self, frame: Tensor, mask: Optional[Tensor]) -> Tensor:
         # Observation per bin: the mean of its valid pixels
