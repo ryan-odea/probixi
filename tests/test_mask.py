@@ -221,6 +221,31 @@ def test_read_mask_assembles_multipanel(tmp_path, multipanel_geom_file):
     assert bool(good[0, 0])
 
 
+def test_read_mask_applies_a_per_panel_mask(tmp_path, multipanel_geom_file):
+    mask = np.zeros((2, 64, 32), dtype=np.int32)
+    mask[0, 1, 1] = 1
+    mask[1, 2, 2] = 1
+    own = np.zeros((2, 64, 32), dtype=np.int32)
+    own[1, 5, 5] = 1
+    data4d = np.zeros((1, 2, 64, 32), dtype=np.float32)
+    cxi, _ = sim.write_multipanel_run(tmp_path, data4d, mask=mask)
+    mfile = sim.write_external_mask(tmp_path / "own.h5", own, mask_path="/own")
+    geom_file = tmp_path / "panel_mask.geom"
+    geom_file.write_text(
+        multipanel_geom_file.read_text() + f"1/mask = /own\n1/mask_file = {mfile}\n"
+    )
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        geom = read_geometry(geom_file)
+        good = read_mask(geom, str(cxi), (64, 64))
+    assert set(geom.panel_mask_specs) == {"1"}
+    assert geom.panel_mask_specs["1"].mask_bad == 0xFFFFFFFF
+    assert not bool(good[1, 1])
+    assert bool(good[2, 32 + 2])
+    assert not bool(good[5, 32 + 5])
+    assert int((~good).sum()) == 2
+
+
 def test_static_mask_combines_hdf5_mask_maxadu_and_bad_region(tmp_path, cell_file):
     h, w = 8, 6
     geom_path = _single_panel_geom(

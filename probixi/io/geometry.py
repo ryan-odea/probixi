@@ -120,7 +120,11 @@ class Geometry:
         their CrystFEL 0.10 names ``mask0_data``, ``mask0_file``,
         ``mask0_goodbits`` and ``mask0_badbits``.
     panel_layouts : dict
-        Per-panel overrides of ``data_layout``. A per-panel mask is not read.
+        Per-panel overrides of ``data_layout``.
+    panel_mask_specs : dict
+        Per panel, the mask of a panel that sets a mask key of its own. The
+        panel's keys override the top-level ones, and the panel's mask replaces
+        the top-level mask on that panel.
     panel_flags : dict, optional
         Per panel, the ``flag_lessthan``, ``flag_morethan`` and ``flag_equal``
         entries as ``(key, value)`` in file order, with integer values as in
@@ -139,6 +143,7 @@ class Geometry:
     data_layout: Optional["DataLayout"] = None
     mask_spec: Optional["MaskSpec"] = None
     panel_layouts: dict[str, "DataLayout"] = field(default_factory=dict)
+    panel_mask_specs: dict[str, "MaskSpec"] = field(default_factory=dict)
     panel_flags: Optional[dict[str, list[tuple[str, int]]]] = None
 
     def to_dict(self) -> dict:
@@ -261,7 +266,9 @@ def read_geometry(path: PathLike) -> Geometry:
     if extra:
         warnings.warn(f"only mask0 is read; ignoring {', '.join(extra)}")
     mask_spec = _build_mask_spec(parameters)
-    panel_layouts = _panel_overrides(per_name, panels, parameters, dim_map)
+    panel_layouts, panel_mask_specs = _panel_overrides(
+        per_name, panels, parameters, dim_map
+    )
 
     return Geometry(
         parameters=parameters,
@@ -275,6 +282,7 @@ def read_geometry(path: PathLike) -> Geometry:
         data_layout=data_layout,
         mask_spec=mask_spec,
         panel_layouts=panel_layouts,
+        panel_mask_specs=panel_mask_specs,
         panel_flags={k: v for k, v in panel_flags.items() if v} or None,
     )
 
@@ -378,9 +386,11 @@ def _panel_overrides(
     panels: dict[str, dict],
     parameters: dict,
     dim_map: dict[int, object],
-) -> dict[str, DataLayout]:
+) -> tuple[dict[str, DataLayout], dict[str, MaskSpec]]:
     layouts: dict[str, DataLayout] = {}
-    masked = []
+    masks: dict[str, MaskSpec] = {}
+    top = _with_mask_aliases(parameters)
+    top = {k: top[k] for k in _MASK_KEYS if k in top}
     for name in panels:
         pdict = per_name.get(name, {})
         pdims = _collect_dims(pdict)
@@ -390,13 +400,12 @@ def _panel_overrides(
             )
             if layout is not None:
                 layouts[name] = layout
-        if any(k in _with_mask_aliases(pdict) for k in _MASK_KEYS):
-            masked.append(name)
-    if masked:
-        warnings.warn(
-            f"per-panel masks are not read; ignoring those of {', '.join(masked)}"
-        )
-    return layouts
+        own = _with_mask_aliases(pdict)
+        if any(k in own for k in _MASK_KEYS):
+            spec = _build_mask_spec({**top, **own})
+            if spec is not None:
+                masks[name] = spec
+    return layouts, masks
 
 
 def _with_unit(value, units: dict[str, float]) -> Optional[float]:
