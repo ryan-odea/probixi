@@ -27,7 +27,7 @@ With `decay` $= \alpha < 1$ the update is exponentially weighted, $\mu \leftarro
 ### 1.2 Pixel, radial, and frame-wide estimators
 
 - Pixel (`_pixel.py`): $\mu_{\text{pix}}(p)$, $\sigma^2_{\text{pix}}(p)$ per pixel, fed without a mask.
-- Radial (`_radial.py`): with $r(p)$ the lab-frame radius of pixel $p$ from the beam centre in pixels and bin width $\Delta = 2$ px (`radial_bin_width`, fixed), bin $b(p) = \lfloor r(p)/\Delta \rfloor$; each frame is projected to masked bin means $\bar y_b = \sum_{p\in b} m(p)\,y(p) / \max(\sum_{p\in b} m(p), 1)$, and the running statistics live on the bins. Per pixel, $\mu_{\text{rad}}(p) = \mu_{b(p)}$ and $\sigma^2_{\text{rad}}(p) = \hat\sigma^2_{b(p)}\,N_{b(p)}$ with $N_b$ the bin's pixel count (the variance of a bin *mean* re-inflated to a single pixel).
+- Radial (`_radial.py`): with $r(p)$ the lab-frame radius of pixel $p$ from the beam centre in pixels and bin width $\Delta = 2$ px (`RADIAL_BIN_WIDTH`), bin $b(p) = \lfloor r(p)/\Delta \rfloor$; each frame is projected to masked bin means $\bar y_b = \sum_{p\in b} m(p)\,y(p) / \max(\sum_{p\in b} m(p), 1)$, and the running statistics live on the bins. Per pixel, $\mu_{\text{rad}}(p) = \mu_{b(p)}$ and $\sigma^2_{\text{rad}}(p) = \hat\sigma^2_{b(p)}\,N_{b(p)}$ with $N_b$ the bin's pixel count (the variance of a bin *mean* re-inflated to a single pixel).
 - Frame-wide (`_panel.py`): the same construction with one bin per geometry panel (`_panel_boxes`, `probixi.py`), or a single bin covering the frame when the geometry has one panel.
 
 ### 1.3 Robust update and dead pixels
@@ -38,7 +38,7 @@ $$
 \tilde x(p) = \min\!\big(x(p),\ \mu_{\text{pix}}(p) + k_r\,\sigma_{\text{pix}}(p)\big), \qquad k_r = 5 \ (\texttt{robust\_k}, \text{fixed}),
 $$
 
-applied once $n \ge 4$ frames (`robust_min_frames`). After `warmup_frames` (default 16) any pixel whose variance is still exactly zero is declared dead: $m(p) \leftarrow m(p) \wedge [\hat\sigma^2_{\text{pix}}(p) > 0]$ (`commit_dead_pixel_mask`). The a-priori part of $m$ comes from the geometry (bad regions, panel edges, `max_adu`) and is later ANDed with the shadow (§2.1) and beam-stop (§2.8) exclusions.
+applied once $n \ge 4$ frames (`ROBUST_MIN_FRAMES`). After `warmup_frames` (default 16) any pixel whose variance is still exactly zero is declared dead: $m(p) \leftarrow m(p) \wedge [\hat\sigma^2_{\text{pix}}(p) > 0]$ (`commit_dead_pixel_mask`). The a-priori part of $m$ comes from the geometry (bad regions, panel edges, `max_adu`) and is later ANDed with the shadow (§2.1) and beam-stop (§2.8) exclusions.
 
 ### 1.4 The blended prediction
 
@@ -415,7 +415,7 @@ An enrichment near 1 is a lattice indistinguishable from chance; `--enrich-gate`
 
 ### 7.5 Resolution limit and profile radius
 
-The crystal's diffraction limit is the more generous of two estimates. The first is the second-highest $|\mathbf q|$ among its indexed peaks, so that one hot pixel or noise peak that a dense high-resolution lattice indexes by chance cannot set it. The second is where its shell-averaged $I/\sigma$ falls to 0.5 (`falloff_resolution_limit`, `resolution_isigma`), with predicted reflections sorted by $|\mathbf q|$ into 10 equal-count shells and the crossing interpolated linearly between the two shells that bracket it. With fewer than 40 reflections, or when not even the innermost shell reaches 0.5, the second estimate is skipped, and when neither exists the 0.90 quantile of the observed peaks' $|\mathbf q|$ is used. It is reported (`diffraction_resolution_limit`, nm$^{-1}$) but never used to truncate the reflection list. The `profile_radius` is the rocking half-width of §6 evaluated at that limit, $R(q_{\text{lim}})$, converted to nm$^{-1}$ and clamped to $[5\times10^{-4}, 2\times10^{-2}]$.
+The crystal's diffraction limit is the more generous of two estimates. The first is the second-highest $|\mathbf q|$ among its indexed peaks, so that one hot pixel or noise peak that a dense high-resolution lattice indexes by chance cannot set it. The second is where its shell-averaged $I/\sigma$ falls to 0.5 (`falloff_resolution_limit`, `resolution_isigma`), with predicted reflections sorted by $|\mathbf q|$ into 10 equal-count shells and the crossing interpolated linearly between the two shells that bracket it. With fewer than 40 reflections, or when not even the innermost shell reaches 0.5, the second estimate is skipped. It is reported (`diffraction_resolution_limit`, nm$^{-1}$) but never used to truncate the reflection list. The `profile_radius` is the rocking half-width of §6 evaluated at that limit, $R(q_{\text{lim}})$, converted to nm$^{-1}$ and clamped to $[5\times10^{-4}, 2\times10^{-2}]$.
 
 ## 8. Output contents
 

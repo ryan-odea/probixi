@@ -230,17 +230,14 @@ class PeakFinder:
         Largest second-moment eigenvalue ratio, which rejects streaks.
     peakedness_min : float, default 1.2
         Smallest ratio of maximum to mean excess, which rejects flat regions.
-    connectivity : int, default 2
-        1 for the 4-neighbourhood, 2 for the 8-neighbourhood.
     combination : str, default 'shrinkage'
         Preset passed to :meth:`NoiseModel.predict`; :meth:`CalibrationResult.apply`
         sets ``calibrated``.
-    local_background : bool, default True
-        Correct the background mean and variance per frame from a square annulus
-        around each pixel, which follows pedestal shifts and smooth gradients.
     local_inner_radius, local_outer_radius : int, default 4, 9
-        Inner and outer half-widths of the annulus in pixels;
-        ``1 <= inner < outer``.
+        Inner and outer half-widths in pixels of the square annulus around each
+        pixel; ``1 <= inner < outer``. The background mean and variance are
+        corrected per frame from it, which follows pedestal shifts and smooth
+        gradients.
     flux_variance : bool, default False
         Whiten against ``read_var + gain * level`` at each frame's own level; takes
         effect once :func:`fit_photon_transfer` has run.
@@ -250,8 +247,6 @@ class PeakFinder:
     max_peaks : int, optional
         A frame with more components yields no peaks, since its background model
         has failed. Defaults to one per 1000 pixels, at least 1000.
-    compile : bool, default False
-        ``torch.compile`` the batched scorer when available.
     """
 
     def __init__(
@@ -270,21 +265,16 @@ class PeakFinder:
         size_max: int = 30,
         eccentricity_max: float = 5.0,
         peakedness_min: float = 1.2,
-        connectivity: int = 2,
-        combination: Literal[
-            "pixel", "rotational", "panel", "shrinkage", "calibrated"
-        ] = "shrinkage",
-        local_background: bool = True,
+        combination: Literal["pixel", "shrinkage", "calibrated"] = "shrinkage",
         local_inner_radius: int = 4,
         local_outer_radius: int = 9,
         flux_variance: bool = False,
         flux_var_floor: float = 0.15,
         max_peaks: Optional[int] = None,
-        compile: bool = False,
     ):
         if kappa <= 1.0:
             raise ValueError("kappa must be > 1")
-        if local_background and not 1 <= local_inner_radius < local_outer_radius:
+        if not 1 <= local_inner_radius < local_outer_radius:
             raise ValueError("require 1 <= local_inner_radius < local_outer_radius")
         if not 0.0 < prior_peak < 1.0:
             raise ValueError("prior_peak must be in (0, 1)")
@@ -314,11 +304,7 @@ class PeakFinder:
         self.size_max = int(size_max)
         self.eccentricity_max = float(eccentricity_max)
         self.peakedness_min = float(peakedness_min)
-        self.connectivity = int(connectivity)
-        self.combination: Literal[
-            "pixel", "rotational", "panel", "shrinkage", "calibrated"
-        ] = combination
-        self.local_background = bool(local_background)
+        self.combination: Literal["pixel", "shrinkage", "calibrated"] = combination
         self.local_inner_radius = int(local_inner_radius)
         self.local_outer_radius = int(local_outer_radius)
         self.flux_variance = bool(flux_variance)
@@ -345,9 +331,6 @@ class PeakFinder:
             )
             for s in self.mf_scales
         ]
-        if compile and hasattr(torch, "compile"):
-            self.score_batch = torch.compile(self.score_batch)  # type: ignore[method-assign]
-
         self._pred_cache: Optional[dict[str, Tensor]] = None
         self._pred_key: Optional[int] = None
         self._den_key: Optional[int] = None
@@ -355,10 +338,8 @@ class PeakFinder:
         self._mf_bank_den: Optional[list[Tensor]] = None
         self._annulus_count: Optional[Tensor] = None
 
-    def background_annulus_pixels(self) -> Optional[float]:
-        """Nominal pixel count of the local annulus; None without local background."""
-        if not self.local_background:
-            return None
+    def background_annulus_pixels(self) -> float:
+        """Nominal pixel count of the local annulus."""
         outer = 2 * self.local_outer_radius + 1
         inner = 2 * self.local_inner_radius + 1
         return float(outer * outer - inner * inner)
@@ -380,13 +361,12 @@ class PeakFinder:
                     matched_filter_denominator(cache["mask"], k)
                     for k in self._mf_kernels
                 ]
-            if self.local_background:
-                self._annulus_count = annulus_count(
-                    cache["mask"],
-                    self.local_inner_radius,
-                    self.local_outer_radius,
-                    dtype=self._kernel.dtype,
-                )
+            self._annulus_count = annulus_count(
+                cache["mask"],
+                self.local_inner_radius,
+                self.local_outer_radius,
+                dtype=self._kernel.dtype,
+            )
             self._den_key = mkey
         return cache
 
@@ -418,13 +398,6 @@ class PeakFinder:
         gain = self.noise.gain
         read_var = self.noise.read_var
         flux = self.flux_variance and gain is not None
-        if not self.local_background:
-            if flux:
-                assert gain is not None and read_var is not None
-                floor = self.flux_var_floor * var0
-                base = read_var + gain * mean0.clamp_min(0.0)
-                return mean0, torch.maximum(base, floor).clamp_min(1e-12)
-            return mean0, var0
         local_mean, local_var = local_mean_var(
             frame - mean0,
             pred["mask"],
@@ -481,7 +454,6 @@ class PeakFinder:
             and not frame.requires_grad
             and self.noise.pixel.mean_.dtype == torch.float32
             and frame.device == self.noise.pixel.mean_.device
-            and self.local_background
             and self.matched_filter
             and 1 <= self.local_inner_radius < self.local_outer_radius
             and len(self._mf_kernels) == 3
@@ -645,9 +617,7 @@ class PeakFinder:
                 result.stats.n_masked = touch
                 result.kept_stats.n_masked = touch[result.keep]
                 return result
-        labels, n_blobs = label_connected_components(
-            binary, connectivity=self.connectivity
-        )
+        labels, n_blobs = label_connected_components(binary)
         # beyond max_peaks components the background model has failed: emit none
         if n_blobs == 0 or (self.max_peaks > 0 and n_blobs > self.max_peaks):
             return PeakResult(

@@ -630,7 +630,9 @@ def test_zero_frames_are_dropped_from_the_seed_draw(tmp_path, geom_path, monkeyp
     px = _build_pipeline(lst, geom_path)
     draws, source = [], pipeline._FrameSource
     monkeypatch.setattr(
-        pipeline, "_FrameSource", lambda p, idx: draws.append(list(idx)) or source(p, idx)
+        pipeline,
+        "_FrameSource",
+        lambda p, idx: draws.append(list(idx)) or source(p, idx),
     )
     px.calibrate(n_seed=len(frames) - 3, target_noise_peaks=5.0)
     assert sorted(draws[0]) == list(range(3, len(frames)))

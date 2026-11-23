@@ -393,7 +393,9 @@ def _panel_overrides(
         if any(k in _with_mask_aliases(pdict) for k in _MASK_KEYS):
             masked.append(name)
     if masked:
-        warnings.warn(f"per-panel masks are not read; ignoring those of {', '.join(masked)}")
+        warnings.warn(
+            f"per-panel masks are not read; ignoring those of {', '.join(masked)}"
+        )
     return layouts
 
 

@@ -9,6 +9,7 @@ import torch
 from probixi.indexer import IndexResult, RefineConfig, SeedConfig
 from probixi.indexer.indexer import Indexer
 from probixi.indexer.integrate import (
+    ANNULUS_PIXELS,
     choose_aperture,
     disk_overlap_counts,
     falloff_resolution_limit,
@@ -389,10 +390,9 @@ def test_learned_annulus_holds_the_requested_background_samples():
     g = torch.Generator().manual_seed(0)
     centres = (torch.rand(30, 2, generator=g) * 260 + 30).round()
     profile = radial_profile(_planted(2.0, centres), centres.float())
-    for want in (60.0, 120.0, 300.0):
-        r_sig, r_in, r_out = radii_from_profile(profile, background_pixels=want)
-        assert math.pi * (r_out**2 - r_in**2) == pytest.approx(want, rel=1e-6)
-        assert r_in > r_sig  # the annulus clears the signal disk
+    r_sig, r_in, r_out = radii_from_profile(profile)
+    assert math.pi * (r_out**2 - r_in**2) == pytest.approx(ANNULUS_PIXELS, rel=1e-6)
+    assert r_in > r_sig  # the annulus clears the signal disk
 
 
 def test_radial_profile_is_empty_without_peaks():
@@ -402,19 +402,6 @@ def test_radial_profile_is_empty_without_peaks():
 
 def test_radii_from_profile_returns_none_for_a_flat_profile():
     assert radii_from_profile(torch.zeros(17)) is None
-
-
-def test_radii_from_profile_rejects_bad_settings():
-    profile = torch.linspace(1.0, 0.0, 17)
-    for kwargs in (
-        dict(floor=0.0),
-        dict(floor=1.0),
-        dict(fit_above=0.0),
-        dict(gap=0.0),
-        dict(background_pixels=0.0),
-    ):
-        with pytest.raises(ValueError):
-            radii_from_profile(profile, **kwargs)
 
 
 def test_snr_aperture_shrinks_to_the_3x3_for_a_pixel_wide_spot():

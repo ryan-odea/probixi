@@ -12,7 +12,6 @@ from torch.multiprocessing.spawn import spawn
 
 from ..indexer import IntegrateConfig, RefineConfig, SeedConfig
 from ..io import DataLoader, DataOffloader, DuckDBOffloader, is_duckdb_path
-from ..io.db import MODEL_VAR_ALPHA
 from ..probixi import Probixi, auto_device
 
 PathLike = Union[str, Path]
@@ -156,7 +155,6 @@ def merge_streams(part_paths: Sequence[PathLike], output_path: PathLike) -> int:
 def merge_dbs(
     part_paths: Sequence[PathLike],
     output_path: PathLike,
-    calibrate_alpha: Optional[float] = MODEL_VAR_ALPHA,
 ) -> int:
     # union of the parts; metadata from the first readable one; returns frames indexed
     import duckdb
@@ -188,7 +186,7 @@ def merge_dbs(
                     conn.execute(f"INSERT INTO {tbl} SELECT * FROM {alias}.{tbl}")
             finally:
                 conn.execute(f"DETACH {alias}")
-        _db.calibrate_model_variance(conn, alpha=calibrate_alpha)
+        _db.calibrate_model_variance(conn)
         conn.execute(  # serials renumbered in frame order across the parts
             "UPDATE frames SET serial = r.rn FROM ("
             "  SELECT frame_id, row_number() OVER (ORDER BY frame_index) AS rn"

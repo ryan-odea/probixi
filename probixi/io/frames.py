@@ -220,6 +220,7 @@ def _scan_cbf_files(paths: Sequence[str]) -> dict:
 
 
 _PREFETCH_SENTINEL = object()
+DECODE_WORKERS = 8  # CPU threads that decode chunks; doubled to read CBF files
 
 
 def _bshuf_lz4_decoder(dset: h5py.Dataset, frame_shape):
@@ -464,14 +465,12 @@ def _prefetch_worker(
 def iter_frames(
     loader: DataLoader,
     *,
-    files: Optional[Sequence[str]] = None,
     start: Optional[int] = None,
     stop: Optional[int] = None,
     device: Optional[torch.device] = None,
     dtype: torch.dtype = torch.float32,
     batch_size: int = 1,
     prefetch: int = 2,
-    decode_workers: int = 8,
 ) -> Iterator[Tensor]:
     """Yield frames from a loader as tensors, read ahead on a worker thread.
 
@@ -479,8 +478,6 @@ def iter_frames(
     ----------
     loader : DataLoader
         Source of ``metadata.files``.
-    files : sequence of str, optional
-        Keys of ``loader.files`` to read; all by default.
     start, stop : int, optional
         Global frame range ``[start, stop)``; the full run by default.
     device : torch.device, optional
@@ -491,8 +488,6 @@ def iter_frames(
         Frames per yielded tensor.
     prefetch : int, default 2
         Batches the worker may read ahead.
-    decode_workers : int, default 8
-        CPU threads that decode bitshuffle-LZ4 chunks, doubled to read CBF files.
 
     Yields
     ------
@@ -512,7 +507,7 @@ def iter_frames(
     """
     metadata = loader.metadata
     entries = metadata.files
-    chosen = list(entries.keys()) if files is None else list(files)
+    chosen = list(entries.keys())
     lo = int(start) if start is not None else 0
     hi = int(stop) if stop is not None else metadata.n_frames
 
@@ -548,7 +543,7 @@ def iter_frames(
         if _engine.get() is Engine.ACCELERATED:
             raise RuntimeError("nvCOMP 5.x CUDA library is unavailable")
 
-    nworkers = max(1, min(int(decode_workers), os.cpu_count() or 4))
+    nworkers = max(1, min(DECODE_WORKERS, os.cpu_count() or 4))
     if has_cbf:
         nworkers *= 2  # file reads wait on the filesystem: more in flight than cores
     window = max(int(batch_size), nworkers)

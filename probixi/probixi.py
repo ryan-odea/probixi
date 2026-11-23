@@ -952,11 +952,7 @@ class Probixi:
         if self._noise is None:
             return None
         finder = self.finder
-        grow = (
-            finder.local_outer_radius
-            if finder.local_background
-            else int(math.ceil(3.0 * max(finder.mf_scales)))
-        )
+        grow = finder.local_outer_radius
         shadow = shadow_mask(
             self._noise.pixel.mean(),
             self._noise.rotational.mean(),
@@ -1178,7 +1174,7 @@ class Probixi:
                 finder=self.finder,
                 **topts,
             )
-        self._scale_ref = ScaleReference.from_noise_model(self.noise)
+        self._scale_ref = ScaleReference(self.noise)
         if self.indexer is not None and self.noise.gain is not None:
             self.indexer._measured_gain = self.noise.gain
         if self.indexer is not None:

@@ -127,9 +127,7 @@ def _streak_stats(finder: PeakFinder) -> BlobStats:
 
 
 def test_eccentricity_max_rejects_an_elongated_streak():
-    # local_background off so the streak's own annulus does not inflate var_eff
     _, finder = _calibrated(
-        local_background=False,
         size_min=1,
         size_max=100000,
         eccentricity_max=1000.0,
@@ -198,7 +196,6 @@ def test_size_min_rejects_a_single_pixel_blob():
 def test_size_max_rejects_an_oversized_blob():
     # a very bright, broad spot floods well past the default size_max
     _, finder = _calibrated(
-        local_background=False,
         size_min=1,
         size_max=100000,
         eccentricity_max=1000.0,
@@ -337,7 +334,7 @@ def test_blob_stats_centroid_recovers_isolated_spot_position():
     binary = (
         scores["posterior"] > finder.posterior_threshold
     ) & finder.noise.valid_mask
-    labels, n = label_connected_components(binary, connectivity=finder.connectivity)
+    labels, n = label_connected_components(binary)
     assert n == 1
     stats = compute_blob_stats(
         labels,
@@ -485,7 +482,6 @@ def test_footprint_cap_keeps_a_bright_broad_spot_under_size_max_30():
     # size_max=30 alone rejects a bright broad spot; the brightness-scaled cap keeps it
     _, finder = _calibrated(
         matched_filter=True,
-        local_background=False,
         size_min=1,
         size_max=100000,
         eccentricity_max=1000.0,
@@ -519,7 +515,6 @@ def test_footprint_cap_is_brightness_invariant():
     # the same spot 100x brighter has a bigger footprint but must still pass
     _, finder = _calibrated(
         matched_filter=True,
-        local_background=False,
         size_min=1,
         size_max=100000,
         eccentricity_max=1000.0,
@@ -556,7 +551,6 @@ def test_footprint_cap_still_rejects_an_extended_plateau():
     # a flat 40x40 block is far larger than any spot of its peak response
     _, finder = _calibrated(
         matched_filter=True,
-        local_background=False,
         size_min=1,
         size_max=100000,
         eccentricity_max=1000.0,

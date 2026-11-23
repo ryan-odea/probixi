@@ -734,15 +734,6 @@ def test_calibrate_model_variance_fits_within_the_run_resolution(tmp_path):
         assert calibrate_model_variance(conn) == pytest.approx(0.5, rel=0.05)
     finally:
         conn.close()
-    conn, _ = _model_var_db(tmp_path / "wide.duckdb", k_true=0.5, n_fine=20_000)
-    try:
-        k_wide = calibrate_model_variance(conn, d_min=2.0)
-        assert k_wide > 0.8
-        assert conn.execute(
-            "SELECT bg_model_var_dmin_A FROM integration"
-        ).fetchone() == (2.0,)
-    finally:
-        conn.close()
 
 
 def test_calibrate_model_variance_fits_on_lattices_that_pass_the_enrichment_test(
@@ -802,7 +793,6 @@ def test_run_resolution_limit_counts_every_lattice_unless_gated(tmp_path):
             "enrich_p) SELECT 'x' || i, 'f0', 5.0, 0.5 FROM range(8) t(i)"
         )
         assert run_resolution_limit(conn) == pytest.approx(2.0)
-        assert run_resolution_limit(conn, alpha=1e-3) == pytest.approx(3.1458, abs=1e-3)
     finally:
         conn.close()
 

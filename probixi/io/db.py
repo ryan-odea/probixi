@@ -343,8 +343,6 @@ class DuckDBOffloader(_StreamWriter):
         Half-open range ``[lo, hi)`` of global frame indices this writer owns.
         Only frames in it receive unindexed rows, as ``--start``/``--stop`` and
         multi-GPU blocks require. ``None`` covers every file-event.
-    indexer_name : str, default "probixi"
-        Accepted for parity with :class:`DataOffloader`; the database omits it.
     panel : str, default "0"
         Panel name for peaks and reflections outside every geometry panel.
     integration : dict, optional
@@ -382,7 +380,6 @@ class DuckDBOffloader(_StreamWriter):
         geometry_file: Optional[PathLike] = None,
         files: Optional[dict] = None,
         frame_range: Optional[tuple[int, int]] = None,
-        indexer_name: str = "probixi",
         panel: str = "0",
         integration: Optional[dict] = None,
         calibration=None,
@@ -395,7 +392,6 @@ class DuckDBOffloader(_StreamWriter):
             geometry,
             geometry_file=geometry_file,
             files=files,
-            indexer_name=indexer_name,
             panel=panel,
         )
         self.cell = cell
@@ -1038,8 +1034,10 @@ def _unindexed_frame_row(
 
 
 MODEL_VAR_SAMPLE = 2_000_000
+MODEL_VAR_SEED = 1988
 MODEL_VAR_MIN_OBS = 1000
 MODEL_VAR_RANGE = (0.05, 20.0)
+MODEL_VAR_ITERS = 8
 
 
 def _robust_sd(z: np.ndarray) -> float:
@@ -1050,20 +1048,17 @@ def fit_model_var_scale(
     intensity_model: np.ndarray,
     var_bg: np.ndarray,
     gain: float,
-    *,
-    n_iter: int = 8,
-    min_obs: Optional[int] = None,
 ) -> Optional[float]:
     # sigma^2 = k var_bg + gain max(I, 0), in ADU; the sample must carry little signal
     im = np.asarray(intensity_model, dtype=np.float64)
     vb = np.asarray(var_bg, dtype=np.float64)
     ok = np.isfinite(im) & np.isfinite(vb) & (vb > 0)
     im, vb = im[ok], vb[ok]
-    if im.size < (MODEL_VAR_MIN_OBS if min_obs is None else min_obs):
+    if im.size < MODEL_VAR_MIN_OBS:
         return None
     poisson = float(gain) * np.clip(im, 0.0, None)
     k = 1.0
-    for _ in range(n_iter):
+    for _ in range(MODEL_VAR_ITERS):
         s = _robust_sd(im / np.sqrt(k * vb + poisson))
         if not s > 0:
             return None
@@ -1078,18 +1073,15 @@ def fit_model_var_scale(
 RUN_LIMIT_QUANTILE = 0.1
 
 
-def run_resolution_limit(
-    conn, quantile: float = RUN_LIMIT_QUANTILE, alpha: Optional[float] = None
-) -> Optional[float]:
+def run_resolution_limit(conn) -> Optional[float]:
     # Run resolution in Å, a quantile in d of the crystals' limits; TorchSX's --dmin
     tables = {r[0] for r in conn.execute("SHOW TABLES").fetchall()}
     if "crystals" not in tables:
         return None
-    gate, params = ("", []) if alpha is None else (" AND enrich_p <= ?", [float(alpha)])
     row = conn.execute(
         "SELECT quantile_cont(10.0 / diffraction_limit_nm_inv, ?) FROM crystals "
-        "WHERE diffraction_limit_nm_inv > 0" + gate,
-        [float(quantile), *params],
+        "WHERE diffraction_limit_nm_inv > 0",
+        [RUN_LIMIT_QUANTILE],
     ).fetchone()
     return float(row[0]) if row and row[0] else None
 
@@ -1111,12 +1103,9 @@ def _add_model_var_columns(conn) -> None:
 def calibrate_model_variance(
     conn,
     *,
-    d_min: Optional[float] = None,
-    sample: int = MODEL_VAR_SAMPLE,
-    seed: int = 1988,
     alpha: Optional[float] = MODEL_VAR_ALPHA,
 ) -> Optional[float]:
-    # k comes from unmasked reflections past their crystal's limit with d >= d_min (Å)
+    # k comes from unmasked reflections past their crystal's limit, to the run's limit
     tables = {r[0] for r in conn.execute("SHOW TABLES").fetchall()}
     if not {"integration", "reflections", "crystals"} <= tables:
         return None
@@ -1132,7 +1121,7 @@ def calibrate_model_variance(
         return float(done)
     if not n_bg or n_bg <= 0 or not gain or gain <= 0:
         return None
-    cut = d_min if d_min is not None else run_resolution_limit(conn)
+    cut = run_resolution_limit(conn)
     if not cut or cut <= 0:
         return None
     k = None
@@ -1151,7 +1140,7 @@ def calibrate_model_variance(
                   AND r.background_model_var > 0
                   AND coalesce(r.n_masked, 0) = 0 AND coalesce(r.n_overlap, 0) = 0
             ) AS past_limit
-            USING SAMPLE reservoir({int(sample)} ROWS) REPEATABLE ({int(seed)})
+            USING SAMPLE reservoir({MODEL_VAR_SAMPLE} ROWS) REPEATABLE ({MODEL_VAR_SEED})
             """,
             [float(n_bg), 10.0 / float(cut), *params],
         ).fetchnumpy()

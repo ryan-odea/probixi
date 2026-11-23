@@ -83,7 +83,3 @@ class RotationalNoise(NoiseStats):
 
     def mean(self) -> Tensor:
         return self.mean_[self.bin_idx]
-
-    def var(self) -> Tensor:
-        # a bin mean has variance sigma^2 / n; scale back to the per-pixel variance
-        return super().var()[self.bin_idx] * self.pixels_per_bin[self.bin_idx]

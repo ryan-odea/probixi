@@ -11,6 +11,9 @@ from ..io.cell import CellParams
 from ..kernels import select
 from .lattice import B_to_cell
 
+# Levenberg-Marquardt rounds of refine_cell; hkl is reassigned between them
+CELL_ROUNDS = 2
+
 
 @dataclass
 class RefineResult:
@@ -117,7 +120,6 @@ def refine_cell(
     template: CellParams,
     q_tolerance: float,
     iters: int = 8,
-    rounds: int = 2,
     edge_tolerance: float = 0.05,
     angle_tolerance_rad: float = math.radians(3.0),
     wavelength: Optional[float] = None,
@@ -133,7 +135,6 @@ def refine_cell(
             template,
             q_tolerance,
             iters,
-            rounds,
             edge_tolerance,
             angle_tolerance_rad,
             wavelength,
@@ -210,7 +211,7 @@ def refine_cell(
 
     before = float(whitened(A.to(wd), hkl_d, indexed).square().mean())
     A_new = A.to(wd)
-    for _ in range(rounds):
+    for _ in range(CELL_ROUNDS):
         if int(indexed.sum()) * 3 <= m:  # fewer residuals than free parameters
             return None
         sel = indexed.clone()

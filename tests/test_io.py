@@ -172,22 +172,6 @@ def test_iter_frames_dtype_is_honored(tmp_path):
         assert t.dtype == torch.float32
 
 
-def test_iter_frames_files_subset(tmp_path):
-    fa = _frames(3, 8, 6, seed=1)
-    fb = _frames(3, 8, 6, seed=2)
-    a_h5, _ = sim.write_run(tmp_path / "a", fa)
-    b_h5, _ = sim.write_run(tmp_path / "b", fb)
-    lst = tmp_path / "both.lst"
-    lst.write_text(f"{a_h5}\n{b_h5}\n", encoding="utf-8")
-    loader = DataLoader(lst)
-    out = list(
-        iter_frames(loader, files=[str(b_h5)], batch_size=1, dtype=torch.float32)
-    )
-    got = torch.stack(out)
-    expected = torch.as_tensor(fb, dtype=torch.float32)
-    assert torch.equal(got, expected)
-
-
 def test_iter_frames_terminates_without_full_consumption(tmp_path):
     # abandon the iterator early; the prefetch thread must not hang the gc/close
     _, lst_path = sim.write_run(tmp_path, _frames(20, 8, 6))
