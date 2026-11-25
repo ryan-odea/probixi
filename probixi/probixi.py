@@ -15,6 +15,7 @@ from typing import Iterable, Iterator, Literal, Optional, Union
 import torch
 from torch import Tensor
 
+from ._version import __version__
 from .indexer import (
     CellMatchConfig,
     FrameIndexResult,
@@ -43,7 +44,6 @@ from .io import (
     read_mask,
     render_frame,
 )
-from ._version import __version__
 from .io.cell import median_cell
 from .io.geometry import EV_ANGSTROM
 from .kernels import Engine, use_engine
