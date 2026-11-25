@@ -19,7 +19,7 @@ _AXIS_RE = re.compile(r"([+-]?[0-9]*\.?[0-9]+(?:[eE][+-]?[0-9]+)?)\s*([xy])")
 
 
 def parse_axis_vector(spec: object) -> Optional[tuple[float, float]]:
-    # z components are ignored; None when the spec has neither x nor y
+    # Ignores z components
     if not isinstance(spec, str):
         return None
     comps = {axis: float(val) for val, axis in _AXIS_RE.findall(spec)}
@@ -30,13 +30,20 @@ def parse_axis_vector(spec: object) -> Optional[tuple[float, float]]:
 
 EV_ANGSTROM = 12398.419843320026  # hc in eV Å
 _CLEN_MM_THRESHOLD_M = 2.0  # an HDF5 clen above this is in mm
+_ENERGY_UNITS = {"eV": 1.0, "keV": 1e3}  # the first is the unit of a bare value
 
-DETECTOR_KEYS = ("detector", "detector_type", "type")
 FLAG_KEYS = ("flag_lessthan", "flag_morethan", "flag_equal")
 PANEL_REQUIRED = {"min_fs", "max_fs", "min_ss", "max_ss", "corner_x", "corner_y"}
 MASK_REQUIRED = {"min_fs", "max_fs", "min_ss", "max_ss"}
 LAB_MASK_REQUIRED = {"min_x", "max_x", "min_y", "max_y"}
 _MASK_KEYS = ("mask", "mask_file", "mask_good", "mask_bad")
+# CrystFEL >= 0.10 names of the first mask, by their older names
+_MASK_ALIASES = {
+    "mask0_data": "mask",
+    "mask0_file": "mask_file",
+    "mask0_goodbits": "mask_good",
+    "mask0_badbits": "mask_bad",
+}
 
 
 @dataclass
@@ -89,8 +96,6 @@ class Geometry:
     bad_regions : list[BadRegion]
         Masked regions, in data space (``min_fs`` ...) or the lab frame
         (``min_x`` ...).
-    detector_type : str, optional
-        Declared detector type.
     distance : float, optional
         Detector distance in m, ``clen`` plus the mean ``coffset``. ``None`` until
         an HDF5-path ``clen`` is read from the data.
@@ -100,18 +105,26 @@ class Geometry:
         ``fs = +x`` and ``ss = +y``.
     wavelength : float, optional
         Wavelength in Å, from ``wavelength`` or ``photon_energy``. ``None`` until
-        an HDF5-path photon energy is read from the data.
+        an HDF5-path photon energy is read from the data. The path takes a
+        CrystFEL unit, as in ``photon_energy = /LCLS/photon_energy_eV eV``.
     pixel_size : float, optional
-        Pixel size in m, ``1 / res``.
+        Pixel size in m, ``1 / res``. A panel's own ``res`` overrides the
+        top-level one, and every panel has to give the same value.
     adu_per_photon : float, optional
         Gain in ADU per photon, from ``adu_per_photon`` or
         ``adu_per_eV * photon_energy`` when both are numbers.
     data_layout : DataLayout, optional
         The ``data`` path and the ``dimN`` axis roles.
     mask_spec : MaskSpec, optional
-        Top-level ``mask``, ``mask_file``, ``mask_good`` and ``mask_bad``.
-    panel_layouts, panel_masks : dict
-        Per-panel overrides of ``data_layout`` and ``mask_spec``.
+        Top-level ``mask``, ``mask_file``, ``mask_good`` and ``mask_bad``, or
+        their CrystFEL 0.10 names ``mask0_data``, ``mask0_file``,
+        ``mask0_goodbits`` and ``mask0_badbits``.
+    panel_layouts : dict
+        Per-panel overrides of ``data_layout``.
+    panel_mask_specs : dict
+        Per panel, the mask of a panel that sets a mask key of its own. The
+        panel's keys override the top-level ones, and the panel's mask replaces
+        the top-level mask on that panel.
     panel_flags : dict, optional
         Per panel, the ``flag_lessthan``, ``flag_morethan`` and ``flag_equal``
         entries as ``(key, value)`` in file order, with integer values as in
@@ -122,7 +135,6 @@ class Geometry:
     parameters: dict
     panels: dict[str, dict]
     bad_regions: list[BadRegion] = field(default_factory=list)
-    detector_type: Optional[str] = None
     distance: Optional[float] = None
     beam_center: Optional[tuple[float, float]] = None
     wavelength: Optional[float] = None
@@ -131,7 +143,7 @@ class Geometry:
     data_layout: Optional["DataLayout"] = None
     mask_spec: Optional["MaskSpec"] = None
     panel_layouts: dict[str, "DataLayout"] = field(default_factory=dict)
-    panel_masks: dict[str, "MaskSpec"] = field(default_factory=dict)
+    panel_mask_specs: dict[str, "MaskSpec"] = field(default_factory=dict)
     panel_flags: Optional[dict[str, list[tuple[str, int]]]] = None
 
     def to_dict(self) -> dict:
@@ -177,6 +189,8 @@ def read_geometry(path: PathLike) -> Geometry:
     ------
     FileNotFoundError
         If ``path`` does not exist.
+    ValueError
+        If the panels differ in ``res``.
     """
     path = Path(path)
     if not path.is_file():
@@ -248,26 +262,27 @@ def read_geometry(path: PathLike) -> Geometry:
 
     dim_map = _collect_dims(parameters)
     data_layout = _build_data_layout(parameters.get("data"), dim_map)
+    extra = sorted(k for k in parameters if re.match(r"mask[1-9]\d*_", str(k)))
+    if extra:
+        warnings.warn(f"only mask0 is read; ignoring {', '.join(extra)}")
     mask_spec = _build_mask_spec(parameters)
-    panel_layouts, panel_masks = _panel_overrides(per_name, panels, parameters, dim_map)
+    panel_layouts, panel_mask_specs = _panel_overrides(
+        per_name, panels, parameters, dim_map
+    )
 
     return Geometry(
         parameters=parameters,
         panels=panels,
         bad_regions=bad_regions,
-        detector_type=next(
-            (parameters[k] for k in DETECTOR_KEYS if k in parameters),
-            None,
-        ),
         distance=distance,
         beam_center=_beam_center(panels),
         wavelength=_wavelength(parameters),
-        pixel_size=_pixel_size(parameters),
+        pixel_size=_pixel_size(parameters, panels),
         adu_per_photon=_adu_per_photon(parameters),
         data_layout=data_layout,
         mask_spec=mask_spec,
         panel_layouts=panel_layouts,
-        panel_masks=panel_masks,
+        panel_mask_specs=panel_mask_specs,
         panel_flags={k: v for k, v in panel_flags.items() if v} or None,
     )
 
@@ -334,9 +349,9 @@ def _looks_like_bad_region(name: str, data: dict) -> bool:
     return any(k.startswith(("min_", "max_")) for k in data)
 
 
-def _parse_mask_bits(value: object, default: int = 0) -> int:
+def _parse_mask_bits(value: object) -> int:
     if value is None:
-        return int(default)
+        return 0
     if isinstance(value, bool):
         return int(value)
     if isinstance(value, int):
@@ -344,7 +359,16 @@ def _parse_mask_bits(value: object, default: int = 0) -> int:
     return int(str(value).strip(), 0)  # base 0 accepts 0x... hex
 
 
+def _with_mask_aliases(d: dict) -> dict:
+    out = dict(d)
+    for new, old in _MASK_ALIASES.items():
+        if new in d and old not in d:
+            out[old] = d[new]
+    return out
+
+
 def _build_mask_spec(d: dict) -> Optional[MaskSpec]:
+    d = _with_mask_aliases(d)
     if not any(k in d for k in _MASK_KEYS):
         return None
     mask_path = d.get("mask")
@@ -352,8 +376,8 @@ def _build_mask_spec(d: dict) -> Optional[MaskSpec]:
     return MaskSpec(
         mask_file=str(mask_file) if mask_file is not None else None,
         mask_path=str(mask_path) if mask_path is not None else None,
-        mask_good=_parse_mask_bits(d.get("mask_good"), 0),
-        mask_bad=_parse_mask_bits(d.get("mask_bad"), 0),
+        mask_good=_parse_mask_bits(d.get("mask_good")),
+        mask_bad=_parse_mask_bits(d.get("mask_bad")),
     )
 
 
@@ -365,6 +389,8 @@ def _panel_overrides(
 ) -> tuple[dict[str, DataLayout], dict[str, MaskSpec]]:
     layouts: dict[str, DataLayout] = {}
     masks: dict[str, MaskSpec] = {}
+    top = _with_mask_aliases(parameters)
+    top = {k: top[k] for k in _MASK_KEYS if k in top}
     for name in panels:
         pdict = per_name.get(name, {})
         pdims = _collect_dims(pdict)
@@ -374,9 +400,9 @@ def _panel_overrides(
             )
             if layout is not None:
                 layouts[name] = layout
-        if any(k in pdict for k in _MASK_KEYS):
-            merged = {k: pdict.get(k, parameters.get(k)) for k in _MASK_KEYS}
-            spec = _build_mask_spec(merged)
+        own = _with_mask_aliases(pdict)
+        if any(k in own for k in _MASK_KEYS):
+            spec = _build_mask_spec({**top, **own})
             if spec is not None:
                 masks[name] = spec
     return layouts, masks
@@ -404,14 +430,36 @@ def _wavelength(parameters: dict) -> Optional[float]:
 
 
 def _photon_energy(parameters: dict) -> Optional[float]:
-    return _with_unit(parameters.get("photon_energy"), {"eV": 1.0, "keV": 1e3})
+    return _with_unit(parameters.get("photon_energy"), _ENERGY_UNITS)
 
 
-def _pixel_size(parameters: dict) -> Optional[float]:
-    res = parameters.get("res")  # pixels per metre
-    if isinstance(res, (int, float)) and res > 0:
-        return 1.0 / float(res)
-    return None
+def energy_path(value: str) -> tuple[str, float]:
+    # "<HDF5 path> <unit>" -> (path, factor to eV); a bare path is in eV
+    path, _, unit = value.strip().rpartition(" ")
+    if path and unit in _ENERGY_UNITS:
+        return path.strip(), _ENERGY_UNITS[unit]
+    return value.strip(), 1.0
+
+
+def _pixel_size(parameters: dict, panels: dict[str, dict]) -> Optional[float]:
+    # res is in pixels per metre
+    top = parameters.get("res")
+    values = [p.get("res", top) for p in panels.values()] or [top]
+    res = sorted(
+        {
+            float(v)
+            for v in values
+            if isinstance(v, (int, float)) and not isinstance(v, bool) and v > 0
+        }
+    )
+    if not res:
+        return None
+    if res[-1] - res[0] > 1e-6 * res[0]:
+        raise ValueError(
+            f"geometry: the panels differ in res ({res[0]:g} to {res[-1]:g}); "
+            "probixi takes one pixel size for the whole detector"
+        )
+    return 1.0 / res[0]
 
 
 def _adu_per_photon(parameters: dict) -> Optional[float]:
@@ -446,7 +494,6 @@ def _flag_value(value: str) -> Optional[int]:
 
 
 def resolve_dynamic_fields(geometry: Geometry, data_file: PathLike) -> Geometry:
-    # Fill in HDF5-path-valued clen/photon_energy from the data file
     clen_path = geometry.parameters.get("clen")
     pe_path = geometry.parameters.get("photon_energy")
     need_clen = geometry.distance is None and isinstance(clen_path, str)
@@ -473,7 +520,7 @@ def resolve_dynamic_fields(geometry: Geometry, data_file: PathLike) -> Geometry:
 
 
 def match_events(f: h5py.File, pattern: str) -> list[str]:
-    # Natural-sorted names n under the "%" parent that hold a dataset at n + rest
+    # The natural order of the names defines the event index
     parent, _, rest = pattern.partition("%")
     if "%" in rest:
         raise ValueError(f"more than one '%' in {pattern!r} is not supported")
@@ -488,7 +535,6 @@ def match_events(f: h5py.File, pattern: str) -> list[str]:
 
 
 def _dataset_mean(f: h5py.File, path: str) -> Optional[float]:
-    # A per-event ("%") path is averaged over every event
     paths = [path]
     if "%" in path:
         paths = [path.replace("%", n) for n in match_events(f, path)]
@@ -526,8 +572,9 @@ def _resolve_clen(f: h5py.File, path: str, geometry: Geometry) -> Optional[float
     return metres + _mean_coffset(geometry.panels, geometry.parameters)
 
 
-def _resolve_wavelength(f: h5py.File, path: str) -> Optional[float]:
+def _resolve_wavelength(f: h5py.File, value: str) -> Optional[float]:
+    path, to_ev = energy_path(value)
     ev = _dataset_mean(f, path)
     if ev is None or ev <= 0:
         return None
-    return EV_ANGSTROM / ev
+    return EV_ANGSTROM / (ev * to_ev)

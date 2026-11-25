@@ -54,7 +54,6 @@ def label_nodes(
     W: tl.constexpr,
     NBLK: tl.constexpr,
     LOGN: tl.constexpr,
-    CONN: tl.constexpr,
     ITERS: tl.constexpr,
     HAS_RESP: tl.constexpr,
 ):
@@ -70,11 +69,10 @@ def label_nodes(
     n1 = neighbour(OUT, fg, r, c, i, live, 1, 0, H, W)
     n2 = neighbour(OUT, fg, r, c, i, live, 0, -1, H, W)
     n3 = neighbour(OUT, fg, r, c, i, live, 0, 1, H, W)
-    if CONN == 2:
-        n4 = neighbour(OUT, fg, r, c, i, live, -1, -1, H, W)
-        n5 = neighbour(OUT, fg, r, c, i, live, -1, 1, H, W)
-        n6 = neighbour(OUT, fg, r, c, i, live, 1, -1, H, W)
-        n7 = neighbour(OUT, fg, r, c, i, live, 1, 1, H, W)
+    n4 = neighbour(OUT, fg, r, c, i, live, -1, -1, H, W)
+    n5 = neighbour(OUT, fg, r, c, i, live, -1, 1, H, W)
+    n6 = neighbour(OUT, fg, r, c, i, live, 1, -1, H, W)
+    n7 = neighbour(OUT, fg, r, c, i, live, 1, 1, H, W)
     lab = i
     going = 1
     it = 0
@@ -83,11 +81,10 @@ def label_nodes(
         new = tl.minimum(new, tl.gather(lab, n1, 0))
         new = tl.minimum(new, tl.gather(lab, n2, 0))
         new = tl.minimum(new, tl.gather(lab, n3, 0))
-        if CONN == 2:
-            new = tl.minimum(new, tl.gather(lab, n4, 0))
-            new = tl.minimum(new, tl.gather(lab, n5, 0))
-            new = tl.minimum(new, tl.gather(lab, n6, 0))
-            new = tl.minimum(new, tl.gather(lab, n7, 0))
+        new = tl.minimum(new, tl.gather(lab, n4, 0))
+        new = tl.minimum(new, tl.gather(lab, n5, 0))
+        new = tl.minimum(new, tl.gather(lab, n6, 0))
+        new = tl.minimum(new, tl.gather(lab, n7, 0))
         changed = tl.max((new != lab).to(tl.int32), 0)
         lab = new
         it += 1
@@ -350,7 +347,7 @@ def extract(finder, binary, scores, frame_index, mask):
     if K == 0:
         return empty()
     if K > KCAP or finder.size_min < 1:
-        return None  # None hands the frame to the torch path
+        return None  # the torch path takes this frame
     nodes = 256 if K <= 256 else 1024 if K <= 1024 else 4096
     lanes = min(nodes, BCAP)
     warps = 4 if nodes <= 256 else 8 if nodes <= 1024 else 16
@@ -381,7 +378,6 @@ def extract(finder, binary, scores, frame_index, mask):
         W=W,
         NBLK=nodes,
         LOGN=nodes.bit_length() - 1,
-        CONN=1 if finder.connectivity == 1 else 2,
         ITERS=64,
         HAS_RESP=has_resp,
         num_warps=warps,

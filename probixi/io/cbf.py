@@ -73,15 +73,13 @@ def read_cbf_header(path: PathLike) -> CbfHeader:
     return header
 
 
-def read_cbf(path: PathLike, verify: bool = True) -> np.ndarray:
+def read_cbf(path: PathLike) -> np.ndarray:
     """Decode the image of a CBF file.
 
     Parameters
     ----------
     path : str or Path
         A ``.cbf``, ``.cbf.gz`` or ``.cbf.bz2`` file with one binary section.
-    verify : bool, default True
-        Check ``Content-MD5`` when the file carries it.
 
     Returns
     -------
@@ -97,11 +95,11 @@ def read_cbf(path: PathLike, verify: bool = True) -> np.ndarray:
     ValueError
         If the file is not a CBF image, is truncated, or fails its checksum.
     """
-    header, data = read_cbf_data(path, verify)
+    header, data = read_cbf_data(path)
     return decode_cbf(header, data, path)
 
 
-def read_cbf_data(path: PathLike, verify: bool = True) -> tuple[CbfHeader, memoryview]:
+def read_cbf_data(path: PathLike) -> tuple[CbfHeader, memoryview]:
     # Checked, decompressed data bytes, still encoded; raises as read_cbf does
     path = Path(path)
     raw = path.read_bytes()
@@ -117,7 +115,7 @@ def read_cbf_data(path: PathLike, verify: bool = True) -> tuple[CbfHeader, memor
     if _NEXT_SECTION.search(raw, stop):
         raise UnsupportedCbf(f"{path}: files with several binary sections are not read")
     data = memoryview(raw)[header.offset : stop]
-    if verify and header.md5 is not None:
+    if header.md5 is not None:
         digest = base64.b64encode(hashlib.md5(data, usedforsecurity=False).digest())
         if digest.decode() != header.md5:
             raise ValueError(f"{path}: Content-MD5 mismatch, the file is corrupt")
@@ -186,7 +184,6 @@ def _escapes(d: np.ndarray, candidates: np.ndarray) -> tuple[np.ndarray, np.ndar
 
 
 def _payload(d: np.ndarray, pos: np.ndarray, width: np.ndarray) -> np.ndarray:
-    # Value carried by each escape token
     raw = d.view(np.uint8)[np.minimum(pos[:, None] + np.arange(1, 15), d.size - 1)]
 
     def le(lo, hi, kind):

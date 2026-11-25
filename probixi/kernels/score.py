@@ -232,10 +232,9 @@ class FusedScorer:
     # local background, Bayes factor, matched-filter bank, and posterior in 5 passes
     def __init__(self, finder):
         self.finder = finder
-        assert finder.local_background and finder.matched_filter
+        assert finder.matched_filter
         assert 1 <= finder.local_inner_radius < finder.local_outer_radius
         assert len(finder._mf_kernels) == 3
-        assert finder.noise.eigen_modes is None
         self.a = [
             _separable_1d(k / k.norm().clamp_min(1.0e-12)) for k in finder._mf_kernels
         ]

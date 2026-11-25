@@ -76,7 +76,9 @@ def test_excitation_errors_within_partiality_threshold(cell):
         A, geom, detector_q_max(geom, SHAPE), partiality_threshold=thr
     )
     assert len(pred) > 0
-    assert float(pred.excitation_error.abs().max()) < thr
+    s = pred.q * WAVELENGTH
+    s[:, 2] += 1.0
+    assert float((torch.linalg.vector_norm(s, dim=-1) - 1.0).abs().max()) < thr
 
 
 def test_predicted_positions_cover_injected_lattice_peaks(cell):
@@ -339,7 +341,6 @@ def test_resolution_limit_ignores_one_stray_high_resolution_peak(cell):
         positions=pred.positions[pick],
         intensities=zeros,
         sigmas=zeros,
-        loss_history=torch.zeros(1),
     )
     frame = torch.zeros(SHAPE)
     Indexer(geom, cell)._integrate_result(
@@ -383,7 +384,6 @@ def test_enrich_p_rejects_a_lattice_that_only_explains_its_own_peaks(cell):
             positions=pred.positions[pick],
             intensities=zeros,
             sigmas=zeros,
-            loss_history=torch.zeros(1),
         )
         Indexer(geom, cell)._integrate_result(
             result,

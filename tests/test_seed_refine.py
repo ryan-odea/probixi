@@ -151,13 +151,9 @@ def test_refine_from_near_truth_keeps_or_lowers_rmsd(cell):
     A_seed = (sim.proper_rotation(99, max_angle_deg=0.5) @ A_true).unsqueeze(0)
 
     [res] = refine_multiframe_known_B(
-        [A_seed], [q], q_tolerance=0.01, max_iters=120, reassign_every=20, min_indexed=6
+        [A_seed], [q], q_tolerance=0.01, max_iters=120, reassign_every=20
     )
     assert isinstance(res, RefineResult)
-    hist = res.history
-    assert hist.numel() > 0
-    # overall non-increasing trend: final loss does not exceed the initial loss
-    assert float(hist[-1]) <= float(hist[0]) + 1e-9
     assert int(res.n_indexed[0]) >= 6
     assert float(res.rmsd[0]) < 0.01
 
@@ -170,7 +166,7 @@ def test_refine_recovers_orientation_from_perturbed_seed(cell):
     A_seed = (sim.proper_rotation(123, max_angle_deg=0.4) @ A_true).unsqueeze(0)
 
     [res] = refine_multiframe_known_B(
-        [A_seed], [q], q_tolerance=0.01, max_iters=150, reassign_every=20, min_indexed=6
+        [A_seed], [q], q_tolerance=0.01, max_iters=150, reassign_every=20
     )
     # refined basis predicts the synthetic q within the tolerance for indexed peaks
     A_ref = res.A[0]
@@ -359,3 +355,27 @@ def test_refine_cell_returns_none_when_underdetermined():
     hkl = torch.zeros(2, 3, dtype=DT)
     indexed = torch.ones(2, dtype=torch.bool)
     assert refine_cell(A0, q, hkl, indexed, target, 1e-3) is None
+
+
+def test_refine_cell_reference_builds_its_jacobian_in_forward_mode(monkeypatch):
+    # reverse mode costs one pass per residual (4 per indexed peak); forward mode one per parameter
+    from probixi.kernels import use_engine
+
+    seen = []
+    real = torch.autograd.functional.jacobian
+
+    def spy(func, inputs, **kw):
+        seen.append(kw.get("strategy"))
+        return real(func, inputs, **kw)
+
+    monkeypatch.setattr(torch.autograd.functional, "jacobian", spy)
+    target = CellParams(
+        50.0, 60.0, 70.0, *(math.radians(90),) * 3, lattice_type="orthorhombic"
+    )
+    truth = CellParams(
+        50.5, 60.6, 70.7, *(math.radians(90),) * 3, lattice_type="orthorhombic"
+    )
+    with use_engine("reference"):
+        out, _ = _refine_from_target(target, truth)
+    assert out is not None and seen and set(seen) == {"forward-mode"}
+    assert B_to_cell(out[0]).a == pytest.approx(50.5, rel=2e-3)

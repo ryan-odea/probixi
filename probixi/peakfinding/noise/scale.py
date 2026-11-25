@@ -9,6 +9,8 @@ import torch
 from torch import Tensor
 
 _MAX_PENDING = 64
+SCALE_SUBSAMPLE = 40000  # valid pixels drawn once for the scale fit
+SCALE_ROBUST_K = 5.0  # pixels above mean + k sigma leave the fit
 
 
 @dataclass
@@ -65,45 +67,16 @@ class ScaleReference:
     ----------
     noise_model : NoiseModel
         The live model whose background each frame is regressed against.
-    combination : str, optional
-        Blend passed to ``noise_model.predict``; by default ``calibrated`` once the
-        model is calibrated, else ``shrinkage``.
-    robust_k : float, default 5.0
-        Pixels above ``mean + robust_k * sigma`` are excluded from the fit.
-    subsample : int, default 40000
-        Valid pixels drawn at random for the fit.
-    rng_seed : int, default 0
-        Seed for the pixel subsample.
+        The blend is ``calibrated`` once the model is calibrated, else
+        ``shrinkage``. The fit takes 40000 valid pixels drawn at random and leaves
+        out those above ``mean + 5 sigma``.
     """
 
-    def __init__(
-        self,
-        noise_model,
-        *,
-        combination: Optional[str] = None,
-        robust_k: float = 5.0,
-        subsample: int = 40000,
-        rng_seed: int = 0,
-    ):
+    def __init__(self, noise_model):
         self.noise_model = noise_model
-        self.combination = combination
-        self.robust_k = float(robust_k)
-        self.subsample = int(subsample)
-        self.rng_seed = int(rng_seed)
         self._idx: Optional[Tensor] = None
 
-    def __getstate__(self):
-        # the weakrefs in _pending cannot be pickled
-        return {k: v for k, v in self.__dict__.items() if k != "_pending"}
-
-    @classmethod
-    def from_noise_model(cls, noise_model, **kwargs) -> "ScaleReference":
-        """Return a reference bound to ``noise_model``, as the constructor does."""
-        return cls(noise_model, **kwargs)
-
     def _combination(self) -> str:
-        if self.combination is not None:
-            return self.combination
         return (
             "calibrated"
             if self.noise_model.calibrated_weights is not None
@@ -114,9 +87,9 @@ class ScaleReference:
         if self._idx is not None:
             return self._idx
         valid = torch.nonzero(mask.flatten(), as_tuple=False).squeeze(1)
-        if valid.numel() > self.subsample:
-            gen = torch.Generator(device="cpu").manual_seed(self.rng_seed)
-            sel = torch.randperm(valid.numel(), generator=gen)[: self.subsample]
+        if valid.numel() > SCALE_SUBSAMPLE:
+            gen = torch.Generator(device="cpu").manual_seed(0)
+            sel = torch.randperm(valid.numel(), generator=gen)[:SCALE_SUBSAMPLE]
             valid = valid[sel.to(valid.device)]
         self._idx = valid
         return valid
@@ -171,7 +144,7 @@ class ScaleReference:
         sigma = v.sqrt()
         w = 1.0 / v
         # exclude Bragg peaks from the background fit
-        keep = y < (t + self.robust_k * sigma)
+        keep = y < (t + SCALE_ROBUST_K * sigma)
         y, t, w = y[keep], t[keep], w[keep]
         sw = w.sum()
         swt = (w * t).sum()

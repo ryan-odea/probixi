@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import math
+import warnings
 from pathlib import Path
 from typing import TYPE_CHECKING, Optional, Union
 
@@ -9,6 +10,8 @@ import duckdb
 import numpy as np
 import torch
 
+from .._compat import SCHEMA_VERSION, torchsx_mismatch
+from .._version import __version__
 from ..indexer.lattice import B_to_cell
 from .geometry import EV_ANGSTROM
 from .writer import (
@@ -48,6 +51,7 @@ _FRAME_COLUMNS = (
     "adu_per_photon",
     "event_name",
     "photon_energy_eV",
+    "rank",
 )
 _CRYSTAL_COLUMNS = (
     "crystal_id",
@@ -116,8 +120,8 @@ _PEAK_COLUMNS = (
     "n_masked",
 )
 
-#: bumped when tables or columns change; TorchSX refuses a newer one
-SCHEMA_VERSION = 1
+#: largest enrich_p in the model-variance fit; --enrich-alpha default, TorchSX gate
+MODEL_VAR_ALPHA = 1e-3
 
 _SCHEMA = """
 CREATE TABLE geometry (
@@ -175,7 +179,8 @@ CREATE TABLE calibration (
     cell_c_A               DOUBLE,
     cell_alpha_deg         DOUBLE,
     cell_beta_deg          DOUBLE,
-    cell_gamma_deg         DOUBLE
+    cell_gamma_deg         DOUBLE,
+    rank                   INTEGER
 );
 
 CREATE TABLE integration (
@@ -184,7 +189,12 @@ CREATE TABLE integration (
     r_bg              DOUBLE,
     adu_per_photon    DOUBLE,
     bg_annulus_pixels DOUBLE,
-    aperture          VARCHAR
+    aperture          VARCHAR,
+    bg_model_var_scale DOUBLE,
+    bg_model_var_dmin_A DOUBLE,
+    bg_model_var_ref VARCHAR,
+    bg_model_var_alpha DOUBLE,
+    bg_model_var_n_ref BIGINT
 );
 
 CREATE TABLE frames (
@@ -201,7 +211,8 @@ CREATE TABLE frames (
     num_reflections          INTEGER,
     adu_per_photon           DOUBLE,
     event_name               VARCHAR,
-    photon_energy_eV         DOUBLE
+    photon_energy_eV         DOUBLE,
+    rank                     INTEGER
 );
 
 CREATE TABLE crystals (
@@ -322,7 +333,8 @@ class DuckDBOffloader(_StreamWriter):
     cell : CellParams, optional
         Target cell, written to the ``cell`` table.
     geometry_file : str or Path, optional
-        Geometry file stored verbatim in ``geometry.geometry_file``.
+        Geometry file stored in ``geometry.geometry_file``, with ``clen`` moved by
+        any camera-length fit.
     files : dict, optional
         Loader file map. It resolves frame indices to file and event, and lists
         the frames that never indexed, which get ``indexed = FALSE``. Without it,
@@ -331,13 +343,24 @@ class DuckDBOffloader(_StreamWriter):
         Half-open range ``[lo, hi)`` of global frame indices this writer owns.
         Only frames in it receive unindexed rows, as ``--start``/``--stop`` and
         multi-GPU blocks require. ``None`` covers every file-event.
-    indexer_name : str, default "probixi"
-        Accepted for parity with :class:`DataOffloader`; not stored.
     panel : str, default "0"
         Panel name for peaks and reflections outside every geometry panel.
     integration : dict, optional
         Integration recipe (``radii``, ``adu_per_photon``, ``bg_annulus_pixels``,
         ``aperture``), as :attr:`~probixi.Probixi.integration_recipe` returns it.
+    calibration : dict or callable, optional
+        Calibration provenance, as :attr:`~probixi.Probixi.calibration_summary`
+        returns it, written to ``calibration`` on exit.
+    rank : int, default 0
+        Worker that processed these frames, stored in ``frames.rank`` and
+        ``calibration.rank`` so each frame joins the calibration it used.
+    calibrate_model_var : bool, default True
+        Rescale ``background_model_var`` on exit with
+        :func:`calibrate_model_variance`. Multi-GPU ranks leave this to
+        :func:`~probixi.tools.multigpu.merge_dbs`.
+    calibrate_alpha : float or None, default 1e-3
+        Largest ``enrich_p`` of a lattice in that fit, independent of the
+        enrichment gate on the written lattices. None uses every lattice.
 
     Notes
     -----
@@ -357,23 +380,27 @@ class DuckDBOffloader(_StreamWriter):
         geometry_file: Optional[PathLike] = None,
         files: Optional[dict] = None,
         frame_range: Optional[tuple[int, int]] = None,
-        indexer_name: str = "probixi",
         panel: str = "0",
         integration: Optional[dict] = None,
         calibration=None,
+        rank: int = 0,
+        calibrate_model_var: bool = True,
+        calibrate_alpha: Optional[float] = MODEL_VAR_ALPHA,
     ):
         super().__init__(
             path,
             geometry,
             geometry_file=geometry_file,
             files=files,
-            indexer_name=indexer_name,
             panel=panel,
         )
         self.cell = cell
         self.integration = integration
-        #: calibration dict (or a callable giving it), written on exit
         self.calibration = calibration
+        self.rank = int(rank)
+        self.calibrate_model_var = bool(calibrate_model_var)
+        self.calibrate_alpha = calibrate_alpha
+        self.model_var_scale: Optional[float] = None
         self._crystal_rows: list[tuple] = []
         self._frame_range = frame_range
         self._conn = None
@@ -386,6 +413,10 @@ class DuckDBOffloader(_StreamWriter):
         self._recip_scale: dict[str, float] = {}  # lambda0 / frame lambda, by frame id
 
     def __enter__(self) -> "DuckDBOffloader":
+        # Rank 0 alone warns when the installed TorchSX cannot read this schema
+        mismatch = torchsx_mismatch() if self.rank == 0 else None
+        if mismatch:
+            warnings.warn(mismatch, stacklevel=2)
         if self.path.exists():
             self.path.unlink()
         self._conn = duckdb.connect(str(self.path))
@@ -402,6 +433,10 @@ class DuckDBOffloader(_StreamWriter):
             self._emit_unindexed()
             self._flush()
             self._write_calibration()
+            if self.calibrate_model_var and exc[0] is None:
+                self.model_var_scale = calibrate_model_variance(
+                    self._conn, alpha=self.calibrate_alpha
+                )
             self._conn.execute(_INDEXES)
         finally:
             self._conn.close()
@@ -413,7 +448,7 @@ class DuckDBOffloader(_StreamWriter):
         if cal:
             cell = cal.get("cell") or (None,) * 6
             self._conn.execute(
-                "INSERT INTO calibration VALUES (" + ", ".join("?" * 22) + ")",
+                "INSERT INTO calibration VALUES (" + ", ".join("?" * 23) + ")",
                 [
                     _probixi_version(),
                     SCHEMA_VERSION,
@@ -441,6 +476,7 @@ class DuckDBOffloader(_StreamWriter):
                     cal.get("aperture"),
                     _as_float(cal.get("clen")),
                     *(_as_float(x) for x in cell),
+                    self.rank,
                 ],
             )
 
@@ -588,7 +624,8 @@ class DuckDBOffloader(_StreamWriter):
             r = self.integration
             radii = r.get("radii") or (None, None, None)
             self._conn.execute(
-                "INSERT INTO integration VALUES (?, ?, ?, ?, ?, ?)",
+                "INSERT INTO integration (r_peak, r_gap, r_bg, adu_per_photon, "
+                "bg_annulus_pixels, aperture) VALUES (?, ?, ?, ?, ?, ?)",
                 [
                     *(_as_float(x) for x in radii),
                     _as_float(r.get("adu_per_photon")),
@@ -712,6 +749,7 @@ class DuckDBOffloader(_StreamWriter):
             None if num_reflections is None else int(num_reflections),
             _as_float(gain),
             *self._event_meta(filename, event),
+            self.rank,
         )
 
     def _event_meta(self, filename: str, event: int) -> tuple:
@@ -785,6 +823,7 @@ class DuckDBOffloader(_StreamWriter):
                         filename,
                         physical_event,
                         *self._event_meta(filename, physical_event),
+                        rank=self.rank,
                     )
                 )
                 if len(self._frame_rows) >= _FLUSH_ROWS:
@@ -934,14 +973,12 @@ class DuckDBOffloader(_StreamWriter):
 
 
 def _to_array(t, n: int = 0, dtype=np.float64) -> np.ndarray:
-    # Optional tensor -> array, or zeros(n) when it was not recorded
     if t is None:
         return np.zeros(n, dtype=dtype)
     return t.detach().cpu().numpy().astype(dtype)
 
 
 def _reflection_extras(result) -> tuple:
-    # (n_pixels, background_model, background_model_var) lists; () if not integrated
     cols = (
         result.predicted_n_pixels,
         result.predicted_bg_model,
@@ -974,12 +1011,8 @@ def _columns(names: tuple, rows: list) -> dict:
 
 
 def _probixi_version() -> Optional[str]:
-    try:
-        from importlib.metadata import version
-
-        return version("probixi")
-    except Exception:  # noqa: BLE001 - version is provenance only
-        return None
+    # The source tree's own version: installed metadata can belong to another checkout
+    return __version__
 
 
 def _as_float(value) -> Optional[float]:
@@ -990,10 +1023,194 @@ def _as_float(value) -> Optional[float]:
 
 
 def _unindexed_frame_row(
-    fid: str, idx: int, fname: str, event: int, name=None, energy=None
+    fid: str, idx: int, fname: str, event: int, name=None, energy=None, rank=0
 ) -> tuple:
     row: list = [None] * len(_FRAME_COLUMNS)
     row[:5] = (fid, int(idx), fname, int(event), False)
     row[_FRAME_COLUMNS.index("event_name")] = name
     row[_FRAME_COLUMNS.index("photon_energy_eV")] = energy
+    row[_FRAME_COLUMNS.index("rank")] = int(rank)
     return tuple(row)
+
+
+MODEL_VAR_SAMPLE = 2_000_000
+MODEL_VAR_SEED = 1988
+MODEL_VAR_MIN_OBS = 1000
+MODEL_VAR_RANGE = (0.05, 20.0)
+MODEL_VAR_ITERS = 8
+
+
+def _robust_sd(z: np.ndarray) -> float:
+    return float(1.4826 * np.median(np.abs(z - np.median(z))))
+
+
+def fit_model_var_scale(
+    intensity_model: np.ndarray,
+    var_bg: np.ndarray,
+    gain: float,
+) -> Optional[float]:
+    # sigma^2 = k var_bg + gain max(I, 0), in ADU; the sample must carry little signal
+    im = np.asarray(intensity_model, dtype=np.float64)
+    vb = np.asarray(var_bg, dtype=np.float64)
+    ok = np.isfinite(im) & np.isfinite(vb) & (vb > 0)
+    im, vb = im[ok], vb[ok]
+    if im.size < MODEL_VAR_MIN_OBS:
+        return None
+    poisson = float(gain) * np.clip(im, 0.0, None)
+    k = 1.0
+    for _ in range(MODEL_VAR_ITERS):
+        s = _robust_sd(im / np.sqrt(k * vb + poisson))
+        if not s > 0:
+            return None
+        k_new = min(max(k * s * s, MODEL_VAR_RANGE[0]), MODEL_VAR_RANGE[1])
+        done = abs(k_new - k) < 1e-4 * k
+        k = k_new
+        if done:
+            break
+    return k
+
+
+RUN_LIMIT_QUANTILE = 0.1
+
+
+def run_resolution_limit(conn) -> Optional[float]:
+    # Run resolution in Å, a quantile in d of the crystals' limits; TorchSX's --dmin
+    tables = {r[0] for r in conn.execute("SHOW TABLES").fetchall()}
+    if "crystals" not in tables:
+        return None
+    row = conn.execute(
+        "SELECT quantile_cont(10.0 / diffraction_limit_nm_inv, ?) FROM crystals "
+        "WHERE diffraction_limit_nm_inv > 0",
+        [RUN_LIMIT_QUANTILE],
+    ).fetchone()
+    return float(row[0]) if row and row[0] else None
+
+
+_MODEL_VAR_COLUMNS = {
+    "bg_model_var_scale": "DOUBLE",
+    "bg_model_var_dmin_A": "DOUBLE",
+    "bg_model_var_ref": "VARCHAR",
+    "bg_model_var_alpha": "DOUBLE",
+    "bg_model_var_n_ref": "BIGINT",
+}
+
+
+def _add_model_var_columns(conn) -> None:
+    for col, typ in _MODEL_VAR_COLUMNS.items():
+        conn.execute(f"ALTER TABLE integration ADD COLUMN IF NOT EXISTS {col} {typ}")
+
+
+def calibrate_model_variance(
+    conn,
+    *,
+    alpha: Optional[float] = MODEL_VAR_ALPHA,
+) -> Optional[float]:
+    # k comes from unmasked reflections past their crystal's limit, to the run's limit
+    tables = {r[0] for r in conn.execute("SHOW TABLES").fetchall()}
+    if not {"integration", "reflections", "crystals"} <= tables:
+        return None
+    _add_model_var_columns(conn)
+    row = conn.execute(
+        "SELECT adu_per_photon, bg_annulus_pixels, bg_model_var_scale "
+        "FROM integration LIMIT 1"
+    ).fetchone()
+    if row is None:
+        return None
+    gain, n_bg, done = row
+    if done is not None:
+        return float(done)
+    if not n_bg or n_bg <= 0 or not gain or gain <= 0:
+        return None
+    cut = run_resolution_limit(conn)
+    if not cut or cut <= 0:
+        return None
+    k = None
+    for a in (alpha, None) if alpha is not None else (None,):
+        gate, params = ("", []) if a is None else ("AND c.enrich_p <= ?", [float(a)])
+        ref = conn.execute(
+            f"""
+            SELECT im, vb FROM (
+                SELECT r.intensity + r.n_pixels * r.background - r.background_model AS im,
+                       r.background_model_var * (1 + ? / r.n_pixels) AS vb
+                FROM reflections r JOIN crystals c USING (crystal_id)
+                WHERE c.diffraction_limit_nm_inv > 0
+                  AND r.resolution_nm_inv > c.diffraction_limit_nm_inv
+                  AND r.resolution_nm_inv <= ? {gate}
+                  AND r.n_pixels > 0 AND r.background_model IS NOT NULL
+                  AND r.background_model_var > 0
+                  AND coalesce(r.n_masked, 0) = 0 AND coalesce(r.n_overlap, 0) = 0
+            ) AS past_limit
+            USING SAMPLE reservoir({MODEL_VAR_SAMPLE} ROWS) REPEATABLE ({MODEL_VAR_SEED})
+            """,
+            [float(n_bg), 10.0 / float(cut), *params],
+        ).fetchnumpy()
+        k = fit_model_var_scale(ref["im"], ref["vb"], float(gain))
+        if k is not None:
+            break
+    if k is None:
+        return None
+    if a is None and alpha is not None:
+        warnings.warn(
+            f"Fewer than {MODEL_VAR_MIN_OBS} reference reflections lie on lattices "
+            f"with enrich_p <= {alpha:g}. The model variance is fitted on every lattice."
+        )
+    conn.execute(
+        "UPDATE reflections SET background_model_var = background_model_var * ? "
+        "WHERE background_model_var IS NOT NULL",
+        [k],
+    )
+    conn.execute(
+        "UPDATE integration SET bg_model_var_scale = ?, bg_model_var_dmin_A = ?, "
+        "bg_model_var_ref = ?, bg_model_var_alpha = ?, bg_model_var_n_ref = ?",
+        [
+            k,
+            float(cut),
+            "all" if a is None else "enrich_pass",
+            None if a is None else float(a),
+            int(ref["im"].size),
+        ],
+    )
+    return k
+
+
+def recalibrate_model_variance(
+    conn, *, alpha: Optional[float] = MODEL_VAR_ALPHA
+) -> Optional[float]:
+    """Undo the recorded model-variance scale and fit it again.
+
+    Divides ``background_model_var`` by ``integration.bg_model_var_scale``,
+    clears the record and calls :func:`calibrate_model_variance`, all in one
+    transaction.
+
+    Parameters
+    ----------
+    conn : duckdb.DuckDBPyConnection
+        Writable connection to a probixi database, outside a transaction.
+    alpha : float or None, default 1e-3
+        Largest ``enrich_p`` of a reference lattice. None uses every lattice.
+
+    Returns
+    -------
+    float or None
+        The new scale, or None when nothing could be fitted.
+    """
+    conn.execute("BEGIN TRANSACTION")
+    try:
+        _add_model_var_columns(conn)
+        row = conn.execute(
+            "SELECT bg_model_var_scale FROM integration LIMIT 1"
+        ).fetchone()
+        if row and row[0]:
+            conn.execute(
+                "UPDATE reflections SET background_model_var = background_model_var / ? "
+                "WHERE background_model_var IS NOT NULL",
+                [row[0]],
+            )
+            cleared = ", ".join(f"{col} = NULL" for col in _MODEL_VAR_COLUMNS)
+            conn.execute(f"UPDATE integration SET {cleared}")
+        k = calibrate_model_variance(conn, alpha=alpha)
+        conn.execute("COMMIT")
+    except BaseException:
+        conn.execute("ROLLBACK")
+        raise
+    return k

@@ -18,7 +18,7 @@ def _to_numpy(x) -> np.ndarray:
 
 
 def _xy(points) -> Optional[np.ndarray]:
-    # (N, 2) (row, col) -> (N, 2) (x=col, y=row); None/empty -> None
+    # (row, col) points -> (x=col, y=row)
     if points is None:
         return None
     arr = _to_numpy(points)

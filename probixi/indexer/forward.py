@@ -18,7 +18,7 @@ _PANEL_FIELDS = itemgetter(
 def _panel_bases(
     geometry: dict, device: Optional[torch.device], dtype: torch.dtype
 ) -> Optional[Tensor]:
-    # TODO: support tilted panels; all panels are taken as coplanar at z = clen
+    # Assumes every panel is coplanar at z = clen; panel tilt is not modelled
     panels = geometry.get("panels") or {}
     try:
         return _panel_tensor(tuple(map(_PANEL_FIELDS, panels.values())), device, dtype)
@@ -57,15 +57,6 @@ def _panel_tensor(
     if not rows:
         return None
     return torch.tensor(rows, device=device, dtype=dtype)
-
-
-def _panel_model_bases(
-    geometry: dict, device: Optional[torch.device], dtype: torch.dtype
-) -> Optional[Tensor]:
-    # None without panels or when one lacks fs/ss; callers then use the beam-centre map
-    if not (geometry.get("panels") or {}):
-        return None
-    return _panel_bases(geometry, device, dtype)
 
 
 def _geometry_constants(
@@ -156,35 +147,25 @@ def _kernel(t: Tensor, dtype: torch.dtype):
 def detector_to_q(
     positions: Tensor,
     geometry: dict,
-    frame_rotation: Optional[Tensor] = None,
     dtype: torch.dtype = torch.float32,
 ) -> Tensor:
-    # (N, 2) (row, col) to q (N, 3) in A^-1; frame_rotation maps lab q into the crystal
+    # (N, 2) (row, col) to lab-frame q (N, 3) in A^-1
     if positions.ndim != 2 or positions.shape[-1] != 2:
         raise ValueError("positions must be (N, 2)")
     device = positions.device
     g = _geometry_constants(geometry, device=device, dtype=dtype)
     pos = positions.to(device=device, dtype=dtype)
-    bases = _panel_model_bases(geometry, device, dtype)
+    bases = _panel_bases(geometry, device, dtype)
 
     kernel = _kernel(pos, dtype)
     if kernel is not None:
-        q_lab = kernel.lift(pos, bases, g["packed"])
-    else:
-        # q = (s_hat - s0) / lambda with s0 = (0, 0, 1), the beam along +z
-        xy_lab = _lab_xy_pixels(pos, geometry, bases) * g["pix_A"]
-        sq = xy_lab * xy_lab
-        r = torch.sqrt(sq[:, 0] + sq[:, 1] + g["clen_sq"])
-        qz = (g["clen_A"] / r - 1.0) * g["inv_lambda"]
-        q_lab = torch.cat(
-            [(xy_lab / r[:, None]) * g["inv_lambda"], qz[:, None]], dim=-1
-        )
-    if frame_rotation is None:
-        return q_lab
-    R = frame_rotation.to(device=device, dtype=dtype)
-    if R.shape != (3, 3):
-        raise ValueError("frame_rotation must be (3, 3)")
-    return q_lab @ R
+        return kernel.lift(pos, bases, g["packed"])
+    # q = (s_hat - s0) / lambda with s0 = (0, 0, 1), the beam along +z
+    xy_lab = _lab_xy_pixels(pos, geometry, bases) * g["pix_A"]
+    sq = xy_lab * xy_lab
+    r = torch.sqrt(sq[:, 0] + sq[:, 1] + g["clen_sq"])
+    qz = (g["clen_A"] / r - 1.0) * g["inv_lambda"]
+    return torch.cat([(xy_lab / r[:, None]) * g["inv_lambda"], qz[:, None]], dim=-1)
 
 
 def _project_to_panels(
@@ -220,7 +201,6 @@ def _project_to_panels(
 def q_to_detector(
     q: Tensor,
     geometry: dict,
-    frame_rotation: Optional[Tensor] = None,
     dtype: torch.dtype = torch.float32,
 ) -> Tensor:
     # Intersects S = lambda q + s0 with the plane z = clen; returns (N, 2) (row, col)
@@ -229,12 +209,7 @@ def q_to_detector(
     device = q.device
     g = _geometry_constants(geometry, device=device, dtype=dtype)
     qv = q.to(device=device, dtype=dtype)
-    if frame_rotation is not None:
-        R = frame_rotation.to(device=device, dtype=dtype)
-        if R.shape != (3, 3):
-            raise ValueError("frame_rotation must be (3, 3)")
-        qv = qv @ R.transpose(-1, -2)
-    bases = _panel_model_bases(geometry, device, dtype)
+    bases = _panel_bases(geometry, device, dtype)
     kernel = _kernel(qv, dtype)
     if kernel is not None:
         return kernel.project(qv, bases, g["packed"])

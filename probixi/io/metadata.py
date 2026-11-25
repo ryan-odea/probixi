@@ -6,11 +6,12 @@ from typing import Optional, Union
 
 import h5py
 import hdf5plugin  # noqa: F401  (registers bitshuffle)
+import numpy as np
 
 from .assemble import PanelPlacement, assembled_frame_shape, build_placements
 from .cbf import read_cbf_header
 from .cell import CellParams
-from .geometry import Geometry, match_events
+from .geometry import Geometry, energy_path, match_events
 
 PathLike = Union[str, Path]
 
@@ -29,8 +30,6 @@ class H5Info:
         Frames this entry selects.
     frame_shape : tuple[int, ...]
         Assembled frame shape ``(ss, fs)`` in data space.
-    raw_shape : tuple[int, ...]
-        Shape of the stored array before assembly.
     placements : list[PanelPlacement], optional
         Panel placements when frames are assembled from the stored array;
         ``None`` for a plain ``(N, ss, fs)`` stack, which is read by slicing.
@@ -41,14 +40,16 @@ class H5Info:
     events : list[str], optional
         Names that ``%`` stands for, one frame each.
     photon_energy_eV : list[float], optional
-        Per-event photon energies in eV from a ``photon_energy = /%/...`` path.
+        One photon energy per event in eV: from a per-event
+        ``photon_energy = /%/...`` path, or from a dataset that holds one entry
+        per frame of a stacked file. An entry that is not finite marks an event
+        without a reading; it takes the wavelength of the geometry.
     """
 
     filename: str
     dataset: str
     n_frames: int
     frame_shape: tuple[int, ...]
-    raw_shape: tuple[int, ...] = ()
     placements: Optional[list[PanelPlacement]] = None
     event_start: int = 0
     source_n_frames: Optional[int] = None
@@ -66,8 +67,6 @@ class CbfInfo:
         ``.cbf``, ``.cbf.gz`` or ``.cbf.bz2`` file.
     frame_shape : tuple[int, ...]
         Image shape ``(ss, fs)``.
-    dtype : str
-        Decoded pixel type, for example ``"int32"``.
     n_frames : int, default 1
         Always 1.
     event_start : int, default 0
@@ -79,7 +78,6 @@ class CbfInfo:
 
     filename: str
     frame_shape: tuple[int, ...]
-    dtype: str
     n_frames: int = 1
     event_start: int = 0
     source_n_frames: Optional[int] = None
@@ -107,8 +105,6 @@ class Metadata:
         Distinct source files.
     n_frames : int
         Frames over all entries.
-    entry_point : int, optional
-        Starting frame offset; :class:`DataLoader` does not set it.
     """
 
     files: dict = field(default_factory=dict)
@@ -117,7 +113,6 @@ class Metadata:
     frame_size: Optional[tuple] = None
     n_files: int = 0
     n_frames: int = 0
-    entry_point: Optional[int] = None
 
     @property
     def distance(self) -> Optional[float]:
@@ -130,7 +125,6 @@ def scan_cbf(path: PathLike) -> CbfInfo:
     return CbfInfo(
         filename=str(Path(path)),
         frame_shape=header.shape,
-        dtype=header.dtype.name,
     )
 
 
@@ -149,7 +143,6 @@ def scan_h5(path: PathLike, geometry: Optional[Geometry] = None) -> H5Info:
             dataset=dataset_path,
             n_frames=int(shape[0]),
             frame_shape=tuple(shape[1:]),
-            raw_shape=tuple(shape),
             placements=None,
         )
 
@@ -175,8 +168,8 @@ def scan_h5(path: PathLike, geometry: Optional[Geometry] = None) -> H5Info:
             dataset=str(layout.data_path),
             n_frames=int(raw_shape[0]),
             frame_shape=(int(raw_shape[1]), int(raw_shape[2])),
-            raw_shape=raw_shape,
             placements=None,
+            photon_energy_eV=_stack_energies(path, geometry, int(raw_shape[0])),
         )
 
     placements = build_placements(geometry)
@@ -187,8 +180,8 @@ def scan_h5(path: PathLike, geometry: Optional[Geometry] = None) -> H5Info:
                 dataset=str(layout.data_path),
                 n_frames=int(raw_shape[0]),
                 frame_shape=(int(raw_shape[1]), int(raw_shape[2])),
-                raw_shape=raw_shape,
                 placements=None,
+                photon_energy_eV=_stack_energies(path, geometry, int(raw_shape[0])),
             )
         raise ValueError(f"could not derive panel layout for {path}")
     n_frames = int(raw_shape[layout.event_axis]) if layout.event_axis is not None else 1
@@ -199,9 +192,25 @@ def scan_h5(path: PathLike, geometry: Optional[Geometry] = None) -> H5Info:
         dataset=str(layout.data_path),
         n_frames=n_frames,
         frame_shape=frame_shape,
-        raw_shape=raw_shape,
         placements=placements,
+        photon_energy_eV=_stack_energies(path, geometry, n_frames),
     )
+
+
+def _stack_energies(
+    path: Path, geometry: Geometry, n_frames: int
+) -> Optional[list[float]]:
+    # None unless photon_energy names a dataset with one entry per frame; in eV
+    energy = geometry.parameters.get("photon_energy")
+    if not isinstance(energy, str) or "%" in energy:
+        return None
+    e_path, to_ev = energy_path(energy)
+    with h5py.File(path, "r") as f:
+        node = f.get(e_path)
+        if not isinstance(node, h5py.Dataset) or node.size != n_frames:
+            return None
+        values = np.asarray(node[()], dtype=np.float64).ravel() * to_ev
+    return [float(v) for v in values]
 
 
 def _scan_events(path: Path, pattern: str, geometry: Geometry) -> H5Info:
@@ -213,7 +222,8 @@ def _scan_events(path: Path, pattern: str, geometry: Geometry) -> H5Info:
             raise ValueError(f"no datasets match {pattern!r} in {path}")
         shape = tuple(int(s) for s in f[pattern.replace("%", events[0])].shape)
         if isinstance(energy, str) and "%" in energy:
-            energies = [float(f[energy.replace("%", n)][()]) for n in events]
+            e_path, to_ev = energy_path(energy)
+            energies = [float(f[e_path.replace("%", n)][()]) * to_ev for n in events]
     if len(shape) != 2:
         raise ValueError(f"per-event dataset {pattern!r} is {len(shape)}D, not 2D")
     return H5Info(
@@ -221,7 +231,6 @@ def _scan_events(path: Path, pattern: str, geometry: Geometry) -> H5Info:
         dataset=pattern,
         n_frames=len(events),
         frame_shape=shape,
-        raw_shape=shape,
         events=events,
         photon_energy_eV=energies,
     )
@@ -268,7 +277,6 @@ def _validate_placements(
 
 
 def _find_frame_dataset(h5file: h5py.File) -> tuple[str, tuple]:
-    # The first 3-D dataset in visit order is the frame stack
     found: dict = {}
 
     def visitor(name, obj):

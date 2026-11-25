@@ -62,7 +62,6 @@ def build_placements(geometry: Geometry) -> Optional[list[PanelPlacement]]:
 
 
 def assembled_frame_shape(placements: list[PanelPlacement]) -> tuple[int, int]:
-    # Data-space (H, W) spanning every panel rectangle
     h = max(p.max_ss for p in placements) + 1
     w = max(p.max_fs for p in placements) + 1
     return (int(h), int(w))
@@ -148,7 +147,7 @@ NEXUS_MASK_PATHS = (
 
 
 def _apply_mask_bits(raw: np.ndarray, mask_good: int, mask_bad: int) -> np.ndarray:
-    # CrystFEL rule: good when every mask_good bit is set and no mask_bad bit is
+    # CrystFEL's mask_good / mask_bad rule
     m = np.asarray(raw)
     if not np.issubdtype(m.dtype, np.unsignedinteger):
         m = m.astype(np.uint64)
@@ -163,8 +162,37 @@ def read_mask(
     frame_shape: tuple[int, int],
     mask_file: Optional[str] = None,
 ) -> Optional[np.ndarray]:
+    raw_cache: dict = {}
+    good = _read_mask_spec(
+        geometry, geometry.mask_spec, data_filename, frame_shape, mask_file, raw_cache
+    )
+    if mask_file is not None:
+        return good
+    for name, spec in geometry.panel_mask_specs.items():
+        own = _read_mask_spec(
+            geometry, spec, data_filename, frame_shape, None, raw_cache, only=name
+        )
+        if own is None:
+            continue
+        if good is None:
+            good = np.ones((int(frame_shape[0]), int(frame_shape[1])), dtype=bool)
+        panel = geometry.panels[name]
+        rows = slice(int(panel["min_ss"]), int(panel["max_ss"]) + 1)
+        cols = slice(int(panel["min_fs"]), int(panel["max_fs"]) + 1)
+        good[rows, cols] = own[rows, cols]
+    return good
+
+
+def _read_mask_spec(
+    geometry: Geometry,
+    spec,
+    data_filename: str,
+    frame_shape: tuple[int, int],
+    mask_file: Optional[str],
+    raw_cache: dict,
+    only: Optional[str] = None,
+) -> Optional[np.ndarray]:
     # geometry's mask path, then the fallbacks; an explicit mask_file must be readable
-    spec = geometry.mask_spec
     named = spec.mask_path if spec is not None else None
     paths = [named] if named is not None else []
     bits_only = (
@@ -186,15 +214,20 @@ def read_mask(
             f"mask {paths[0]!r} cannot be read from the CBF file {fname!r}; "
             "set mask_file (or --mask) to an HDF5 file"
         )
-    try:
-        with h5py.File(fname, "r") as f:
-            path = next((p for p in paths if isinstance(f.get(p), h5py.Dataset)), None)
-            if path is None:
-                tried = ", ".join(repr(p) for p in paths)
-                return skip(f"no mask dataset ({tried}) in {fname!r}")
-            raw = _read_static_mask_slab(f[path], geometry)
-    except OSError:
-        return skip(f"could not open mask file {fname!r}")
+    key = (fname, tuple(paths))
+    if key not in raw_cache:
+        try:
+            with h5py.File(fname, "r") as f:
+                path = next(
+                    (p for p in paths if isinstance(f.get(p), h5py.Dataset)), None
+                )
+                if path is None:
+                    tried = ", ".join(repr(p) for p in paths)
+                    return skip(f"no mask dataset ({tried}) in {fname!r}")
+                raw_cache[key] = (path, _read_static_mask_slab(f[path], geometry))
+        except OSError:
+            return skip(f"could not open mask file {fname!r}")
+    path, raw = raw_cache[key]
 
     mask_good = spec.mask_good if spec is not None else 0
     mask_bad = spec.mask_bad if spec is not None else 0
@@ -213,6 +246,8 @@ def read_mask(
         try:
             assembled = np.ones(fshape, dtype=bool)
             for p in placements:
+                if only is not None and p.name != only:
+                    continue
                 slab = _slab_to_ss_fs(good[_panel_index(p, good.ndim, 0)], p)
                 assembled[p.min_ss : p.max_ss + 1, p.min_fs : p.max_fs + 1] = slab
             return assembled

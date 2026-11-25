@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import warnings
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Optional, Sequence, Union
@@ -18,7 +19,8 @@ PathLike = Union[str, Path]
 _CHUNK_MARKER = "----- Begin chunk -----"
 _SERIAL_PREFIX = "Image serial number:"
 _STREAM_VERSION_PREFIX = "CrystFEL stream format"
-_DB_DATA_TABLES = ("frames", "crystals", "reflections", "peaks")
+_INT_RADIUS = "--int-radius="
+_DB_DATA_TABLES = ("frames", "crystals", "reflections", "peaks", "calibration")
 _DB_META_TABLES = ("geometry", "panels", "cell", "integration")
 
 __all__ = [
@@ -77,11 +79,26 @@ def _validate_cuda_devices(dev_list: Sequence[torch.device]) -> None:
         )
 
 
+def _header_radii(part: PathLike) -> Optional[str]:
+    part = Path(part)
+    if not part.exists():
+        return None
+    with part.open("r") as fh:
+        for line in fh:
+            if line.startswith(_CHUNK_MARKER):
+                return None
+            if _INT_RADIUS in line:
+                return line.split(_INT_RADIUS, 1)[1].split()[0]
+    return None
+
+
 def merge_streams(part_paths: Sequence[PathLike], output_path: PathLike) -> int:
     """Concatenate per-rank ``.stream`` files in order, renumbering image serials.
 
     The header comes from the first part that has one. Missing and empty parts
-    are skipped.
+    are skipped. Parts that calibrated different integration radii raise a
+    warning, and the header lists the radii of every part after the
+    ``--int-radius`` line of the first.
 
     Returns
     -------
@@ -90,6 +107,19 @@ def merge_streams(part_paths: Sequence[PathLike], output_path: PathLike) -> int:
     """
     serial = 0
     header_written = False
+    radii = {str(p): _header_radii(p) for p in part_paths}
+    radii = {k: v for k, v in radii.items() if v is not None}
+    mixed = len(set(radii.values())) > 1
+    if mixed:
+        warnings.warn(
+            "The parts calibrated different integration radii ("
+            + "; ".join(f"{Path(k).name}: {v}" for k, v in radii.items())
+            + "). A stream header holds one --int-radius, and the joined header "
+            "keeps the radii of the first part. Merging programs that rebuild "
+            "the noise from the header use the wrong disk for the other parts. "
+            "Write a .db output, which stores the pixel count of each disk.",
+            stacklevel=2,
+        )
     with Path(output_path).open("w") as out:
         for p in part_paths:
             part = Path(p)
@@ -104,8 +134,13 @@ def merge_streams(part_paths: Sequence[PathLike], output_path: PathLike) -> int:
                     if line.startswith(_CHUNK_MARKER):
                         in_chunks = True
                     if not in_chunks:
-                        if not header_written and has_header:  # header from first part
+                        if not header_written and has_header:
                             out.write(line)
+                            if mixed and _INT_RADIUS in line:
+                                for k, v in radii.items():
+                                    out.write(
+                                        f"probixi part radii {Path(k).name}: {v}\n"
+                                    )
                         continue
                     if line.startswith(_SERIAL_PREFIX):
                         serial += 1
@@ -117,7 +152,10 @@ def merge_streams(part_paths: Sequence[PathLike], output_path: PathLike) -> int:
     return serial
 
 
-def merge_dbs(part_paths: Sequence[PathLike], output_path: PathLike) -> int:
+def merge_dbs(
+    part_paths: Sequence[PathLike],
+    output_path: PathLike,
+) -> int:
     # union of the parts; metadata from the first readable one; returns frames indexed
     import duckdb
 
@@ -148,6 +186,7 @@ def merge_dbs(part_paths: Sequence[PathLike], output_path: PathLike) -> int:
                     conn.execute(f"INSERT INTO {tbl} SELECT * FROM {alias}.{tbl}")
             finally:
                 conn.execute(f"DETACH {alias}")
+        _db.calibrate_model_variance(conn)
         conn.execute(  # serials renumbered in frame order across the parts
             "UPDATE frames SET serial = r.rn FROM ("
             "  SELECT frame_id, row_number() OVER (ORDER BY frame_index) AS rn"
@@ -188,7 +227,7 @@ class BlockConfig:
     calibration_seed: int = 0
     seed_frames: int = 32
     random_seed: int = 1988
-    target_noise_peaks: Optional[float] = 5.0
+    target_noise_peaks: Union[float, str, None] = 5.0
     noise_mode: str = "online"
     warmup_frames: int = 16
     noise_decay: float = 1.0
@@ -213,6 +252,21 @@ def _remove_part(part: PathLike) -> None:
     Path(part).unlink(missing_ok=True)
     Path(f"{part}.stats.json").unlink(missing_ok=True)
     Path(f"{part}.wal").unlink(missing_ok=True)
+
+
+def usable_cpus() -> int:
+    # cores this process may use: the affinity mask (Slurm, taskset), else every core
+    try:
+        return max(1, len(os.sched_getaffinity(0)))
+    except AttributeError:
+        return max(1, os.cpu_count() or 1)
+
+
+def cap_torch_threads(limit: Optional[int] = None) -> int:
+    # torch starts one thread per core of the node, more than a shared node allocates
+    n = min(torch.get_num_threads(), limit if limit and limit > 0 else usable_cpus())
+    torch.set_num_threads(n)
+    return n
 
 
 def run_block(
@@ -283,6 +337,9 @@ def run_block(
         offloader = DuckDBOffloader
         # each rank backfills only its own block's non-indexed frames
         offload_kwargs["frame_range"] = (lo, hi)
+        offload_kwargs["calibration"] = lambda: p.calibration_summary
+        offload_kwargs["rank"] = rank
+        offload_kwargs["calibrate_model_var"] = False
     else:
         offloader = DataOffloader
     n_cellcal = 0
@@ -349,7 +406,7 @@ def run_data_parallel(
     recalibrate_every: Optional[int] = None,
     seed_frames: int = 32,
     random_seed: int = 1988,
-    target_noise_peaks: Optional[float] = 5.0,
+    target_noise_peaks: Union[float, str, None] = 5.0,
     noise_mode: str = "online",
     warmup_frames: int = 16,
     noise_decay: float = 1.0,
@@ -388,9 +445,18 @@ def run_data_parallel(
         Frame range of the whole run, start inclusive and stop exclusive.
     seed_frames : int, default 32
         Seed frames for calibration, ``n_seed`` of :meth:`Probixi.calibrate`.
+    target_noise_peaks : float, "auto" or None, default 5.0
+        Noise budget of :meth:`Probixi.calibrate`. ``"auto"`` scales the budget
+        with the valid pixels. None skips the threshold calibration and keeps
+        ``mf_threshold``.
+    panel : str, default "0"
+        Panel name for peaks outside every geometry panel, as for
+        :class:`DataOffloader`.
     enrich_gate : bool, default False
         Keep only lattices whose chance probability ``enrich_p`` is at most
         ``enrich_alpha``.
+    enrich_alpha : float, default 1e-3
+        Threshold of ``enrich_gate``; ignored without it.
     threads_per_worker : int, optional
         CPU threads per worker. With several devices the default divides the
         CPU count between them.
@@ -408,7 +474,7 @@ def run_data_parallel(
     _validate_cuda_devices(dev_list)
     world = len(dev_list)
     if threads_per_worker is None and world > 1:
-        threads_per_worker = max(1, (os.cpu_count() or world) // world)
+        threads_per_worker = max(1, usable_cpus() // world)
 
     # resolve the absolute frame range once (metadata-only scan)
     loader = DataLoader(list_file, geometry_file=geometry_file, cell_file=cell_file)

@@ -21,6 +21,9 @@ _LAZY = {
     "DataOffloader": ".io",
     "PeakOffloader": ".io",
     "DuckDBOffloader": ".io",
+    "__version__": "._version",
+    "SCHEMA_VERSION": "._compat",
+    "TORCHSX_VERSION": "._compat",
 }
 
 __all__ = list(_LAZY)

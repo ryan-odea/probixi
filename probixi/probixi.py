@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import math
 import random
+import re
 import threading
 import warnings
 from collections.abc import Sized
@@ -14,6 +15,7 @@ from typing import Iterable, Iterator, Literal, Optional, Union
 import torch
 from torch import Tensor
 
+from ._version import __version__
 from .indexer import (
     CellMatchConfig,
     FrameIndexResult,
@@ -55,7 +57,6 @@ from .peakfinding.noise import (
     background_fluctuation_ratio,
     calibrate_noise,
     calibrate_threshold,
-    fit_eigen_background,
     fit_photon_transfer,
 )
 from .peakfinding.noise.model import value_ok
@@ -95,12 +96,13 @@ _CLEN_MAX_ROUNDS = 3
 
 # --- BEGIN GENERATED CITATION ---
 _CITATION = r"""
-@software{odea_probixi,
-  author  = {O'Dea, Ryan and Kepa, Michal and Weinert, Tobias},
-  title   = {{probixi}: Self-Calibrating Probabilistic Peak Finding for Serial X-Ray Crystallographic Data},
-  version = {0.10.2},
-  year    = {2026},
-  url     = {https://github.com/ryan-odea/probixi}
+@inproceedings{o'dea2026probixi,
+  title     = {{PROBIXI} - Self-Calibrating ({PROB})ab(I)listic Peak Detection for Serial (X)-Ray Crystallograph(I)c Data},
+  author    = {Ryan O'Dea and Michal Kepa and Tobias Weinert},
+  booktitle = {AI for Accelerated Materials Design - NeurIPS 2026},
+  year      = {2026},
+  version   = {0.11.0},
+  url       = {https://openreview.net/forum?id=5UuCD5Qy54}
 }
 """
 # --- END GENERATED CITATION ---
@@ -150,7 +152,7 @@ def citation(timeout: float = 3.0) -> str:
     Returns
     -------
     str
-        The BibTeX entry, newline-terminated.
+        The BibTeX entry with the installed version, newline-terminated.
     """
     # urlopen's timeout applies per address tried; the daemon thread caps the total
     fetched: list[str] = []
@@ -168,6 +170,11 @@ def citation(timeout: float = 3.0) -> str:
     worker.start()
     worker.join(timeout)
     text = fetched[0] if fetched and fetched[0].strip() else _CITATION
+    text = re.sub(
+        r"(?m)^(\s*version\s*=\s*\{)[^}]*(\})",
+        lambda m: m.group(1) + __version__ + m.group(2),
+        text,
+    )
     entry = text.strip() + "\n"
     print(entry, end="")
     return entry
@@ -373,10 +380,13 @@ class Probixi:
 
         :meth:`calibrate` measures them from the radial profile of peaks on
         frames outside the seed set. None before calibration or with too few
-        peaks, in which case the indexer uses fixed radii.
+        peaks, in which case the indexer uses fixed radii. Radii given as
+        ``IntegrateConfig(radii=...)`` replace the measured ones.
         """
         if self.indexer is None:
             return None
+        if self.indexer.integrate.radii is not None:
+            return self.indexer._radii()
         return self.indexer._measured_radii
 
     @property
@@ -402,7 +412,10 @@ class Probixi:
 
         ``radii`` (disk, annulus_in, annulus_out) in pixels, ``adu_per_photon``,
         the local-background ``bg_annulus_pixels``, and the ``aperture`` rule, as
-        applied after :meth:`calibrate`. None without a cell.
+        applied after :meth:`calibrate`. ``shell_radii`` holds the per-shell disk
+        radii, or None before profile stacking and under
+        ``IntegrateConfig(shell_disk=False)``, where every reflection takes
+        ``radii``. None without a cell.
         """
         if self.indexer is None:
             return None
@@ -411,6 +424,11 @@ class Probixi:
             adu_per_photon=self.indexer._adu_per_photon(),
             bg_annulus_pixels=self.indexer._bg_annulus_pixels,
             aperture=self.indexer._aperture(),
+            shell_radii=(
+                list(self.indexer._radius_by_q[1])
+                if self.indexer._radius_by_q and self.indexer.integrate.shell_disk
+                else None
+            ),
         )
 
     @property
@@ -447,7 +465,12 @@ class Probixi:
             cell=(
                 None
                 if cell is None
-                else (cell.a, cell.b, cell.c, cell.alpha, cell.beta, cell.gamma)
+                else (
+                    cell.a,
+                    cell.b,
+                    cell.c,
+                    *(math.degrees(x) for x in (cell.alpha, cell.beta, cell.gamma)),
+                )
             ),
         )
 
@@ -722,7 +745,6 @@ class Probixi:
         )
 
     def _static_mask(self, frame: Tensor, frame_size: tuple[int, int]) -> Tensor:
-        # A priori bad: >= max_adu, flag_* values, panel edges, bad regions, stored mask
         mask = torch.ones(frame_size, dtype=torch.bool, device=frame.device)
         geom = self.loader.metadata.geometry
         max_adu = geom.parameters.get("max_adu") if geom else None
@@ -915,18 +937,6 @@ class Probixi:
             )
             self.indexer._resolved_aperture = aperture
             self._aperture_diag = diag
-            # inputs to the aperture choice, kept for offline inspection
-            self._aperture_data = dict(
-                sums=torch.cat(sums).cpu(),
-                squares=torch.cat(sqs).cpu(),
-                counts=torch.cat(cnts).cpu(),
-                q=torch.cat(qs).cpu(),
-                nn_dist=torch.cat(nns).cpu(),
-                frame=torch.cat(frames).cpu(),
-                radii_snr=snr,
-                radii_flux=flux,
-                adu_per_photon=self.indexer._adu_per_photon(),
-            )
             return snr if aperture == "snr" else flux
         return radii_from_profile(profile, snr=aperture != "flux")
 
@@ -954,11 +964,7 @@ class Probixi:
         if self._noise is None:
             return None
         finder = self.finder
-        grow = (
-            finder.local_outer_radius
-            if finder.local_background
-            else int(math.ceil(3.0 * max(finder.mf_scales)))
-        )
+        grow = finder.local_outer_radius
         shadow = shadow_mask(
             self._noise.pixel.mean(),
             self._noise.rotational.mean(),
@@ -1034,8 +1040,8 @@ class Probixi:
         batch_size : int, default 15
             Frames folded in between snapshots.
         **kwargs
-            Forwarded to the noise model's diagnostics (``fps``, ``cmap``,
-            ``dpi``, ``max_radius``, ``figsize``).
+            Forwarded to the noise model's diagnostics (``fps``, ``dpi``,
+            ``max_radius``, ``figsize``).
 
         Returns
         -------
@@ -1064,7 +1070,6 @@ class Probixi:
         self,
         n_seed: int = 32,
         seed_frames: Optional[Iterable[Tensor]] = None,
-        eigen_modes: int = 0,
         target_noise_peaks: Union[float, str, None] = "auto",
         threshold_opts: Optional[dict] = None,
         **opts,
@@ -1086,8 +1091,6 @@ class Probixi:
         seed_frames : iterable of torch.Tensor, optional
             Calibration frames replacing the random draw; a generator is copied
             into a list first.
-        eigen_modes : int, default 0
-            Low-rank background modes to fit; 0 fits none.
         target_noise_peaks : float, "auto" or None, default "auto"
             Noise budget: expected noise detections per signal-free frame;
             ``"auto"`` is 1.25 per million valid pixels. None keeps
@@ -1104,8 +1107,6 @@ class Probixi:
             ``var_scale``, ...).
         """
         seed_indices: list[int] = []
-        self.blank_seed_floor = None
-        self.n_blank_seeds_dropped = 0
         seed: Union[Sized, Iterable[Tensor]]
         if seed_frames is not None:
             seed = seed_frames if isinstance(seed_frames, Sized) else list(seed_frames)
@@ -1114,8 +1115,6 @@ class Probixi:
             levels = [self._frame_level(f) for f in self._frames_at(cand)]
             floor = _blank_seed_floor(levels, self.seed_level_frac)
             keep = [i for i, lv in zip(cand, levels) if lv >= floor]
-            self.blank_seed_floor = floor
-            self.n_blank_seeds_dropped = len(cand) - len(keep)
             if len(keep) < max(4, n_seed // 4):
                 warnings.warn(
                     f"calibration: only {len(keep)} of {len(cand)} seed "
@@ -1124,7 +1123,6 @@ class Probixi:
                     stacklevel=2,
                 )
                 keep = cand
-                self.n_blank_seeds_dropped = 0
             seed_indices = keep[:n_seed]
             seed = _FrameSource(self, seed_indices)
         else:
@@ -1141,7 +1139,6 @@ class Probixi:
             )
         self._calibration_options = dict(
             n_seed=n_seed,
-            eigen_modes=eigen_modes,
             target_noise_peaks=target_noise_peaks,
             threshold_opts=threshold_opts,
             **opts,
@@ -1170,8 +1167,6 @@ class Probixi:
             self.finder.flux_variance = self.flux_variance
         if self.flux_variance:
             fit_photon_transfer(self.noise)
-        if eigen_modes > 0:
-            fit_eigen_background(self.noise, seed, n_modes=eigen_modes)
         if target_noise_peaks is not None:
             topts = dict(threshold_opts or {})
             topts.setdefault("flux_variance", self.flux_variance)
@@ -1185,7 +1180,7 @@ class Probixi:
                 finder=self.finder,
                 **topts,
             )
-        self._scale_ref = ScaleReference.from_noise_model(self.noise)
+        self._scale_ref = ScaleReference(self.noise)
         if self.indexer is not None and self.noise.gain is not None:
             self.indexer._measured_gain = self.noise.gain
         if self.indexer is not None:
@@ -1313,7 +1308,6 @@ class Probixi:
             offset = 0
             for item in frames:
                 self._ensure_built(item)
-                self.noise.record_drift = False
                 blank = (
                     update_noise
                     and floor is not None
@@ -1754,7 +1748,6 @@ def _panel_boxes(geom, frame_size: tuple[int, int]) -> Optional[list]:
 
 
 def _mask_panel_edges(mask: Tensor, geom) -> None:
-    # mask ``mask_edge_pixels`` pixels around the border of every panel
     n = geom.parameters.get("mask_edge_pixels")
     if not isinstance(n, (int, float)) or isinstance(n, bool):
         return

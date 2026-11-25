@@ -4,7 +4,7 @@ import numpy as np
 import torch
 
 from probixi.indexer.lattice import B_to_cell
-from probixi.indexer.refine import _assign_hkls, _cell_dofs
+from probixi.indexer.refine import CELL_ROUNDS, _assign_hkls, _cell_dofs
 from probixi.io.cell import CellParams
 
 
@@ -155,7 +155,6 @@ def refine_analytic(
     template,
     q_tolerance,
     iters=8,
-    rounds=2,
     edge_tolerance=0.05,
     angle_tolerance_rad=math.radians(3.0),
     wavelength=None,
@@ -229,7 +228,7 @@ def refine_analytic(
     before = mean_square(A64, hkl_d, indexed)
     theta = np.zeros(m, dtype=np.float32)
     A_new = A_d
-    for _ in range(rounds):
+    for _ in range(CELL_ROUNDS):
         if int(indexed.sum()) * 3 <= m:
             return None
         sel = indexed.numpy()

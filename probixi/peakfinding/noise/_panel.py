@@ -1,4 +1,4 @@
-from typing import Literal, Optional, Sequence, Tuple, Union
+from typing import Literal, Optional, Sequence, Tuple
 
 import torch
 from torch import Tensor
@@ -6,15 +6,11 @@ from torch import Tensor
 from ...kernels import select, tensor_key
 from .model import NoiseStats
 
-PanelSpec = Union[
-    Tensor,
-    Sequence[Tuple[slice, slice]],
-    Sequence[Tuple[int, int, int, int]],
-]
+PanelSpec = Sequence[Tuple[int, int, int, int]]
 
 
 class PanelNoise(NoiseStats):
-    # Panel-mean estimator, frame-wide for one panel; panel_map is -1 outside panels
+    # panel_map is -1 outside every panel
 
     panel_map: Tensor
     pixels_per_panel: Tensor
@@ -54,23 +50,9 @@ class PanelNoise(NoiseStats):
         rows, cols = self.frame_size
         if panels is None:
             return torch.zeros((rows, cols), dtype=torch.long, device=device)
-        if isinstance(panels, Tensor):
-            if tuple(panels.shape) != self.frame_size:
-                raise ValueError(
-                    f"panel_map shape {tuple(panels.shape)} != frame_size {self.frame_size}"
-                )
-            return panels.to(device=device, dtype=torch.long)
-
         panel_map = torch.full((rows, cols), -1, dtype=torch.long, device=device)
-        for pid, spec in enumerate(panels):
-            if len(spec) == 2:
-                rs, cs = spec
-                panel_map[rs, cs] = pid
-            elif len(spec) == 4:
-                r0, r1, c0, c1 = spec
-                panel_map[r0:r1, c0:c1] = pid
-            else:
-                raise ValueError("panel spec must be 2- or 4-tuple")
+        for pid, (r0, r1, c0, c1) in enumerate(panels):
+            panel_map[r0:r1, c0:c1] = pid
         return panel_map
 
     def _project(self, frame: Tensor, mask: Optional[Tensor]) -> Tensor:
@@ -122,10 +104,3 @@ class PanelNoise(NoiseStats):
         safe = self.panel_map.clamp_min(0)
         z = torch.zeros((), dtype=self.mean_.dtype, device=self.mean_.device)
         return torch.where(self.valid_mask, self.mean_[safe], z)
-
-    def var(self) -> Tensor:
-        safe = self.panel_map.clamp_min(0)
-        z = torch.zeros((), dtype=self.M2_.dtype, device=self.M2_.device)
-        # a panel mean has variance sigma^2 / n; scale back to the per-pixel variance
-        per_pixel = super().var()[safe] * self.pixels_per_panel[safe]
-        return torch.where(self.valid_mask, per_pixel, z)

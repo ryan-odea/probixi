@@ -350,7 +350,6 @@ def flux_variance_floor(
     var0: Tensor,
     floor_coef: float = 0.15,
 ) -> Tensor:
-    # max(read_var + gain * level, floor_coef * var0, local_var), the first if fitted
     rv, g = noise_model.read_var, noise_model.gain
     floor = (float(floor_coef) * var0).clamp_min(1e-12)
     if rv is None or g is None:
@@ -472,8 +471,9 @@ def calibrate_threshold(
         which the mirrored tail still stands in for the positive one; above it
         the quietest ``quiet_quantile`` of frames are used instead.
     quiet_quantile : float
-        Fraction of frames with the lowest ``max(T)`` taken as quiet. Used only when
-        fewer than 4 frames pass the null cut and the mirrored tail ``-min_s T_s``
+        Fraction of frames with the lowest ``max(T)`` taken as quiet, at least 4
+        frames. Used only when fewer than 4 frames pass the null cut and either the
+        tail ratio exceeds ``tail_ratio_tol`` or the mirrored tail ``-min_s T_s``
         already meets the budget at the lowest grid value.
     mf_scales : tuple[float, ...]
         Gaussian template widths in pixels.

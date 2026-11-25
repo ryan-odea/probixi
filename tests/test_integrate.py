@@ -9,12 +9,12 @@ import torch
 from probixi.indexer import IndexResult, RefineConfig, SeedConfig
 from probixi.indexer.indexer import Indexer
 from probixi.indexer.integrate import (
+    ANNULUS_PIXELS,
     choose_aperture,
     disk_overlap_counts,
     falloff_resolution_limit,
     integrate_rings,
     nearest_neighbour_distance,
-    radial_profile,
     radii_from_profile,
     radius_by_shell,
     ring_sums,
@@ -23,6 +23,14 @@ from probixi.indexer.integrate import (
 )
 
 SHAPE = (64, 64)
+
+
+def radial_profile(excess, positions, pixel_valid=None, max_radius=16):
+    # median over peaks of each ring's mean excess, as _learn_integration_radii stacks it
+    if len(positions) == 0:
+        return excess.new_zeros(max_radius + 1)
+    total, counts, _ = ring_sums(excess, positions, pixel_valid, max_radius)
+    return (total / counts.clamp_min(1.0)).median(dim=0).values
 
 
 def _flat_frame(background: float, sigma: float = 0.0):
@@ -218,7 +226,6 @@ def _result(cell, positions: torch.Tensor, keep: torch.Tensor) -> IndexResult:
         positions=positions,
         intensities=torch.ones(n),
         sigmas=torch.ones(n),
-        loss_history=torch.zeros(1),
     )
     r.predicted_hkl = torch.zeros((int(keep.sum()), 3))
     r.predicted_positions = positions[keep]
@@ -383,10 +390,9 @@ def test_learned_annulus_holds_the_requested_background_samples():
     g = torch.Generator().manual_seed(0)
     centres = (torch.rand(30, 2, generator=g) * 260 + 30).round()
     profile = radial_profile(_planted(2.0, centres), centres.float())
-    for want in (60.0, 120.0, 300.0):
-        r_sig, r_in, r_out = radii_from_profile(profile, background_pixels=want)
-        assert math.pi * (r_out**2 - r_in**2) == pytest.approx(want, rel=1e-6)
-        assert r_in > r_sig  # the annulus clears the signal disk
+    r_sig, r_in, r_out = radii_from_profile(profile)
+    assert math.pi * (r_out**2 - r_in**2) == pytest.approx(ANNULUS_PIXELS, rel=1e-6)
+    assert r_in > r_sig  # the annulus clears the signal disk
 
 
 def test_radial_profile_is_empty_without_peaks():
@@ -396,19 +402,6 @@ def test_radial_profile_is_empty_without_peaks():
 
 def test_radii_from_profile_returns_none_for_a_flat_profile():
     assert radii_from_profile(torch.zeros(17)) is None
-
-
-def test_radii_from_profile_rejects_bad_settings():
-    profile = torch.linspace(1.0, 0.0, 17)
-    for kwargs in (
-        dict(floor=0.0),
-        dict(floor=1.0),
-        dict(fit_above=0.0),
-        dict(gap=0.0),
-        dict(background_pixels=0.0),
-    ):
-        with pytest.raises(ValueError):
-            radii_from_profile(profile, **kwargs)
 
 
 def test_snr_aperture_shrinks_to_the_3x3_for_a_pixel_wide_spot():

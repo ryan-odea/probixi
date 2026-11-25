@@ -7,29 +7,19 @@ from typing import Optional
 import torch
 from torch import Tensor
 
-# cached frame-invariant index grids, keyed by (H, W, device, dtype)
+# frame-invariant index grids
 _COORD_CACHE: dict = {}
 
 
 def _coord_grids(
     H: int, W: int, device: torch.device, dtype: torch.dtype
-) -> tuple[Tensor, Tensor, Tensor, Tensor]:
+) -> tuple[Tensor, Tensor]:
     key = (H, W, device, dtype)
     got = _COORD_CACHE.get(key)
     if got is None:
-        flat_rows = (
-            torch.arange(H, device=device, dtype=torch.long)
-            .view(-1, 1)
-            .expand(H, W)
-            .flatten()
-        )
-        flat_cols = (
-            torch.arange(W, device=device, dtype=torch.long)
-            .view(1, -1)
-            .expand(H, W)
-            .flatten()
-        )
-        got = (flat_rows, flat_cols, flat_rows.to(dtype), flat_cols.to(dtype))
+        flat_rows = torch.arange(H, device=device, dtype=dtype).view(-1, 1).expand(H, W)
+        flat_cols = torch.arange(W, device=device, dtype=dtype).view(1, -1).expand(H, W)
+        got = (flat_rows.flatten(), flat_cols.flatten())
         _COORD_CACHE[key] = got
     return got
 
@@ -97,7 +87,6 @@ class BlobStats:
 @torch.no_grad()
 def label_connected_components(
     mask: Tensor,
-    connectivity: int = 2,
     max_iters: int = 64,
 ) -> tuple[Tensor, int]:
     if mask.ndim != 2:
@@ -118,16 +107,9 @@ def label_connected_components(
 
     rows = fg // W
     cols = fg % W
-    if connectivity == 1:
-        doff = torch.tensor([-1, 1, 0, 0], dtype=torch.long, device=device)
-        coff = torch.tensor([0, 0, -1, 1], dtype=torch.long, device=device)
-    else:
-        doff = torch.tensor(
-            [-1, -1, -1, 0, 0, 1, 1, 1], dtype=torch.long, device=device
-        )
-        coff = torch.tensor(
-            [-1, 0, 1, -1, 1, -1, 0, 1], dtype=torch.long, device=device
-        )
+    # the eight neighbours of a pixel
+    doff = torch.tensor([-1, -1, -1, 0, 0, 1, 1, 1], dtype=torch.long, device=device)
+    coff = torch.tensor([-1, 0, 1, -1, 1, -1, 0, 1], dtype=torch.long, device=device)
 
     r2 = rows[:, None] + doff[None, :]
     c2 = cols[:, None] + coff[None, :]
@@ -243,7 +225,7 @@ def compute_blob_stats(
     )
     w = flat_excess.clamp_min(0)
 
-    _, _, grid_rows_f, grid_cols_f = _coord_grids(H, W, device, dtype)
+    grid_rows_f, grid_cols_f = _coord_grids(H, W, device, dtype)
     rows = grid_rows_f[fg]
     cols = grid_cols_f[fg]
 
@@ -309,7 +291,6 @@ def compute_blob_stats(
     )
     intensity_sigma = var_sum.sqrt()
 
-    # per-blob maxima of (excess, z[, response])
     max_src = [flat_excess, flat_z]
     if response is not None:
         max_src.append(response.flatten()[fg])
@@ -351,7 +332,6 @@ def compute_blob_stats(
     bbox_c1 = bbox_hi[:, 1].to(torch.long)
 
     intensity_mean = intensity_sum / size_f
-    # peakedness = max / mean (>= 1), undefined and set to 0 for a non-positive mean
     peakedness = torch.where(
         intensity_mean > 1e-12,
         intensity_max / intensity_mean.clamp_min(1e-12),

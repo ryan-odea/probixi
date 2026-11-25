@@ -11,6 +11,9 @@ from ..io.cell import CellParams
 from ..kernels import select
 from .lattice import B_to_cell
 
+# Levenberg-Marquardt rounds of refine_cell; hkl is reassigned between them
+CELL_ROUNDS = 2
+
 
 @dataclass
 class RefineResult:
@@ -21,7 +24,6 @@ class RefineResult:
     soft_score: Tensor
     indexed: Tensor
     hkl: Tensor
-    history: Tensor
 
 
 def _axis_angle_to_rotation(omega: Tensor) -> Tensor:
@@ -103,14 +105,9 @@ def _B_from_params(p: Tensor) -> Tensor:
     return torch.linalg.inv(M).transpose(-1, -2)
 
 
-def _assign_hkls(
-    A: Tensor, q: Tensor, q_tolerance: float, khat: Optional[Tensor] = None
-) -> tuple[Tensor, Tensor]:
-    # khat (N, 3), when given, drops the residual along the scattered beam from the test
+def _assign_hkls(A: Tensor, q: Tensor, q_tolerance: float) -> tuple[Tensor, Tensor]:
     hkl = torch.round(q @ torch.linalg.inv(A).transpose(-1, -2))
     d = hkl @ A.transpose(-1, -2) - q
-    if khat is not None:
-        d = d - (d * khat).sum(-1, keepdim=True) * khat
     indexed = d.norm(dim=-1) < q_tolerance
     return hkl, indexed
 
@@ -123,7 +120,6 @@ def refine_cell(
     template: CellParams,
     q_tolerance: float,
     iters: int = 8,
-    rounds: int = 2,
     edge_tolerance: float = 0.05,
     angle_tolerance_rad: float = math.radians(3.0),
     wavelength: Optional[float] = None,
@@ -139,7 +135,6 @@ def refine_cell(
             template,
             q_tolerance,
             iters,
-            rounds,
             edge_tolerance,
             angle_tolerance_rad,
             wavelength,
@@ -216,7 +211,7 @@ def refine_cell(
 
     before = float(whitened(A.to(wd), hkl_d, indexed).square().mean())
     A_new = A.to(wd)
-    for _ in range(rounds):
+    for _ in range(CELL_ROUNDS):
         if int(indexed.sum()) * 3 <= m:  # fewer residuals than free parameters
             return None
         sel = indexed.clone()
@@ -229,7 +224,10 @@ def refine_cell(
         f = resid(theta)
         loss = float(f.square().sum())
         for _ in range(iters):
-            J = torch.autograd.functional.jacobian(resid, theta, vectorize=True)
+            # forward mode: one pass per parameter (<= 9), not per residual (4 per peak)
+            J = torch.autograd.functional.jacobian(
+                resid, theta, vectorize=True, strategy="forward-mode"
+            )
             g = J.transpose(-1, -2) @ f
             Hm = J.transpose(-1, -2) @ J
             damp = lam * torch.diag(torch.diagonal(Hm)) + 1e-18 * eye
@@ -290,7 +288,6 @@ def _empty_refine_result(device, dtype) -> RefineResult:
         soft_score=torch.zeros(0, dtype=dtype, device=device),
         indexed=torch.zeros(0, 0, dtype=torch.bool, device=device),
         hkl=torch.zeros(0, 0, 3, dtype=torch.long, device=device),
-        history=torch.zeros(0, dtype=torch.float32),
     )
 
 
@@ -301,7 +298,6 @@ def refine_multiframe_known_B(
     lr: float = 1e-3,
     max_iters: int = 200,
     reassign_every: int = 10,
-    min_indexed: int = 6,
     weights_per_frame: Optional[list[Optional[Tensor]]] = None,
 ) -> list[RefineResult]:
     # Pads to (F, K_max) candidates and (F, N_max) peaks for one batched Adam run
@@ -333,7 +329,6 @@ def refine_multiframe_known_B(
             lr=lr,
             max_iters=max_iters,
             reassign_every=reassign_every,
-            min_indexed=min_indexed,
             weights_per_frame=weights_per_frame,
         )
     use_soft = weights_per_frame is not None
@@ -370,7 +365,6 @@ def refine_multiframe_known_B(
     omega = torch.zeros(F, K_max, 3, dtype=dtype, device=device, requires_grad=True)
     optim = torch.optim.Adam([omega], lr=lr)
 
-    history: list[float] = []
     with torch.no_grad():
         hkl, indexed = _assign_hkls_padded(
             A_anchor,
@@ -405,13 +399,7 @@ def refine_multiframe_known_B(
         # Weights each inlier residual by its detection posterior c_i
         wmask = mask * w_pad.unsqueeze(1) if use_soft else mask
         per_w = wmask.sum(dim=-1).clamp_min(1.0)
-        per_loss = (sq * wmask).sum(dim=-1) / per_w
-        # degen is constant in omega: it marks the loss history, not the gradient
-        degen = (mask.sum(dim=-1) < min_indexed).to(dtype)
-        per_loss = (per_loss + degen) * cand_mask_f
-        loss = per_loss.sum()
-        loss_val = float(loss.detach().item())
-        history.append(loss_val)
+        loss = ((sq * wmask).sum(dim=-1) / per_w * cand_mask_f).sum()
 
         optim.zero_grad(set_to_none=True)
         loss.backward()
@@ -438,7 +426,6 @@ def refine_multiframe_known_B(
         else:
             soft_score = n_indexed.to(dtype)
 
-    history_tensor = torch.tensor(history, dtype=torch.float32)
     results: list[RefineResult] = []
     for f in range(F):
         K_f, N_f = K_per[f], N_per[f]
@@ -450,7 +437,6 @@ def refine_multiframe_known_B(
                 soft_score=soft_score[f, :K_f],
                 indexed=indexed[f, :K_f, :N_f],
                 hkl=hkl[f, :K_f, :N_f],
-                history=history_tensor,
             )
         )
     return results

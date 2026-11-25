@@ -60,14 +60,14 @@ def _writer(geometry_dict, tmp_path, **kw):
 def test_resolution_nm_inv_zero_at_beam_center(geometry_dict, tmp_path):
     off = _writer(geometry_dict, tmp_path)
     row, col = geometry_dict["beam_center"]
-    assert off._resolution_nm_inv(row, col) == pytest.approx(0.0)
+    assert off._resolution_nm_inv_many([(row, col)])[0] == pytest.approx(0.0)
 
 
 def test_resolution_nm_inv_increases_with_radius(geometry_dict, tmp_path):
     off = _writer(geometry_dict, tmp_path)
     row, col = geometry_dict["beam_center"]
-    near = off._resolution_nm_inv(row + 50, col)
-    far = off._resolution_nm_inv(row + 500, col)
+    near = off._resolution_nm_inv_many([(row + 50, col)])[0]
+    far = off._resolution_nm_inv_many([(row + 500, col)])[0]
     assert 0.0 < near < far
 
 

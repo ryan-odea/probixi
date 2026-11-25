@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import math
 
+import numpy as np
 import pytest
 import torch
 
@@ -43,7 +44,6 @@ def _make_index_result(cell, frame_index: int = 0) -> IndexResult:
         positions=positions,
         intensities=intensities,
         sigmas=sigmas,
-        loss_history=torch.zeros(1, dtype=torch.float32),
         scale=0.97,
         scale_sigma=0.01,
     )
@@ -262,14 +262,17 @@ def test_merge_dbs_unions_blocks_and_dedups_metadata(geometry_dict, cell, tmp_pa
     # rank 0 owns events [0, 2), indexes event 0; rank 1 owns [2, 4), indexes 2
     part0 = tmp_path / "out.duckdb.rank0"
     part1 = tmp_path / "out.duckdb.rank1"
-    with DuckDBOffloader(
-        part0, geometry=geometry_dict, cell=cell, files=files, frame_range=(0, 2)
-    ) as off:
-        off.write(_make_index_result(cell, frame_index=0))
-    with DuckDBOffloader(
-        part1, geometry=geometry_dict, cell=cell, files=files, frame_range=(2, 4)
-    ) as off:
-        off.write(_make_index_result(cell, frame_index=2))
+    for rank, part, lo in ((0, part0, 0), (1, part1, 2)):
+        with DuckDBOffloader(
+            part,
+            geometry=geometry_dict,
+            cell=cell,
+            files=files,
+            frame_range=(lo, lo + 2),
+            calibration=dict(gain=1.0 + rank),
+            rank=rank,
+        ) as off:
+            off.write(_make_index_result(cell, frame_index=lo))
 
     out = tmp_path / "out.duckdb"
     n_indexed = merge_dbs([part0, part1], out)
@@ -285,6 +288,10 @@ def test_merge_dbs_unions_blocks_and_dedups_metadata(geometry_dict, cell, tmp_pa
         # metadata copied exactly once, not per-rank
         assert conn.execute("SELECT COUNT(*) FROM geometry").fetchone()[0] == 1
         assert conn.execute("SELECT COUNT(*) FROM cell").fetchone()[0] == 1
+        gains = conn.execute(
+            "SELECT list(gain ORDER BY frame_index) FROM frames JOIN calibration USING (rank)"
+        ).fetchone()[0]
+        assert gains == [1.0, 1.0, 2.0, 2.0]
         # reflections from both indexed frames present and joinable
         joined = conn.execute(
             "SELECT COUNT(*) FROM reflections r JOIN frames f USING (frame_id)"
@@ -428,7 +435,7 @@ def test_db_records_integration_recipe_and_model_background(
     conn = duckdb.connect(str(out), read_only=True)
     try:
         row = conn.execute("SELECT * FROM integration").fetchone()
-        assert row == (1.5, 6.0, 8.6, 9.9, 280.0, "snr")
+        assert row == (1.5, 6.0, 8.6, 9.9, 280.0, "snr", None, None, None, None, None)
         rows = conn.execute(
             "SELECT n_pixels, background_model, background_model_var FROM reflections "
             "ORDER BY h DESC"
@@ -548,5 +555,370 @@ def test_db_writes_a_frame_without_peaks(geometry_dict, cell, tmp_path):
         assert conn.execute("SELECT indexed, n_peaks FROM frames").fetchall() == [
             (False, 0)
         ]
+    finally:
+        conn.close()
+
+
+def _model_var_db(
+    path, n=20_000, k_true=0.5, gain=2.0, n_bg=280.0, seed=0, n_fine=0, n_false=0
+):
+    """Write background-only reflections whose model variance is 1/k_true times their scatter.
+
+    Crystal c0 (limit 3.0 nm^-1) holds the even rows at 3.1 nm^-1 and c1 (limit
+    3.2 nm^-1) the odd rows. Both pass the enrichment test, and the run's
+    resolution is 3.1458 A. The first 10 rows have masked pixels. ``n_fine``
+    more c0 rows at 4.0 nm^-1 scatter 3 times their model variance. ``n_false``
+    more rows at 3.1 nm^-1 lie on x0 (limit 3.0 nm^-1), which fails the
+    enrichment test, and scatter 0.01 k_true times their model variance.
+    """
+    from probixi.io.db import _SCHEMA
+
+    rng = np.random.default_rng(seed)
+    npix = rng.integers(20, 60, n)
+    var = rng.uniform(1e4, 3e4, n)
+    vb = var * (1 + n_bg / npix)
+    im = rng.normal(0.0, np.sqrt(k_true * vb))
+    bm = rng.uniform(100.0, 200.0, n)
+    crystal = np.where(np.arange(n) % 2 == 0, "c0", "c1").astype(object)
+    res = np.full(n, 3.1)
+    for m, cid, r, k in ((n_fine, "c0", 4.0, 3.0), (n_false, "x0", 3.1, 0.01 * k_true)):
+        if m:
+            npix, var, bm = (np.concatenate([a, a[:m]]) for a in (npix, var, bm))
+            im = np.concatenate([im, rng.normal(0.0, np.sqrt(k * vb[:m]))])
+            crystal = np.concatenate([crystal, np.full(m, cid, dtype=object)])
+            res = np.concatenate([res, np.full(m, r)])
+    bg = 5.0
+    rows = dict(
+        crystal_id=crystal,
+        frame_id=np.full(im.size, "f0", dtype=object),
+        intensity=im - npix * bg + bm,
+        sigma=np.ones(im.size),
+        background=np.full(im.size, bg),
+        resolution_nm_inv=res,
+        n_pixels=npix,
+        background_model=bm,
+        background_model_var=var,
+        n_masked=np.where(np.arange(im.size) < 10, 3, 0),
+        n_overlap=np.zeros(im.size, dtype=np.int64),
+    )
+    conn = duckdb.connect(str(path))
+    conn.execute(_SCHEMA)
+    conn.execute(
+        "INSERT INTO integration (r_peak, r_gap, r_bg, adu_per_photon, "
+        "bg_annulus_pixels, aperture) VALUES (1.5, 4.0, 7.4, ?, ?, 'snr')",
+        [gain, n_bg],
+    )
+    conn.execute(
+        "INSERT INTO crystals (crystal_id, frame_id, diffraction_limit_nm_inv, enrich_p) "
+        "VALUES ('c0', 'f0', 3.0, 1e-6), ('c1', 'f0', 3.2, 1e-6)"
+    )
+    if n_false:
+        conn.execute(
+            "INSERT INTO crystals (crystal_id, frame_id, diffraction_limit_nm_inv, "
+            "enrich_p) VALUES ('x0', 'f0', 3.0, 0.5)"
+        )
+    cols = ", ".join(rows)
+    conn.execute(f"INSERT INTO reflections ({cols}) SELECT {cols} FROM rows")
+    return conn, rows
+
+
+def test_fit_model_var_scale_recovers_a_known_factor():
+    from probixi.io.db import fit_model_var_scale
+
+    rng = np.random.default_rng(1)
+    vb = rng.uniform(5e3, 1.5e4, 100_000)
+    im = rng.normal(0.0, np.sqrt(0.4 * vb))
+    im[:300] += 1e6
+    assert fit_model_var_scale(im, vb, gain=1.0) == pytest.approx(0.4, rel=0.03)
+    assert fit_model_var_scale(im[:10], vb[:10], gain=1.0) is None
+
+
+def test_calibrate_model_variance_rescales_once(tmp_path):
+    from probixi.io.db import calibrate_model_variance
+
+    conn, rows = _model_var_db(tmp_path / "run.duckdb", k_true=0.5)
+    try:
+        k = calibrate_model_variance(conn)
+        assert k == pytest.approx(0.5, rel=0.05)
+        scale, d_min = conn.execute(
+            "SELECT bg_model_var_scale, bg_model_var_dmin_A FROM integration"
+        ).fetchone()
+        assert scale == pytest.approx(k)
+        assert d_min == pytest.approx(10 / 3.2 + 0.1 * (10 / 3.0 - 10 / 3.2))
+        got = conn.execute(
+            "SELECT background_model_var FROM reflections ORDER BY rowid"
+        ).fetchnumpy()["background_model_var"]
+        np.testing.assert_allclose(got, rows["background_model_var"] * k)
+        vb = got * (1 + 280.0 / rows["n_pixels"])
+        im = (
+            rows["intensity"]
+            + rows["n_pixels"] * rows["background"]
+            - rows["background_model"]
+        )
+        z = im / np.sqrt(vb + 2.0 * np.clip(im, 0, None))
+        assert 1.4826 * np.median(np.abs(z - np.median(z))) == pytest.approx(
+            1.0, abs=0.03
+        )
+        assert conn.execute(
+            "SELECT min(sigma), max(sigma) FROM reflections"
+        ).fetchone() == (
+            1.0,
+            1.0,
+        )
+        assert calibrate_model_variance(conn) == pytest.approx(k)
+        again = conn.execute(
+            "SELECT background_model_var FROM reflections ORDER BY rowid"
+        ).fetchnumpy()["background_model_var"]
+        np.testing.assert_array_equal(again, got)
+    finally:
+        conn.close()
+
+
+def test_calibrate_model_variance_skips_without_reference(tmp_path):
+    from probixi.io.db import calibrate_model_variance
+
+    conn, rows = _model_var_db(tmp_path / "run.duckdb")
+    try:
+        conn.execute("UPDATE crystals SET diffraction_limit_nm_inv = 9.0")
+        assert calibrate_model_variance(conn) is None
+        assert conn.execute(
+            "SELECT bg_model_var_scale FROM integration"
+        ).fetchone() == (None,)
+        got = conn.execute(
+            "SELECT background_model_var FROM reflections ORDER BY rowid"
+        ).fetchnumpy()["background_model_var"]
+        np.testing.assert_array_equal(got, rows["background_model_var"])
+        conn.execute("UPDATE crystals SET diffraction_limit_nm_inv = 3.0")
+        conn.execute("UPDATE integration SET bg_annulus_pixels = NULL")
+        assert calibrate_model_variance(conn) is None
+    finally:
+        conn.close()
+
+
+def test_merge_dbs_fits_one_model_variance_scale(tmp_path):
+    from probixi.io.db import _SCHEMA, calibrate_model_variance
+    from probixi.tools.multigpu import merge_dbs
+
+    parts = []
+    for rank, k_true in enumerate((0.4, 0.6)):
+        conn, _ = _model_var_db(
+            tmp_path / f"run.rank{rank}", k_true=k_true, seed=rank, n_false=20_000
+        )
+        conn.execute(f"UPDATE reflections SET crystal_id = crystal_id || '_{rank}'")
+        conn.execute(f"UPDATE crystals SET crystal_id = crystal_id || '_{rank}'")
+        conn.close()
+        parts.append(tmp_path / f"run.rank{rank}")
+    merge_dbs(parts, tmp_path / "run.duckdb")
+    with duckdb.connect(str(tmp_path / "run.duckdb"), read_only=True) as conn:
+        (k,) = conn.execute("SELECT bg_model_var_scale FROM integration").fetchone()
+    assert 0.4 < k < 0.6
+    with duckdb.connect(str(tmp_path / "union.duckdb")) as conn:
+        conn.execute(_SCHEMA)
+        for i, part in enumerate(parts):
+            conn.execute(f"ATTACH '{part}' AS p{i} (READ_ONLY)")
+            for tbl in ("integration",) * (i == 0) + ("crystals", "reflections"):
+                conn.execute(f"INSERT INTO {tbl} SELECT * FROM p{i}.{tbl}")
+        assert calibrate_model_variance(conn) == pytest.approx(k, rel=1e-9)
+    with duckdb.connect(str(parts[0]), read_only=True) as conn:
+        assert conn.execute(
+            "SELECT bg_model_var_scale FROM integration"
+        ).fetchone() == (None,)
+
+
+def test_calibrate_model_variance_fits_within_the_run_resolution(tmp_path):
+    from probixi.io.db import calibrate_model_variance, run_resolution_limit
+
+    conn, _ = _model_var_db(tmp_path / "run.duckdb", k_true=0.5, n_fine=20_000)
+    try:
+        assert run_resolution_limit(conn) == pytest.approx(3.1458, abs=1e-3)
+        assert calibrate_model_variance(conn) == pytest.approx(0.5, rel=0.05)
+    finally:
+        conn.close()
+
+
+def test_calibrate_model_variance_fits_on_lattices_that_pass_the_enrichment_test(
+    tmp_path,
+):
+    from probixi.io.db import calibrate_model_variance
+
+    kw = dict(n=40_000, k_true=0.6, n_false=40_000)
+    conn, _ = _model_var_db(tmp_path / "run.duckdb", **kw)
+    try:
+        assert calibrate_model_variance(conn) == pytest.approx(0.6, rel=0.02)
+        assert conn.execute(
+            "SELECT bg_model_var_ref, bg_model_var_alpha, bg_model_var_n_ref "
+            "FROM integration"
+        ).fetchone() == ("enrich_pass", 1e-3, 19_995)
+    finally:
+        conn.close()
+    conn, _ = _model_var_db(tmp_path / "all.duckdb", **kw)
+    try:
+        assert calibrate_model_variance(conn, alpha=None) < 0.1
+        assert conn.execute(
+            "SELECT bg_model_var_ref, bg_model_var_alpha FROM integration"
+        ).fetchone() == ("all", None)
+    finally:
+        conn.close()
+
+
+@pytest.mark.parametrize(
+    "gate",
+    [
+        "UPDATE crystals SET enrich_p = 0.5 WHERE crystal_id = 'c0'",
+        "UPDATE crystals SET enrich_p = NULL",
+    ],
+)
+def test_calibrate_model_variance_falls_back_to_every_lattice(tmp_path, gate):
+    from probixi.io.db import calibrate_model_variance
+
+    conn, _ = _model_var_db(tmp_path / "run.duckdb", k_true=0.5)
+    try:
+        conn.execute(gate)
+        with pytest.warns(UserWarning, match="fitted on every lattice"):
+            assert calibrate_model_variance(conn) == pytest.approx(0.5, rel=0.05)
+        assert conn.execute(
+            "SELECT bg_model_var_ref, bg_model_var_alpha FROM integration"
+        ).fetchone() == ("all", None)
+    finally:
+        conn.close()
+
+
+def test_run_resolution_limit_counts_every_lattice_unless_gated(tmp_path):
+    from probixi.io.db import run_resolution_limit
+
+    conn, _ = _model_var_db(tmp_path / "run.duckdb")
+    try:
+        conn.execute(
+            "INSERT INTO crystals (crystal_id, frame_id, diffraction_limit_nm_inv, "
+            "enrich_p) SELECT 'x' || i, 'f0', 5.0, 0.5 FROM range(8) t(i)"
+        )
+        assert run_resolution_limit(conn) == pytest.approx(2.0)
+    finally:
+        conn.close()
+
+
+def test_recalibrate_model_variance_reproduces_the_gated_fit(tmp_path):
+    from probixi.io.db import calibrate_model_variance, recalibrate_model_variance
+
+    kw = dict(k_true=0.6, n_false=20_000)
+    conn, rows = _model_var_db(tmp_path / "old.duckdb", **kw)
+    try:
+        assert calibrate_model_variance(conn, alpha=None) < 0.1
+        k = recalibrate_model_variance(conn)
+        got = conn.execute(
+            "SELECT background_model_var FROM reflections ORDER BY rowid"
+        ).fetchnumpy()["background_model_var"]
+        np.testing.assert_allclose(got, rows["background_model_var"] * k, rtol=1e-12)
+        ref = conn.execute(
+            "SELECT bg_model_var_ref, bg_model_var_dmin_A FROM integration"
+        ).fetchone()
+        assert ref == ("enrich_pass", pytest.approx(3.1667, abs=1e-3))
+    finally:
+        conn.close()
+    fresh, _ = _model_var_db(tmp_path / "fresh.duckdb", **kw)
+    try:
+        assert k == pytest.approx(calibrate_model_variance(fresh), rel=1e-9)
+    finally:
+        fresh.close()
+
+
+def _fake_torchsx(monkeypatch, supported=None, version="0.2.3"):
+    import sys
+    import types
+
+    pkg = types.ModuleType("torchsx")
+    pkg.__version__ = version
+    pkg.__path__ = []
+    monkeypatch.setitem(sys.modules, "torchsx", pkg)
+    if supported is None:
+        monkeypatch.setitem(sys.modules, "torchsx._compat", None)
+    else:
+        compat = types.ModuleType("torchsx._compat")
+        compat.SUPPORTED_DB_SCHEMA = supported
+        monkeypatch.setitem(sys.modules, "torchsx._compat", compat)
+
+
+def test_schema_version_and_torchsx_version_are_exported():
+    import probixi
+    from probixi._compat import version_tuple
+    from probixi.io import db
+
+    assert probixi.SCHEMA_VERSION == db.SCHEMA_VERSION == 2
+    assert version_tuple(probixi.TORCHSX_VERSION) >= (0, 2, 4)
+    assert version_tuple("0.10.3.dev1") == (0, 10, 3)
+    assert version_tuple(None) == ()
+
+
+def test_torchsx_mismatch_names_the_version_needed(monkeypatch):
+    import sys
+
+    from probixi._compat import SCHEMA_VERSION, TORCHSX_VERSION, torchsx_mismatch
+
+    # no TorchSX next to probixi
+    monkeypatch.setitem(sys.modules, "torchsx", None)
+    assert torchsx_mismatch() is None
+    # a TorchSX that reads this schema
+    _fake_torchsx(monkeypatch, supported=SCHEMA_VERSION)
+    assert torchsx_mismatch() is None
+    # a paired TorchSX that reads an older schema only
+    _fake_torchsx(monkeypatch, supported=SCHEMA_VERSION - 1, version="0.2.4")
+    assert f"schema {SCHEMA_VERSION - 1}" in torchsx_mismatch()
+    # a TorchSX from before the pairing
+    _fake_torchsx(monkeypatch, supported=None, version="0.2.3")
+    message = torchsx_mismatch()
+    assert (
+        "TorchSX 0.2.3" in message and f"TorchSX {TORCHSX_VERSION} or later" in message
+    )
+
+
+def test_offloader_warns_when_the_installed_torchsx_cannot_read_it(
+    geometry_dict, cell, tmp_path, monkeypatch, recwarn
+):
+    _fake_torchsx(monkeypatch, supported=None)
+    with pytest.warns(UserWarning, match="or later reads it"):
+        with DuckDBOffloader(tmp_path / "old.duckdb", geometry_dict, cell=cell):
+            pass
+    # the other ranks of a multi-GPU run stay silent, and so does a matching TorchSX
+    recwarn.clear()
+    with DuckDBOffloader(tmp_path / "rank1.duckdb", geometry_dict, cell=cell, rank=1):
+        pass
+    _fake_torchsx(monkeypatch, supported=2)
+    with DuckDBOffloader(tmp_path / "new.duckdb", geometry_dict, cell=cell):
+        pass
+    assert not [w for w in recwarn.list if "TorchSX" in str(w.message)]
+
+
+def test_installed_torchsx_agrees_with_this_probixi():
+    """Where TorchSX is installed, the two packages' constants name the same pairing."""
+    compat = pytest.importorskip("torchsx._compat")
+    import probixi
+    from probixi._compat import SCHEMA_VERSION, version_tuple
+
+    assert compat.SUPPORTED_DB_SCHEMA == SCHEMA_VERSION
+    assert version_tuple(probixi.__version__) >= version_tuple(compat.PROBIXI_VERSION)
+
+
+def test_version_is_the_source_trees_and_reaches_the_database(
+    geometry_dict, cell, tmp_path
+):
+    import re
+    from pathlib import Path
+
+    import probixi
+
+    pyproject = (Path(__file__).resolve().parents[1] / "pyproject.toml").read_text()
+    assert (
+        re.search(r'^version = "([^"]+)"', pyproject, re.M).group(1)
+        == probixi.__version__
+    )
+    out = tmp_path / "v.duckdb"
+    with DuckDBOffloader(out, geometry_dict, cell=cell, calibration={"gain": 1.0}):
+        pass
+    conn = duckdb.connect(str(out), read_only=True)
+    try:
+        assert (
+            conn.execute("SELECT probixi_version FROM calibration").fetchone()[0]
+            == probixi.__version__
+        )
     finally:
         conn.close()

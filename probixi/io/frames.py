@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import os
 import queue
-import struct
 import threading
 import warnings
 from collections import deque
@@ -24,18 +23,7 @@ from .cell import CellParams, read_crystfel_cell
 from .geometry import Geometry, read_geometry, resolve_dynamic_fields
 from .metadata import CbfInfo, H5Info, Metadata, scan_cbf, scan_h5
 
-try:
-    import bitshuffle
-
-    _HAS_BSHUF = True
-except Exception:  # pragma: no cover
-    bitshuffle = None
-    _HAS_BSHUF = False
-
 PathLike = Union[str, Path]
-
-_BSHUF_FILTER_ID = 32008
-_BSHUF_LZ4 = 2
 
 
 class DataLoader:
@@ -206,7 +194,7 @@ def _split_entry(entry: str) -> tuple[str, Optional[str], Optional[int]]:
 
 
 def _scan_cbf_files(paths: Sequence[str]) -> dict:
-    # Threaded header reads overlap filesystem waits; a failed scan returns its error
+    # Threads overlap the filesystem waits of the header reads
     paths = [path for path in dict.fromkeys(paths) if is_cbf(path)]
 
     def scan(path):
@@ -220,47 +208,13 @@ def _scan_cbf_files(paths: Sequence[str]) -> dict:
 
 
 _PREFETCH_SENTINEL = object()
+DECODE_WORKERS = 8  # CPU threads that read CBF files, doubled; also the HDF5 read block
 
 
-def _bshuf_lz4_decoder(dset: h5py.Dataset, frame_shape):
-    if not _HAS_BSHUF:
-        return None
-    if dset.chunks != (1,) + tuple(int(x) for x in frame_shape):
-        return None
-    plist = dset.id.get_create_plist()
-    if plist.get_nfilters() != 1:
-        return None
-    fid, _flags, cd, _name = plist.get_filter(0)
-    if fid != _BSHUF_FILTER_ID or len(cd) < 5 or cd[4] != _BSHUF_LZ4:
-        return None
-    dt = dset.dtype
-    if dt.byteorder not in ("=", "<", "|"):
-        return None
-    itemsize = dt.itemsize
-    shape = tuple(int(x) for x in frame_shape)
-
-    def decode(raw) -> np.ndarray:
-        assert bitshuffle is not None
-        # Chunk header: u64 size, u32 block bytes; bitshuffle takes block elements
-        blk = struct.unpack(">i", raw[8:12])[0]
-        comp = np.frombuffer(raw[12:], dtype=np.uint8)
-        return bitshuffle.decompress_lz4(comp, shape, dt, blk // itemsize if blk else 0)
-
-    return decode
-
-
-def _read_chunk(dset, j):
-    try:
-        return dset.id.read_direct_chunk((j, 0, 0))[1]
-    except (RuntimeError, MemoryError):
-        return None
-
-
-def _iter_file_frames(info, f_lo, f_hi, pool, window, stop, fast_state):
+def _iter_file_frames(info, f_lo, f_hi, window, stop):
     f_lo += info.event_start
     f_hi += info.event_start
     with h5py.File(info.filename, "r") as f:
-        decoder = None
         dset = None
         if info.placements is None and info.events is None:
             node = f[info.dataset]
@@ -269,27 +223,10 @@ def _iter_file_frames(info, f_lo, f_hi, pool, window, stop, fast_state):
                     f"{info.dataset!r} in {info.filename} is not an HDF5 dataset"
                 )
             dset = node
-            decoder = _bshuf_lz4_decoder(dset, info.frame_shape)
-            if decoder is not None:
-                # The direct-chunk decoder is checked once per run against h5py
-                raw0 = None if fast_state["checked"] else _read_chunk(dset, f_lo)
-                if raw0 is not None:
-                    fast_state["ok"] = bool(
-                        np.array_equal(decoder(raw0), np.asarray(dset[f_lo]))
-                    )
-                    fast_state["checked"] = True
-                if not fast_state["ok"]:
-                    decoder = None
         i = f_lo
         while i < f_hi and not stop.is_set():
             end = min(i + window, f_hi)
-            if decoder is not None:
-                assert dset is not None
-                raws = [_read_chunk(dset, j) for j in range(i, end)]
-                decoded = pool.map(lambda r: None if r is None else decoder(r), raws)
-                for j, arr in zip(range(i, end), decoded):
-                    yield np.asarray(dset[j]) if arr is None else arr
-            elif dset is not None:
+            if dset is not None:
                 block = np.asarray(dset[i:end])
                 for k in range(block.shape[0]):
                     yield block[k]
@@ -313,7 +250,6 @@ def _read_cbf_raw(path):
 
 
 def _stage(buf, pin):
-    # Pack the data bytes of the CBF entries of buf into one pinned buffer
     raws = [e for e in buf if isinstance(e, tuple)]
     if not raws:
         return buf, None, None
@@ -329,7 +265,6 @@ def _stage(buf, pin):
 
 
 def _device_frames(item, kernel, device, dtype):
-    # Frames of one staged item on the device, in order
     buf, stage, lens = item
     if stage is not None:
         stage = stage.to(device, non_blocking=True)
@@ -366,7 +301,6 @@ def _device_frames(item, kernel, device, dtype):
 
 
 def _iter_cbf(entries, chosen, lo, hi, pool, window, read=read_cbf):
-    # Decoded frames of the selected CBF entries in order, ``window`` files ahead
     paths, offset = [], 0
     for name in chosen:
         info = entries[name]
@@ -425,7 +359,6 @@ def _prefetch_worker(
         except TypeError:
             return torch.from_numpy(np.ascontiguousarray(arr, dtype=np.float32))
 
-    fast_state = {"checked": False, "ok": True}
     cbf_frames = _iter_cbf(
         entries, chosen, lo, hi, pool, window, _read_cbf_raw if on_device else read_cbf
     )
@@ -443,9 +376,7 @@ def _prefetch_worker(
                 frames = (
                     [next(cbf_frames)]
                     if isinstance(info, CbfInfo)
-                    else _iter_file_frames(
-                        info, f_lo, f_hi, pool, window, stop, fast_state
-                    )
+                    else _iter_file_frames(info, f_lo, f_hi, window, stop)
                 )
                 for arr in frames:
                     buf.append(arr)
@@ -467,14 +398,12 @@ def _prefetch_worker(
 def iter_frames(
     loader: DataLoader,
     *,
-    files: Optional[Sequence[str]] = None,
     start: Optional[int] = None,
     stop: Optional[int] = None,
     device: Optional[torch.device] = None,
     dtype: torch.dtype = torch.float32,
     batch_size: int = 1,
     prefetch: int = 2,
-    decode_workers: int = 8,
 ) -> Iterator[Tensor]:
     """Yield frames from a loader as tensors, read ahead on a worker thread.
 
@@ -482,8 +411,6 @@ def iter_frames(
     ----------
     loader : DataLoader
         Source of ``metadata.files``.
-    files : sequence of str, optional
-        Keys of ``loader.files`` to read; all by default.
     start, stop : int, optional
         Global frame range ``[start, stop)``; the full run by default.
     device : torch.device, optional
@@ -494,8 +421,6 @@ def iter_frames(
         Frames per yielded tensor.
     prefetch : int, default 2
         Batches the worker may read ahead.
-    decode_workers : int, default 8
-        CPU threads that decode bitshuffle-LZ4 chunks, doubled to read CBF files.
 
     Yields
     ------
@@ -506,15 +431,16 @@ def iter_frames(
     Notes
     -----
     On CUDA with Triton and nvCOMP, chunks that hold one whole frame, including
-    whole-frame VDS mappings, are copied compressed and decoded on the device;
-    other layouts are decoded by HDF5. CBF byte-offset data are decoded on the
+    whole-frame VDS mappings, are copied compressed and decoded on the device.
+    CPU threads inflate Deflate chunks, unless one entry mixes filter pipelines.
+    HDF5 decodes other layouts. CBF byte-offset data are decoded on the
     device and other CBF data on the CPU. A selection that includes a CBF file
     reads its HDF5 files without the compressed transfer.
     :func:`probixi.kernels.use_engine` forces a backend.
     """
     metadata = loader.metadata
     entries = metadata.files
-    chosen = list(entries.keys()) if files is None else list(files)
+    chosen = list(entries.keys())
     lo = int(start) if start is not None else 0
     hi = int(stop) if stop is not None else metadata.n_frames
 
@@ -550,7 +476,7 @@ def iter_frames(
         if _engine.get() is Engine.ACCELERATED:
             raise RuntimeError("nvCOMP 5.x CUDA library is unavailable")
 
-    nworkers = max(1, min(int(decode_workers), os.cpu_count() or 4))
+    nworkers = max(1, min(DECODE_WORKERS, os.cpu_count() or 4))
     if has_cbf:
         nworkers *= 2  # file reads wait on the filesystem: more in flight than cores
     window = max(int(batch_size), nworkers)

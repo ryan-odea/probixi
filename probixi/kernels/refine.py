@@ -75,11 +75,9 @@ def kernel(
     RMS,
     SCORE,
     NI,
-    HISTORY,
     N: tl.constexpr,
     STEPS: tl.constexpr,
     REASSIGN: tl.constexpr,
-    MIN_INDEXED: tl.constexpr,
     TOL,
     BLOCK: tl.constexpr,
 ):
@@ -135,11 +133,6 @@ def kernel(
         dz = a20 * h + a21 * k + a22 * ell - qz
         wm = tl.where(match, w, 0.0)
         per_w = tl.maximum(tl.sum(wm, 0), 1.0)
-        count = tl.sum(match.to(tl.int32), 0)
-        loss = tl.sum((dx * dx + dy * dy + dz * dz) * wm, 0) / per_w + (
-            count < MIN_INDEXED
-        ).to(tl.float32)
-        tl.store(HISTORY + c * STEPS + step, loss)
         # gradient of R(omega) @ v, with v = A_anchor @ h
         ux = b00 * h + b01 * k + b02 * ell
         uy = b10 * h + b11 * k + b12 * ell
@@ -254,7 +247,6 @@ def refine_triton(
     lr=0.001,
     max_iters=200,
     reassign_every=10,
-    min_indexed=6,
     weights_per_frame=None,
 ):
     assert A_init_per_frame and max_iters > 0
@@ -288,7 +280,6 @@ def refine_triton(
     RMS = torch.empty(C, device=dev, dtype=torch.float32)
     SCORE = torch.empty_like(RMS)
     NI = torch.empty(C, device=dev, dtype=torch.int64)
-    HISTORY = torch.empty(C, max_iters, device=dev, dtype=torch.float32)
     kernel[(C,)](
         A,
         Q,
@@ -303,18 +294,14 @@ def refine_triton(
         RMS,
         SCORE,
         NI,
-        HISTORY,
         N=N,
         STEPS=max_iters,
         REASSIGN=reassign_every,
-        MIN_INDEXED=min_indexed,
         TOL=q_tolerance,
         BLOCK=triton.next_power_of_2(N),
         num_warps=4,
         enable_fp_fusion=False,
     )
-    # per-step loss summed over every candidate of the batch, shared by all frames
-    history = HISTORY.sum(0).to(device="cpu", dtype=torch.float32)
     results = []
     offset = 0
     for k, n in zip(counts, ns):
@@ -327,7 +314,6 @@ def refine_triton(
                 soft_score=SCORE[sl],
                 indexed=IDX[sl, :n],
                 hkl=HK[sl, :n],
-                history=history,
             )
         )
         offset += k

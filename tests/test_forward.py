@@ -54,22 +54,6 @@ def test_q_magnitude_matches_bragg_law(geometry_dict):
         assert got == pytest.approx(expected, rel=1e-6, abs=1e-6)
 
 
-def test_frame_rotation_rotates_q(geometry_dict):
-    R = proper_rotation(1)
-    pos = sample_positions(geometry_dict)
-    q_lab = detector_to_q(pos, geometry_dict)
-    q_rot = detector_to_q(pos, geometry_dict, frame_rotation=R)
-    assert torch.allclose(q_rot, q_lab @ R, atol=1e-6)
-
-
-def test_frame_rotation_is_invertible_through_detector(geometry_dict):
-    R = proper_rotation(2)
-    pos = sample_positions(geometry_dict)
-    q = detector_to_q(pos, geometry_dict, frame_rotation=R)
-    back = q_to_detector(q, geometry_dict, frame_rotation=R)
-    assert torch.allclose(back, pos, atol=1e-6)
-
-
 def test_detector_to_q_rejects_wrong_shape(geometry_dict):
     with pytest.raises(ValueError, match=r"\(N, 2\)"):
         detector_to_q(torch.zeros((4, 3), dtype=DT), geometry_dict)

@@ -6,11 +6,12 @@ import torch
 from torch import Tensor, nn
 
 from ...kernels import select
-from ._drift import DriftDiagnostics
 
-#: warmup variance (ADU^2) at or below which a pixel is dead or stuck; float32 rounding
-#: leaves a stuck pixel near 1e-13, a live one sits far above (one count in 90 frames ~0.01)
+#: ADU^2; warmup variance <= this marks a dead pixel (stuck ~1e-13, live >= ~0.01)
 DEAD_PIXEL_VAR = 1e-5
+RADIAL_BIN_WIDTH = 2.0  # width of the radial annuli in pixels
+ROBUST_K = 5.0  # clip level of the robust update in standard deviations
+ROBUST_MIN_FRAMES = 4  # frames before the clip engages
 
 # CrystFEL flag_* keys mapped to the test a good pixel passes
 FLAG_TESTS = {
@@ -93,7 +94,6 @@ class NoiseStats(nn.Module):
 
     def var(self) -> Tensor:
         if self.decay == 1.0:
-            # unbiased variance M2/(n-1); zero until two observations
             return torch.where(
                 self.n_ >= 2,
                 self.M2_ / (self.n_ - 1).clamp_min(1),
@@ -128,7 +128,7 @@ class NoiseModel(nn.Module):
 
     Each estimator keeps a running mean and variance over the frame stream, and
     :meth:`predict` blends their means. With ``robust_update``, each frame is clipped
-    from above at ``mean + robust_k * sigma`` before it updates the statistics, which
+    from above at ``mean + 5 sigma`` before it updates the statistics, which
     keeps Bragg peaks out of the variance that detection tests against. See
     docs/overview/peakfinding.md.
 
@@ -146,23 +146,14 @@ class NoiseModel(nn.Module):
         default. Ignored when ``radial_radius`` is given.
     radial_radius : Tensor, optional
         ``(rows, cols)`` lab-frame distance of each pixel from the beam, in pixels.
-    radial_bin_width : float
-        Width of the radial annuli in pixels.
     panels : PanelSpec, optional
-        ``(rows, cols)`` panel id map with -1 outside every panel, or one
-        ``(row_slice, col_slice)`` or ``(r0, r1, c0, c1)`` per panel; ``None`` is one
-        panel spanning the frame.
+        One ``(r0, r1, c0, c1)`` per panel; ``None`` is one panel spanning the frame.
     warmup_frames : int
         Frames before the dead-pixel mask is committed and the ``shrinkage`` blend
         reaches the pixel mean.
-    drift_log_every : int
-        Frames between drift records.
     robust_update : bool
-        Clip each frame from above before it updates the statistics; online mode only.
-    robust_k : float
-        Clip level in standard deviations.
-    robust_min_frames : int
-        Frames before the clip engages.
+        Clip each frame from above at ``mean + 5 sigma`` before it updates the
+        statistics, from the fourth frame on; online mode only.
     valid_mask : Tensor, optional
         ``(rows, cols)`` static mask, True where a pixel is usable; applied from the
         first frame.
@@ -178,9 +169,6 @@ class NoiseModel(nn.Module):
     read_var, gain : float or None
         Photon-transfer fit ``var = read_var + gain * level``, set by
         :func:`fit_photon_transfer`.
-    eigen_modes : Tensor or None
-        ``(n_modes, H, W)`` background eigen-images, set by
-        :func:`fit_eigen_background`.
     var_scale : float
         Scale on the per-pixel standard deviation that gives the calibrated
         background unit variance.
@@ -189,7 +177,6 @@ class NoiseModel(nn.Module):
         :meth:`CalibrationResult.apply`.
     """
 
-    n_frames: Tensor
     valid_mask: Tensor
     static_mask: Tensor
 
@@ -200,13 +187,9 @@ class NoiseModel(nn.Module):
         decay: float = 1.0,
         beam_center: Optional[tuple[float, float]] = None,
         radial_radius: Optional[Tensor] = None,
-        radial_bin_width: float = 2.0,
         panels: Optional[PanelSpec] = None,
         warmup_frames: int = 16,
-        drift_log_every: int = 1,
         robust_update: bool = True,
-        robust_k: float = 5.0,
-        robust_min_frames: int = 4,
         valid_mask: Optional[Tensor] = None,
         value_flags: Iterable[tuple] = (),
         device: Optional[torch.device] = None,
@@ -217,19 +200,16 @@ class NoiseModel(nn.Module):
             raise ValueError("mode must be 'online' or 'per_frame'")
         if not 0.0 < decay <= 1.0:
             raise ValueError("decay must be in (0, 1]")
-        if warmup_frames < 1 or drift_log_every < 1:
-            raise ValueError("warmup_frames and drift_log_every must be >= 1")
-        if robust_k <= 0:
-            raise ValueError("robust_k must be > 0")
+        if warmup_frames < 1:
+            raise ValueError("warmup_frames must be >= 1")
 
         self.frame_size = tuple(int(s) for s in frame_size)
         self.mode = mode
         self.decay = float(decay)
         self.warmup_frames = int(warmup_frames)
-        self.drift_log_every = int(drift_log_every)
         self.robust_update = bool(robust_update)
-        self.robust_k = float(robust_k)
-        self.robust_min_frames = int(robust_min_frames)
+        self.robust_k = ROBUST_K
+        self.robust_min_frames = ROBUST_MIN_FRAMES
         self.value_flags = list(value_flags)
 
         self.pixel = PixelNoise(
@@ -239,7 +219,7 @@ class NoiseModel(nn.Module):
             frame_size=frame_size,
             beam_center=beam_center,
             radius=radial_radius,
-            bin_width=radial_bin_width,
+            bin_width=RADIAL_BIN_WIDTH,
             mode=mode,
             decay=decay,
             device=device,
@@ -254,9 +234,6 @@ class NoiseModel(nn.Module):
             dtype=dtype,
         )
 
-        self.register_buffer(
-            "n_frames", torch.zeros((), dtype=torch.long, device=device)
-        )
         # static mask keeps bad pixels out of the radial and panel means from frame 1
         if valid_mask is not None:
             static = valid_mask.to(dtype=torch.bool, device=device)
@@ -270,19 +247,15 @@ class NoiseModel(nn.Module):
         self.register_buffer("static_mask", static.clone())
         self.register_buffer("valid_mask", static.clone())
 
-        self.drift = DriftDiagnostics()
-        self.record_drift = True
-        self._prev_mean: Optional[Tensor] = None
-        self._prev_var: Optional[Tensor] = None
         self._mask_committed = False
-        # host mirror of n_frames; version bumped whenever valid_mask changes
+        # frames seen; version bumped whenever valid_mask changes
         self._n_host = 0
+        self._n_updates = 0
         self._mask_version = 0
         self.calibrated_weights: Optional[dict[str, float]] = None
-        # None updates every source; pixel always updates (clip, mask, drift read it)
+        # None updates every source; pixel always updates (clip and mask read it)
         self.active_update_sources: Optional[set] = None
         self.var_scale: float = 1.0
-        self.eigen_modes: Optional[Tensor] = None
         self.read_var: Optional[float] = None
         self.gain: Optional[float] = None
 
@@ -340,8 +313,8 @@ class NoiseModel(nn.Module):
             self.rotational.update(frame_for_stats, mask=feed_mask)
         if active is None or "panel" in active:
             self.panel.update(frame_for_stats, mask=feed_mask)
-        self.n_frames += 1
         self._n_host += 1
+        self._n_updates += 1
         n = self._n_host
         if (
             self.mode == "online"
@@ -349,12 +322,6 @@ class NoiseModel(nn.Module):
             and n >= self.warmup_frames
         ):
             self._commit_mask()
-        if (
-            self.record_drift
-            and self.mode == "online"
-            and n % self.drift_log_every == 0
-        ):
-            self._record_drift(n)
 
     def set_active_update_sources(self, sources: Optional[Iterable[str]]) -> None:
         """Update only ``sources`` plus ``pixel`` per frame; ``None`` updates all."""
@@ -400,47 +367,32 @@ class NoiseModel(nn.Module):
         return animate_noise_diagnostics(self, frames, path, **kwargs)
 
     def _preset_weights(
-        self,
-        combination: Literal["pixel", "rotational", "panel", "shrinkage", "calibrated"],
-    ) -> tuple[dict[str, float], str]:
-        # Return (mean_weights, var_source) for a named preset.
+        self, combination: Literal["pixel", "shrinkage", "calibrated"]
+    ) -> dict[str, float]:
         if combination == "pixel":
-            return {"pixel": 1.0}, "pixel"
-        if combination == "rotational":
-            return {"rotational": 1.0}, "rotational"
-        if combination == "panel":
-            return {"panel": 1.0}, "panel"
+            return {"pixel": 1.0}
         if combination == "shrinkage":
             # linear shrinkage from the radial mean to the pixel mean over warmup
             n = float(self._n_host)
             w = min(1.0, n / max(1.0, float(self.warmup_frames)))
-            return {"pixel": w, "rotational": 1.0 - w}, "pixel"
+            return {"pixel": w, "rotational": 1.0 - w}
         if combination == "calibrated":
             if self.calibrated_weights is None:
                 raise ValueError("model not calibrated; call calibrate() first")
-            return dict(self.calibrated_weights), "pixel"
+            return dict(self.calibrated_weights)
         raise ValueError(f"unknown combination: {combination!r}")
 
     @torch.no_grad()
     def predict(
         self,
-        combination: Literal[
-            "pixel", "rotational", "panel", "shrinkage", "calibrated"
-        ] = "shrinkage",
-        weights: Optional[dict[str, float]] = None,
-        var_source: Optional[str] = None,
+        combination: Literal["pixel", "shrinkage", "calibrated"] = "shrinkage",
     ) -> dict[str, Tensor]:
-        """Return the blended background mean and variance.
+        """Return the blended background mean and the pixel variance.
 
         Parameters
         ----------
-        combination : {"pixel", "rotational", "panel", "shrinkage", "calibrated"}
-            Preset for the mean blend and the variance source.
-        weights : dict, optional
-            Weights over ``pixel``, ``rotational``, and ``panel``, normalised to sum
-            to 1; replaces the preset blend.
-        var_source : str, optional
-            Source of the variance; the preset's source by default.
+        combination : {"pixel", "shrinkage", "calibrated"}
+            Preset for the mean blend.
 
         Returns
         -------
@@ -453,26 +405,15 @@ class NoiseModel(nn.Module):
             "rotational": self.rotational,
             "panel": self.panel,
         }
-        use_preset = weights is None
-        if use_preset:
-            weights, preset_var = self._preset_weights(combination)
-        else:
-            preset_var = "pixel"
-        unknown = set(weights) - sources.keys()
-        if unknown:
-            raise ValueError(f"unknown weight keys: {sorted(unknown)}")
+        weights = self._preset_weights(combination)
         total = sum(weights.values())
         if total <= 0:
             raise ValueError("weights must sum to > 0")
-        chosen_var = var_source or preset_var
-        if chosen_var not in sources:
-            raise ValueError(f"unknown var_source: {chosen_var!r}")
 
         p = self.pixel
         kernel = select(
             "noise",
-            chosen_var == "pixel"
-            and p.decay == 1.0
+            p.decay == 1.0
             and p.mean_.is_cuda
             and p.mean_.dtype == torch.float32
             and p.mean_.is_contiguous()
@@ -480,7 +421,7 @@ class NoiseModel(nn.Module):
         )
         if kernel is not None:
             mean, var = kernel.predict_maps(
-                self, weights, total, combination == "calibrated" and use_preset
+                self, weights, total, combination == "calibrated"
             )
             return {"mean": mean, "var": var, "mask": self.valid_mask}
 
@@ -492,8 +433,8 @@ class NoiseModel(nn.Module):
             if len(contributions) == 1
             else torch.stack(contributions).sum(dim=0)
         )
-        var = sources[chosen_var].var()
-        if combination == "calibrated" and use_preset:
+        var = p.var()
+        if combination == "calibrated":
             var = var * (self.var_scale**2)
         return {"mean": mean, "var": var, "mask": self.valid_mask}
 
@@ -501,16 +442,10 @@ class NoiseModel(nn.Module):
     def z_score(
         self,
         frame: Tensor,
-        combination: Literal[
-            "pixel", "rotational", "panel", "shrinkage", "calibrated"
-        ] = "shrinkage",
-        weights: Optional[dict[str, float]] = None,
-        var_source: Optional[str] = None,
+        combination: Literal["pixel", "shrinkage", "calibrated"] = "shrinkage",
     ) -> Tensor:
         frame = self._coerce(frame)
-        pred = self.predict(
-            combination=combination, weights=weights, var_source=var_source
-        )
+        pred = self.predict(combination=combination)
         std = pred["var"].clamp_min(1e-12).sqrt()
         return torch.where(self.valid_mask, (frame - pred["mean"]) / std, 0.0)
 
@@ -518,67 +453,23 @@ class NoiseModel(nn.Module):
         self.pixel.reset()
         self.rotational.reset()
         self.panel.reset()
-        self.n_frames.zero_()
         self._n_host = 0
         self.valid_mask.copy_(self.static_mask)
         self._mask_version += 1
-        self.drift = DriftDiagnostics()
-        self._prev_mean = None
-        self._prev_var = None
         self._mask_committed = False
 
     def _soft_reset(self) -> None:
         self.pixel.reset()
         self.rotational.reset()
         self.panel.reset()
-        self.n_frames.zero_()
         self._n_host = 0
 
     @torch.no_grad()
     def _commit_mask(self) -> None:
-        # Combine the warmup dead-pixel mask with the static a-priori mask.
         self.pixel.commit_dead_pixel_mask(tol=DEAD_PIXEL_VAR)
         self.valid_mask.copy_(self.pixel.valid_mask & self.static_mask)
         self._mask_version += 1
         self._mask_committed = True
-
-    @torch.no_grad()
-    def _record_drift(self, step: int) -> None:
-        mean = self.pixel.mean()
-        var = self.pixel.var().clamp_min(1e-12)
-        n_masked_t = (~self.valid_mask).sum()
-        if self._prev_mean is None or self._prev_var is None:
-            zero = mean.new_zeros(())
-            mean_shift = var_ratio = kl = zero
-        else:
-            prev_mean, prev_var = self._prev_mean, self._prev_var.clamp_min(1e-12)
-            valid = self.valid_mask
-            denom = valid.sum().clamp_min(1).to(mean.dtype)
-            mean_shift = (((mean - prev_mean).abs()) * valid).sum() / denom
-            var_ratio = (torch.log(var / prev_var) * valid).sum() / denom
-            # per-pixel KL(N(mu, s^2) || N(mu_p, s_p^2)), averaged over valid pixels
-            kl_map = 0.5 * (
-                torch.log(prev_var / var)
-                + (var + (mean - prev_mean) ** 2) / prev_var
-                - 1.0
-            )
-            kl = (kl_map * valid).sum() / denom
-
-        ms, vr, klv, nm = (
-            torch.stack([mean_shift, var_ratio, kl, n_masked_t.to(mean_shift.dtype)])
-            .cpu()
-            .tolist()
-        )
-        self.drift.step.append(step)
-        self.drift.mean_shift.append(ms)
-        self.drift.var_ratio_log.append(vr)
-        self.drift.kl_gaussian.append(klv)
-        self.drift.effective_n.append(
-            float(step) if self.decay == 1.0 else 1.0 / self.decay
-        )
-        self.drift.n_masked.append(int(nm))
-        self._prev_mean = mean.detach().clone()
-        self._prev_var = var.detach().clone()
 
     def _coerce(self, frame: Tensor) -> Tensor:
         if not isinstance(frame, Tensor):

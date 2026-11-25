@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import h5py
 import numpy as np
 import pytest
 import sim
@@ -172,22 +171,6 @@ def test_iter_frames_dtype_is_honored(tmp_path):
         assert t.dtype == torch.float32
 
 
-def test_iter_frames_files_subset(tmp_path):
-    fa = _frames(3, 8, 6, seed=1)
-    fb = _frames(3, 8, 6, seed=2)
-    a_h5, _ = sim.write_run(tmp_path / "a", fa)
-    b_h5, _ = sim.write_run(tmp_path / "b", fb)
-    lst = tmp_path / "both.lst"
-    lst.write_text(f"{a_h5}\n{b_h5}\n", encoding="utf-8")
-    loader = DataLoader(lst)
-    out = list(
-        iter_frames(loader, files=[str(b_h5)], batch_size=1, dtype=torch.float32)
-    )
-    got = torch.stack(out)
-    expected = torch.as_tensor(fb, dtype=torch.float32)
-    assert torch.equal(got, expected)
-
-
 def test_iter_frames_terminates_without_full_consumption(tmp_path):
     # abandon the iterator early; the prefetch thread must not hang the gc/close
     _, lst_path = sim.write_run(tmp_path, _frames(20, 8, 6))
@@ -228,6 +211,36 @@ def test_event_list_preserves_order_and_physical_identity(tmp_path, geometry_dic
     assert [writer._locate(i) for i in range(4)] == [
         (str(h5_path), e) for e in selection
     ]
+
+
+def test_per_event_photon_energy_path_takes_a_unit(tmp_path):
+    import h5py
+
+    from probixi.io.geometry import EV_ANGSTROM
+    from probixi.probixi import _frame_wavelengths
+
+    h5_path = tmp_path / "run.h5"
+    kev = (9.0, 9.01, 9.02)
+    with h5py.File(h5_path, "w") as f:
+        for name, frame, e in zip(("tag-1", "tag-2", "tag-3"), _frames(3, 8, 6), kev):
+            f[f"{name}/data"] = frame
+            f[f"{name}/photon_energy_kev"] = e
+    geom = tmp_path / "kev.geom"
+    geom.write_text(
+        "clen = 0.05\nres = 20000\ndata = /%/data\n"
+        "photon_energy = /%/photon_energy_kev keV\n"
+        "p0/min_fs = 0\np0/max_fs = 5\np0/min_ss = 0\np0/max_ss = 7\n"
+        "p0/corner_x = -3\np0/corner_y = -4\n"
+    )
+    lst = tmp_path / "run.lst"
+    lst.write_text(f"{h5_path}\n")
+    loader = DataLoader(lst, geom)
+    assert loader.files[str(h5_path)].photon_energy_eV == pytest.approx(
+        [1e3 * e for e in kev]
+    )
+    assert _frame_wavelengths(loader.metadata) == pytest.approx(
+        [EV_ANGSTROM / (1e3 * e) for e in kev]
+    )
 
 
 def test_per_event_data_path_reads_groups_and_named_events(tmp_path, geometry_dict):
@@ -348,14 +361,3 @@ def test_event_list_cxi_uses_original_event_axis(tmp_path):
     with h5py.File(tmp_path / "peaks" / (h5_path.stem + ".cxi")) as f:
         assert f["/entry_1/result_1/nPeaks"].shape == (7,)
         assert f["/entry_1/result_1/nPeaks"][:].tolist() == [0, 0, 0, 0, 1, 0, 0]
-
-
-def test_read_chunk_returns_none_for_an_unallocated_chunk(tmp_path):
-    from probixi.io.frames import _read_chunk
-
-    with h5py.File(tmp_path / "partial.h5", "w") as f:
-        d = f.create_dataset("data", shape=(2, 4, 4), chunks=(1, 4, 4), dtype="u4")
-        d[0] = 7
-        assert _read_chunk(d, 0) is not None
-        assert _read_chunk(d, 1) is None
-        assert np.array_equal(d[1], np.zeros((4, 4), dtype="u4"))

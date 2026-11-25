@@ -8,6 +8,16 @@ from torch import Tensor
 
 A_INV_TO_NM_INV = 10.0
 MIN_ANNULUS_PIXELS = 10  # fewest pixels for an empirical background estimate
+SHELL_K_MAX = 4  # largest ring a shell may add to its disk
+SHELL_Z_MIN = 5.0  # significance a shell needs to widen its disk
+PROFILE_FLOOR = 0.02  # the disk ends where the Gaussian core falls to this fraction
+PROFILE_FIT_ABOVE = 0.1  # rings above this fraction of the centre enter the fit
+ANNULUS_GAP = 1.0  # pixels between the disk and the annulus
+ANNULUS_PIXELS = 120.0  # area of the background annulus
+APERTURE_MIN_ISIG = 10.0  # strong peaks of the aperture rule
+APERTURE_MIN_PEAKS = 50
+APERTURE_MIN_CRYSTALS = 10
+ENRICH_RADIUS = 2  # half-width in pixels of the box around a prediction
 
 
 @torch.no_grad()
@@ -92,7 +102,7 @@ def ring_sums(
     )
     if pixel_valid is not None:
         ok &= pixel_valid.flatten()[flat]
-    # Stamp corners beyond max_radius are already excluded by ok, so clamping is safe
+    # ok already excludes stamp corners beyond max_radius, so the clamp is safe
     index = rbin.clamp(0, max_radius).expand_as(flat)
     values = torch.where(ok, excess.flatten()[flat], 0.0)
 
@@ -105,20 +115,6 @@ def ring_sums(
         gather(ok.to(excess.dtype)),
         (gather(values * values) if squares else None),
     )
-
-
-@torch.no_grad()
-def radial_profile(
-    excess: Tensor,
-    positions: Tensor,
-    pixel_valid: Tensor | None = None,
-    max_radius: int = 16,
-) -> Tensor:
-    # Median over peaks of each ring's mean excess, (max_radius + 1,)
-    if len(positions) == 0:
-        return excess.new_zeros(max_radius + 1)
-    total, counts, _ = ring_sums(excess, positions, pixel_valid, max_radius)
-    return (total / counts.clamp_min(1.0)).median(dim=0).values
 
 
 def _ring_pixel_counts(max_radius: int, device) -> Tensor:
@@ -146,9 +142,8 @@ def radius_by_shell(
     counts: Tensor,
     squares: Tensor,
     base: float,
-    k_max: int = 4,
-    z_min: float = 5.0,
 ) -> list[float]:
+    k_max, z_min = SHELL_K_MAX, SHELL_Z_MIN
     n_ring = _ring_pixel_counts(sums.shape[1] - 1, sums.device)
     out, r = [], float(base)
     for s, c, sq in zip(sums.double(), counts.double(), squares.double()):
@@ -166,21 +161,18 @@ def radius_by_shell(
     return out
 
 
+def annulus_for_disk(r: Tensor, base) -> tuple[Tensor, Tensor, Tensor]:
+    r_in = torch.clamp(r + 1.0, min=base[1])
+    # r_out keeps the base annulus area
+    return r, r_in, (r_in * r_in + base[2] ** 2 - base[1] ** 2).sqrt()
+
+
 def radii_from_profile(
     profile: Tensor,
-    floor: float = 0.02,
-    gap: float = 1.0,
-    background_pixels: float = 120.0,
-    fit_above: float = 0.1,
     snr: bool = False,
 ) -> tuple[float, float, float] | None:
     # (r_sig, r_in, r_out) in px, or None for a flat or invalid profile
-    if not 0.0 < floor < 1.0:
-        raise ValueError("floor must be in (0, 1)")
-    if not 0.0 < fit_above < 1.0:
-        raise ValueError("fit_above must be in (0, 1)")
-    if gap <= 0 or background_pixels <= 0:
-        raise ValueError("gap and background_pixels must be positive")
+    floor, fit_above = PROFILE_FLOOR, PROFILE_FIT_ABOVE
     p = profile.detach().float()
     p = p - p.min()
     centre = float(p[0])
@@ -209,8 +201,8 @@ def radii_from_profile(
     if not math.isfinite(r_sig):
         return None
     r_sig = min(max(r_sig, 1.0), float(len(p) - 1))
-    r_in = r_sig + gap
-    r_out = math.sqrt(r_in * r_in + background_pixels / math.pi)  # annulus area
+    r_in = r_sig + ANNULUS_GAP
+    r_out = math.sqrt(r_in * r_in + ANNULUS_PIXELS / math.pi)  # annulus area
     if snr:
         # Only the signal disk shrinks; the annulus still starts beyond the 2% radius
         r_sig = min(r_sig, snr_disk_radius(profile, r_sig))
@@ -228,9 +220,6 @@ def choose_aperture(
     radii_flux: tuple[float, float, float],
     adu_per_photon: float = 1.0,
     tolerance: float = 0.02,
-    min_isig: float = 10.0,
-    min_peaks: int = 50,
-    min_crystals: int = 10,
     nn_dist: Tensor | None = None,
 ) -> tuple[str, dict]:
     # ("snr" | "flux", diagnostics); see docs/overview/indexing.md, Integration aperture
@@ -260,7 +249,7 @@ def choose_aperture(
     # cov(i_s, i_f): the snr disk lies inside the flux disk and both subtract bg
     cov = n_s * bgvar * (1 + n_f / n_ann.clamp_min(1)) + shot
     strong = (n_ann >= MIN_ANNULUS_PIXELS) & (i_s > 0) & (i_f > 0) & (v_f > 0)
-    strong &= i_f / v_f.clamp_min(1e-12).sqrt() >= min_isig
+    strong &= i_f / v_f.clamp_min(1e-12).sqrt() >= APERTURE_MIN_ISIG
     diag["n_strong"] = int(strong.sum())
     if nn_dist is not None:
         strong &= nn_dist.to(strong.device) >= 2 * r_flux + 1
@@ -274,7 +263,7 @@ def choose_aperture(
     if outer.any():
         outer &= isig <= isig[outer].median()
     rel_f, rel_s = (v_f / i_f**2)[outer], (v_s / i_s**2)[outer]
-    if diag["n"] < min_peaks:
+    if diag["n"] < APERTURE_MIN_PEAKS:
         return "snr", dict(diag, reason="too few strong peaks")
     i_s, i_f, v_s, v_f, cov = (t[strong] for t in (i_s, i_f, v_s, v_f, cov))
     f = i_s / i_f  # captured fraction
@@ -314,7 +303,7 @@ def choose_aperture(
     n_j = acc(torch.ones_like(w))
     ok = (n_j >= 3) & (sxx > 0)
     diag["n_crystals"] = int(ok.sum())
-    if diag["n_crystals"] < min_crystals:
+    if diag["n_crystals"] < APERTURE_MIN_CRYSTALS:
         return "snr", dict(diag, reason="too few crystals with enough peaks")
     b = (sxy / sxx)[ok]
     var_b = (1.0 / sxx)[ok]
@@ -398,7 +387,6 @@ def integrate_rings(
     if pixel_valid is not None:
         ok &= pixel_valid.flatten()[flat]
     pixels = raw.flatten()[flat]
-    # background level and spread from the annulus
     bgmask = ok & (radius >= r_in**2) & (radius <= r_out**2)
     nb = bgmask.sum(1)
     background = torch.where(bgmask, pixels, 0).sum(1) / nb.clamp_min(1)
@@ -472,27 +460,6 @@ def integrate_rings(
 
 
 @torch.no_grad()
-def peak_resolution_limit(
-    peak_resolution: Tensor,
-    percentile: float,
-    snr: Tensor | None = None,
-    snr_floor: float = 0.0,
-) -> float:
-    # Per-crystal diffraction limit from a percentile of the indexed peaks' |q|.
-    if percentile <= 0.0 or peak_resolution.numel() == 0:
-        return float("inf")
-    vals = peak_resolution
-    if snr is not None and snr_floor > 0.0:
-        keep = torch.isfinite(snr) & (snr >= snr_floor)
-        if bool(keep.any()):
-            vals = peak_resolution[keep]
-    q = min(percentile, 1.0)
-    vals = torch.sort(vals).values
-    idx = min(int(vals.numel()) - 1, int(q * int(vals.numel())))
-    return float(vals[idx])
-
-
-@torch.no_grad()
 def falloff_resolution_limit(
     q_nm: Tensor,
     isig: Tensor,
@@ -543,7 +510,6 @@ def spot_enrichment(
     excess: Tensor,
     var: Tensor,
     z_threshold: float,
-    radius: int = 2,
     pixel_valid: Tensor | None = None,
 ) -> tuple[int, float, float]:
     # (n_bright, enrichment, Poisson tail p); see indexing.md, The enrichment gate
@@ -553,7 +519,10 @@ def spot_enrichment(
     if pixel_valid is not None:
         z = torch.where(pixel_valid, z, z.new_full((), float("-inf")))
     zmax = torch.nn.functional.max_pool2d(
-        z[None, None], kernel_size=2 * radius + 1, stride=1, padding=radius
+        z[None, None],
+        kernel_size=2 * ENRICH_RADIUS + 1,
+        stride=1,
+        padding=ENRICH_RADIUS,
     )[0, 0]
     bright = zmax > z_threshold
     valid = pixel_valid if pixel_valid is not None else torch.ones_like(bright)

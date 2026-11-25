@@ -10,7 +10,7 @@ A run is a sequence of frames $x_f \in \mathbb{R}^{H\times W}$, $f = 1, \dots, F
 - laboratory $(x, y, z)$, in metres, $z$ along the beam, given by the geometry's per-panel origin and fast/slow basis vectors;
 - reciprocal space $\mathbf{q} \in \mathbb{R}^3$, in $\text{Å}^{-1}$ (streams and databases use $\text{nm}^{-1}$: multiply by $10$, `A_INV_TO_NM_INV`).
 
-Wavelength $\lambda$ (Å) and camera length $L$ (m) come from the geometry file, $\lambda$ per frame when the geometry reads the photon energy per event and $L$ re-fitted on the seed lattices (§5.6); the detector gain $g$ (ADU per photon) is read from the geometry when declared and re-measured from the data when the flux-variance model is on (§2.6).
+Wavelength $\lambda$ (Å) and camera length $L$ (m) come from the geometry file, $\lambda$ per frame when the geometry reads the photon energy per event and $L$ re-fitted on the seed lattices (§5.6); the detector gain $g$ (ADU per photon) is read from the geometry when declared and re-measured from the data when the flux-variance model is on (§2.5).
 
 ## 1. The background model
 
@@ -27,7 +27,7 @@ With `decay` $= \alpha < 1$ the update is exponentially weighted, $\mu \leftarro
 ### 1.2 Pixel, radial, and frame-wide estimators
 
 - Pixel (`_pixel.py`): $\mu_{\text{pix}}(p)$, $\sigma^2_{\text{pix}}(p)$ per pixel, fed without a mask.
-- Radial (`_radial.py`): with $r(p)$ the lab-frame radius of pixel $p$ from the beam centre in pixels and bin width $\Delta = 2$ px (`radial_bin_width`, fixed), bin $b(p) = \lfloor r(p)/\Delta \rfloor$; each frame is projected to masked bin means $\bar y_b = \sum_{p\in b} m(p)\,y(p) / \max(\sum_{p\in b} m(p), 1)$, and the running statistics live on the bins. Per pixel, $\mu_{\text{rad}}(p) = \mu_{b(p)}$ and $\sigma^2_{\text{rad}}(p) = \hat\sigma^2_{b(p)}\,N_{b(p)}$ with $N_b$ the bin's pixel count (the variance of a bin *mean* re-inflated to a single pixel).
+- Radial (`_radial.py`): with $r(p)$ the lab-frame radius of pixel $p$ from the beam centre in pixels and bin width $\Delta = 2$ px (`RADIAL_BIN_WIDTH`), bin $b(p) = \lfloor r(p)/\Delta \rfloor$; each frame is projected to masked bin means $\bar y_b = \sum_{p\in b} m(p)\,y(p) / \max(\sum_{p\in b} m(p), 1)$, and the running statistics live on the bins. Per pixel, $\mu_{\text{rad}}(p) = \mu_{b(p)}$ and $\sigma^2_{\text{rad}}(p) = \hat\sigma^2_{b(p)}\,N_{b(p)}$ with $N_b$ the bin's pixel count (the variance of a bin *mean* re-inflated to a single pixel).
 - Frame-wide (`_panel.py`): the same construction with one bin per geometry panel (`_panel_boxes`, `probixi.py`), or a single bin covering the frame when the geometry has one panel.
 
 ### 1.3 Robust update and dead pixels
@@ -38,7 +38,7 @@ $$
 \tilde x(p) = \min\!\big(x(p),\ \mu_{\text{pix}}(p) + k_r\,\sigma_{\text{pix}}(p)\big), \qquad k_r = 5 \ (\texttt{robust\_k}, \text{fixed}),
 $$
 
-applied once $n \ge 4$ frames (`robust_min_frames`). After `warmup_frames` (default 16) any pixel whose variance is still exactly zero is declared dead: $m(p) \leftarrow m(p) \wedge [\hat\sigma^2_{\text{pix}}(p) > 0]$ (`commit_dead_pixel_mask`). The a-priori part of $m$ comes from the geometry (bad regions, panel edges, `max_adu`) and is later ANDed with the shadow (§2.1) and beam-stop (§2.8) exclusions.
+applied once $n \ge 4$ frames (`ROBUST_MIN_FRAMES`). After `warmup_frames` (default 16) any pixel whose variance is still exactly zero is declared dead: $m(p) \leftarrow m(p) \wedge [\hat\sigma^2_{\text{pix}}(p) > 0]$ (`commit_dead_pixel_mask`). The a-priori part of $m$ comes from the geometry (bad regions, panel edges, `max_adu`) and is later ANDed with the shadow (§2.1) and beam-stop (§2.7) exclusions.
 
 ### 1.4 The blended prediction
 
@@ -96,11 +96,7 @@ falling back to $v_r = 0$, $g = \operatorname{med}_b(\bar\sigma^2_b/\bar\mu_b)$ 
 
 Unless `--flux-variance` or `--no-flux-variance` is given, calibration decides (`background_fluctuation_ratio`, `calibrate.py`). The running variance $\sigma_0^2$ also holds every shot-to-shot change of the level, which the per-frame local background removes again, so on the brightest quarter of the background, in up to 16 seed frames, the median of $\sigma_0^2/\ell_{\sigma^2}$ against the frame's own local variance is $\approx 1$ for a steady exposure and $1 + \operatorname{var}(s)\,N_\gamma$ for a level scaling by $s$ between shots on $N_\gamma$ background photons. Above 1.5 the photon-transfer model is used ([values per dataset](../vignettes/variable_flux.md#automatic-selection-of-the-flux-model)).
 
-### 2.5 Eigen-background (optional)
-
-With `eigen_modes` $= r > 0$, the two-sided clipped residuals $R_f = \text{clip}(x_f - \mu_{\text{pix}}, \pm 4\sigma_{\text{pix}})\,m$ over the seed frames are column-centred and the top-$r$ eigenvectors $U_\rho$ of $R R^\top$ are lifted to pixel space and unit-normalised (`fit_eigen_background`). At run time the model mean is corrected per frame by the projection $\mu_0 \leftarrow \mu_0 + \sum_\rho \langle U_\rho, \min(x - \mu_0, 5\sigma_0)\,m\rangle\,U_\rho$. Off by default.
-
-### 2.6 The detection threshold
+### 2.5 The detection threshold
 
 The detection statistic $T$ of §3.4 is not $\mathcal N(0,1)$ under background even when $z$ is: the maximum over scales biases its body and spatial correlation fattens its tail. Both are measured (`calibrate_threshold`, `calibrate.py`). Pooling up to $10^6$ background values of $T$ over the seed frames,
 
@@ -116,15 +112,15 @@ $$
 
 i.e. the lowest threshold at which a signal-free frame yields at most $N_{\text{noise}}$ spurious blobs. Hit-only input has no quiet frame; the counts are then taken on the mirrored statistic $-\min_k \text{MF}_k$ over all seed frames, which positive signal never populates and symmetric noise populates as often as $T$ (the lower half by $\max T$ remains the fallback when even the lowest grid value leaves fewer than $N_{\text{noise}}$ mirrored blobs, i.e. strongly skewed low-count noise). If no grid value achieves this, $\tau$ pins at the grid maximum 8.0; the usual cause is unmodelled structure such as the shadows of §2.1.
 
-### 2.7 Frame level and the blank-shot screen
+### 2.6 Frame level and the blank-shot screen
 
 The *level* of a frame is the mean of every 97th valid pixel, $\text{lvl}(x) = \operatorname{mean}(x[0::97] \mid \text{valid})$; the run's reference level is the upper median of the seed levels. The level is a mean rather than a median because photon-counting detectors near one photon per pixel pin a median of integer counts to 0 or 1, and a screen on that median withholds every frame slightly dimmer than the reference. A frame with $\text{lvl}(x) < 0.1\,\text{ref}$ (`frame_screen_frac`) is a blank shot: it is still scored but never folded into the running statistics, which would otherwise drift down towards empty frames.
 
-### 2.8 Beam-stop exclusion
+### 2.7 Beam-stop exclusion
 
 After the threshold is set, the calibrated finder runs on up to 200 seed frames and the $|\mathbf q|$ of every peak is histogrammed in 40 bins against the number of live pixels per bin. At least 200 peaks are required. A peak density in the two innermost populated bins exceeding 50 times the median density identifies the beam-stop halo. $q_{\min}$ is set at the outer edge of that spike, extending while the density stays above 10% of the spike and by at most two bins, provided at least 5% of the peaks fall inside. Pixels with $|\mathbf q| < q_{\min}$ are removed from $m$ (`_infer_beamstop_qmin`, `_beamstop_qmin_from_histogram`).
 
-### 2.9 Per-frame scale
+### 2.8 Per-frame scale
 
 For every frame a relative fluence is estimated by weighted least squares of the frame against the model on a fixed random subset $I$ of $40\,000$ live pixels, weights $1/\sigma_0^2$, after discarding pixels above $\mu_0 + 5\sigma_0$ (`ScaleReference.estimate`, `noise/scale.py`):
 
@@ -181,7 +177,7 @@ $$
 \text{MF}_k(p) = \frac{\sum_q u_k(q-p)\,m(q)\,z(q)}{\sqrt{\sum_q u_k(q-p)^2\,m(q)}}, \qquad T(p) = \max_k \text{MF}_k(p) .
 $$
 
-A pixel is a detection when $T(p) > \tau$ with the learned $\tau$ of §2.6. Detections are grouped into 8-connected blobs (`label_connected_components`); a frame with more blobs than one per 1000 frame pixels, and at least 1000 (`max_peaks`), is treated as empty.
+A pixel is a detection when $T(p) > \tau$ with the learned $\tau$ of §2.5. Detections are grouped into 8-connected blobs (`label_connected_components`); a frame with more blobs than one per 1000 frame pixels, and at least 1000 (`max_peaks`), is treated as empty.
 
 ### 3.5 Blob statistics and filters
 
@@ -333,7 +329,7 @@ where $r_{\text{size}} = 5\times10^{-5}\ \text{Å}^{-1}$ is the domain-size term
 
 ### 7.1 Learning the aperture
 
-Integration radii are not configured. They are read off the data once, after calibration (`_learn_integration_radii`, `probixi.py`). Peaks from a seeded random sample of frames (more than 32 frames and at least 200 peaks, or 4000 peaks under `--aperture auto`, from at most 512 frames outside the seed set) are stacked into a radial profile of the excess (`radial_profile`, `indexer/integrate.py`): for ring $b = \operatorname{round}\sqrt{\delta r^2 + \delta c^2} \le 16$ around each peak centroid, $\bar E_i(b)$ is the mean excess on that ring and
+Integration radii are not configured. They are read off the data once, after calibration (`_learn_integration_radii`, `probixi.py`). Peaks from a seeded random sample of frames (more than 32 frames and at least 200 peaks, or 4000 peaks under `--aperture auto`, from at most 512 frames outside the seed set) are stacked into a radial profile of the excess (`ring_sums`, `indexer/integrate.py`): for ring $b = \operatorname{round}\sqrt{\delta r^2 + \delta c^2} \le 16$ around each peak centroid, $\bar E_i(b)$ is the mean excess on that ring and
 
 $$
 P(b) = \operatorname{med}_i\,\bar E_i(b), \qquad p(b) = P(b) - \min_b P(b), \qquad b = 0, \dots, 16 .
@@ -415,7 +411,7 @@ An enrichment near 1 is a lattice indistinguishable from chance; `--enrich-gate`
 
 ### 7.5 Resolution limit and profile radius
 
-The crystal's diffraction limit is the more generous of two estimates. The first is the second-highest $|\mathbf q|$ among its indexed peaks, so that one hot pixel or noise peak that a dense high-resolution lattice indexes by chance cannot set it. The second is where its shell-averaged $I/\sigma$ falls to 0.5 (`falloff_resolution_limit`, `resolution_isigma`), with predicted reflections sorted by $|\mathbf q|$ into 10 equal-count shells and the crossing interpolated linearly between the two shells that bracket it. With fewer than 40 reflections, or when not even the innermost shell reaches 0.5, the second estimate is skipped, and when neither exists the 0.90 quantile of the observed peaks' $|\mathbf q|$ is used. It is reported (`diffraction_resolution_limit`, nm$^{-1}$) but never used to truncate the reflection list. The `profile_radius` is the rocking half-width of §6 evaluated at that limit, $R(q_{\text{lim}})$, converted to nm$^{-1}$ and clamped to $[5\times10^{-4}, 2\times10^{-2}]$.
+The crystal's diffraction limit is the more generous of two estimates. The first is the second-highest $|\mathbf q|$ among its indexed peaks, so that one hot pixel or noise peak that a dense high-resolution lattice indexes by chance cannot set it. The second is where its shell-averaged $I/\sigma$ falls to 0.5 (`falloff_resolution_limit`, `resolution_isigma`), with predicted reflections sorted by $|\mathbf q|$ into 10 equal-count shells and the crossing interpolated linearly between the two shells that bracket it. With fewer than 40 reflections, or when not even the innermost shell reaches 0.5, the second estimate is skipped. It is reported (`diffraction_resolution_limit`, nm$^{-1}$) but never used to truncate the reflection list. The `profile_radius` is the rocking half-width of §6 evaluated at that limit, $R(q_{\text{lim}})$, converted to nm$^{-1}$ and clamped to $[5\times10^{-4}, 2\times10^{-2}]$.
 
 ## 8. Output contents
 
@@ -432,7 +428,7 @@ Per frame: the peak list (fs, ss, $10|\mathbf q|$ in nm$^{-1}$, $I_B$), `hit = [
 
 A disk touching the mask, the frame edge or another predicted disk is not written; it stays in the database with `n_pixels_total`, `n_masked` and `n_overlap`.
 
-The stream carries nothing CrystFEL does not read. The DuckDB output holds the recipe the run actually used in `integration` ($r_{\text{sig}}, r_{\text{in}}, r_{\text{out}}$; $g$, the measured gain when the flux model is on, else the geometry's; $n_{\text{bg}}$; the aperture rule), the per-crystal diagnostics (`rmsd`, `mosaicity_deg`, `enrichment`, `enrich_p` on `crystals`, `scale` $= s \pm \sigma_s$ of §2.9 on `frames`), and per reflection `n_pixels` $= n_i$, `background_model` $= \sum_{\mathcal U_i}\mu_{\text{eff}}$ (ADU) and `background_model_var` $= \tfrac{n_i}{n_{\text{bg}}}\sum_{\mathcal U_i}V_p$ (ADU$^2$); `peaks` carries `photons` $= (I_B + \text{bg})/g$ and `background_photons` $= \text{bg}/g$ for every searched peak.
+The stream carries nothing CrystFEL does not read. The DuckDB output holds the recipe the run actually used in `integration` ($r_{\text{sig}}, r_{\text{in}}, r_{\text{out}}$; $g$, the measured gain when the flux model is on, else the geometry's; $n_{\text{bg}}$; the aperture rule), the per-crystal diagnostics (`rmsd`, `mosaicity_deg`, `enrichment`, `enrich_p` on `crystals`, `scale` $= s \pm \sigma_s$ of §2.8 on `frames`), and per reflection `n_pixels` $= n_i$, `background_model` $= \sum_{\mathcal U_i}\mu_{\text{eff}}$ (ADU) and `background_model_var` $= \tfrac{n_i}{n_{\text{bg}}}\sum_{\mathcal U_i}V_p$ (ADU$^2$); `peaks` carries `photons` $= (I_B + \text{bg})/g$ and `background_photons` $= \text{bg}/g$ for every searched peak.
 
 ## 9. Inputs to Poisson merging
 
@@ -451,7 +447,7 @@ The ring pair is the CrystFEL convention (torchsx `--background annulus`); the m
 | symbol | meaning | units | where |
 |---|---|---|---|
 | $x_f, x(p)$ | raw frame, pixel value | ADU | §0 |
-| $m(p)$ | live-pixel mask (geometry, dead, shadow, beam stop) | | §1.3, §2.1, §2.8 |
+| $m(p)$ | live-pixel mask (geometry, dead, shadow, beam stop) | | §1.3, §2.1, §2.7 |
 | $\mu_k, \sigma^2_k$ | running mean and variance of view $k \in \{\text{pix}, \text{rad}, \text{frame}\}$ | ADU, ADU$^2$ | §1.1–1.2 |
 | $w_k$, $s_v$ | learned blend weights and variance scale | | §2.2 |
 | $\mu_0, \sigma_0^2$ | blended model prediction | ADU, ADU$^2$ | §1.4 |
@@ -461,10 +457,10 @@ The ring pair is the CrystFEL convention (torchsx `--background annulus`); the m
 | $\ell_\mu, \ell_{\sigma^2}$ | local annulus mean and variance of the residual | ADU, ADU$^2$ | §3.1 |
 | $\mu_{\text{eff}}, \sigma^2_{\text{eff}} (= V)$ | effective per-frame background model | ADU, ADU$^2$ | §3.1 |
 | $E, z$ | excess and whitened excess | ADU, | §3.2 |
-| $\text{MF}_k, T, \tau$ | matched-filter response at scale $k$, its maximum, learned threshold | $\sigma$ | §3.4, §2.6 |
-| $\mu_T, \sigma_T$ | null body of $T$ | | §2.6 |
+| $\text{MF}_k, T, \tau$ | matched-filter response at scale $k$, its maximum, learned threshold | $\sigma$ | §3.4, §2.5 |
+| $\mu_T, \sigma_T$ | null body of $T$ | | §2.5 |
 | $I_B, R_B, n_B$ | blob excess sum, response, size | ADU, $\sigma$, px | §3.5 |
-| $s, \sigma_s$ | per-frame scale and its uncertainty | | §2.9 |
+| $s, \sigma_s$ | per-frame scale and its uncertainty | | §2.8 |
 | $\mathbf q, \lambda, L, p$ | scattering vector, wavelength, camera length, pixel size | Å$^{-1}$, Å, Å, Å | §4.1 |
 | $\mathbf A = \mathbf U\mathbf B$, $\mathbf h$ | orientation matrix, reciprocal basis, Miller indices | Å$^{-1}$ | §4.2 |
 | $q_{\text{tol}}$ | reciprocal tolerance, $0.25\min\lvert\mathbf a^*, \mathbf b^*, \mathbf c^*\rvert$ | Å$^{-1}$ | §4.3 |
