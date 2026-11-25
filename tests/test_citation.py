@@ -69,4 +69,6 @@ def test_asset_and_pyproject_versions_agree():
     pyproject = (ROOT / "pyproject.toml").read_text()
     py_version = re.search(r'(?m)^version\s*=\s*"([^"]+)"', pyproject).group(1)
 
-    assert re.search(r"version\s*=\s*\{([^}]*)\}", BIB.read_text()).group(1) == py_version
+    assert (
+        re.search(r"version\s*=\s*\{([^}]*)\}", BIB.read_text()).group(1) == py_version
+    )
