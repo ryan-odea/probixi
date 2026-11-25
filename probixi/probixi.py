@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import math
 import random
+import re
 import threading
 import warnings
 from collections.abc import Sized
@@ -42,6 +43,7 @@ from .io import (
     read_mask,
     render_frame,
 )
+from ._version import __version__
 from .io.cell import median_cell
 from .io.geometry import EV_ANGSTROM
 from .kernels import Engine, use_engine
@@ -94,12 +96,13 @@ _CLEN_MAX_ROUNDS = 3
 
 # --- BEGIN GENERATED CITATION ---
 _CITATION = r"""
-@software{odea_probixi,
-  author  = {O'Dea, Ryan and Kepa, Michal and Weinert, Tobias},
-  title   = {{probixi}: Self-Calibrating Probabilistic Peak Finding for Serial X-Ray Crystallographic Data},
-  version = {0.11.0},
-  year    = {2026},
-  url     = {https://github.com/ryan-odea/probixi}
+@inproceedings{o'dea2026probixi,
+  title     = {{PROBIXI} - Self-Calibrating ({PROB})ab(I)listic Peak Detection for Serial (X)-Ray Crystallograph(I)c Data},
+  author    = {Ryan O'Dea and Michal Kepa and Tobias Weinert},
+  booktitle = {AI for Accelerated Materials Design - NeurIPS 2026},
+  year      = {2026},
+  version   = {0.11.0},
+  url       = {https://openreview.net/forum?id=5UuCD5Qy54}
 }
 """
 # --- END GENERATED CITATION ---
@@ -149,7 +152,7 @@ def citation(timeout: float = 3.0) -> str:
     Returns
     -------
     str
-        The BibTeX entry, newline-terminated.
+        The BibTeX entry with the installed version, newline-terminated.
     """
     # urlopen's timeout applies per address tried; the daemon thread caps the total
     fetched: list[str] = []
@@ -167,6 +170,11 @@ def citation(timeout: float = 3.0) -> str:
     worker.start()
     worker.join(timeout)
     text = fetched[0] if fetched and fetched[0].strip() else _CITATION
+    text = re.sub(
+        r"(?m)^(\s*version\s*=\s*\{)[^}]*(\})",
+        lambda m: m.group(1) + __version__ + m.group(2),
+        text,
+    )
     entry = text.strip() + "\n"
     print(entry, end="")
     return entry
